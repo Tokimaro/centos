@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Albion Trader</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%227%22 fill=%22%23d9a441%22/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Albion Trader</h1>
+  <nav>
+    <button class="tab active" data-tab="deals">Сделки</button>
+    <button class="tab" data-tab="prices">Цены предмета</button>
+    <button class="tab" data-tab="status">Статус</button>
+  </nav>
+  <span id="conn" class="conn" title="Время последнего пакета от клиента">—</span>
+</header>
+
+<main>
+  <!-- Сделки -->
+  <section id="tab-deals" class="panel active">
+    <form id="filters" class="filters" autocomplete="off">
+      <fieldset class="locs">
+        <legend>Покупать в</legend>
+        <div id="src-list" class="checks"></div>
+      </fieldset>
+      <fieldset class="locs">
+        <legend>Продавать в</legend>
+        <div id="dst-list" class="checks"></div>
+      </fieldset>
+      <fieldset class="opts">
+        <legend>Параметры</legend>
+        <label>Покупка
+          <select name="buy">
+            <option value="instant">мгновенно (из предложений)</option>
+            <option value="order">заказом на покупку</option>
+          </select>
+        </label>
+        <label>Продажа
+          <select name="sell">
+            <option value="instant">мгновенно (в запросы)</option>
+            <option value="order">своим предложением</option>
+          </select>
+        </label>
+        <label class="inline"><input type="checkbox" name="premium" checked> Премиум (налог 4%, без — 8%)</label>
+        <label>Свежесть данных, ч <input type="number" name="max_age" value="6" min="0.1" step="0.5"></label>
+        <label>Мин. прибыль / шт <input type="number" name="min_profit" value="1000" min="0" step="100"></label>
+        <label>Мин. маржа, % <input type="number" name="min_margin" value="5" min="0" step="1"></label>
+        <label>Мин. общая прибыль <input type="number" name="min_total" value="0" min="0" step="1000"></label>
+      </fieldset>
+      <fieldset class="opts">
+        <legend>Предметы</legend>
+        <label>Поиск <input type="search" name="q" placeholder="название или ID"></label>
+        <div class="checks small" id="tiers"></div>
+        <div class="checks small" id="enchants"></div>
+        <label class="inline"><input type="checkbox" name="auto" checked> Автообновление (30 с)</label>
+        <button type="submit" class="primary">Найти сделки</button>
+      </fieldset>
+    </form>
+    <div class="summary" id="deals-summary"></div>
+    <div class="table-wrap">
+      <table id="deals">
+        <thead><tr>
+          <th data-sort="name">Предмет</th>
+          <th data-sort="sell_quality">Кач.</th>
+          <th data-sort="source">Маршрут</th>
+          <th data-sort="buy_price" class="num">Покупка</th>
+          <th data-sort="sell_price" class="num">Продажа</th>
+          <th data-sort="unit_profit" class="num">Прибыль/шт</th>
+          <th data-sort="margin" class="num">Маржа</th>
+          <th data-sort="units" class="num">Кол-во</th>
+          <th data-sort="total_profit" class="num">Итого</th>
+          <th data-sort="investment" class="num">Вложения</th>
+          <th data-sort="daily_volume" class="num" title="Средние продажи в сутки в городе продажи (если открывали историю цен)">Объём/сут</th>
+          <th data-sort="age" class="num" title="Возраст самой старой из двух цен">Возраст</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Цены предмета -->
+  <section id="tab-prices" class="panel">
+    <form id="price-form" class="filters row" autocomplete="off">
+      <label class="grow">Предмет
+        <input type="search" name="item" list="item-options" placeholder="начните вводить название или ID">
+        <datalist id="item-options"></datalist>
+      </label>
+      <label>Свежесть, ч <input type="number" name="max_age" value="72" min="0.1" step="1"></label>
+      <button type="submit" class="primary">Показать</button>
+    </form>
+    <h2 id="price-title"></h2>
+    <div class="table-wrap">
+      <table id="prices">
+        <thead><tr>
+          <th>Рынок</th><th>Качество</th>
+          <th class="num">Мин. продажа</th><th class="num">Шт.</th><th class="num">Возраст</th>
+          <th class="num">Макс. покупка</th><th class="num">Шт.</th><th class="num">Возраст</th>
+          <th class="num">Объём/сут</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Статус -->
+  <section id="tab-status" class="panel">
+    <div id="status"></div>
+    <h2>Как подключить клиент</h2>
+    <ol class="help">
+      <li>Установите <a href="https://github.com/ao-data/albiondata-client/releases" target="_blank" rel="noopener">albiondata-client</a> и закройте его, если он запущен (в том числе из трея).</li>
+      <li>Запустите его с параметром, указывающим на это приложение (публичный сервер при этом не используется):
+        <pre id="client-cmd"></pre></li>
+      <li>Зайдите в игру и открывайте рынки нужных городов и Чёрного рынка. Каждый просмотр страницы рынка сохраняется здесь.</li>
+      <li>Чтобы видеть объёмы продаж, открывайте у предметов вкладку истории цен (график).</li>
+    </ol>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

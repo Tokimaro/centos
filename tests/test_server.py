@@ -1,0 +1,87 @@
+import json
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+from albion_trader.server import App, AppConfig, make_handler
+
+
+class ServerTest(unittest.TestCase):
+    token = ""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.app = App(AppConfig(db_path=d / "m.db", items_path=d / "items.json", token=self.token))
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.tmp.cleanup()
+
+    def post(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.load(r)
+
+    def get(self, path):
+        with urllib.request.urlopen(self.base + path) as r:
+            return json.load(r)
+
+    def orders(self):
+        mk = lambda i, loc, typ, price: {
+            "Id": i, "ItemTypeId": "T5_BAG", "LocationId": loc, "QualityLevel": 1,
+            "EnchantmentLevel": 0, "UnitPriceSilver": price * 10000, "Amount": 2,
+            "AuctionType": typ, "Expires": "2099-01-01T00:00:00"}
+        return {"Orders": [mk(1, "0007", "offer", 1000), mk(2, "3003", "request", 5000)]}
+
+
+class OpenServerTest(ServerTest):
+    def test_ingest_then_deals(self):
+        status, body = self.post("/marketorders.ingest", self.orders())
+        self.assertEqual((status, body["saved"]), (200, 2))
+        deals = self.get("/api/deals?max_age=1")
+        self.assertEqual(deals["count"], 1)
+        d = deals["deals"][0]
+        self.assertEqual((d["source"], d["destination"]), ("thetford", "black_market"))
+        self.assertEqual(d["tier"], 5)
+        prices = self.get("/api/prices?item=T5_BAG")
+        self.assertEqual(len(prices["rows"]), 2)
+        status_info = self.get("/api/status")
+        self.assertEqual(status_info["total_orders"], 2)
+        self.assertEqual(self.get("/api/items?q=t5")["items"][0]["item_id"], "T5_BAG")
+
+    def test_static_and_404(self):
+        with urllib.request.urlopen(self.base + "/") as r:
+            self.assertIn(b"Albion Trader", r.read())
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(self.base + "/../server.py")
+        self.assertEqual(cm.exception.code, 404)
+
+    def test_other_topics_accepted(self):
+        status, body = self.post("/goldprices.ingest", {"Prices": [5000], "Timestamps": [1800000000]})
+        self.assertEqual((status, body["saved"]), (200, 1))
+
+
+class TokenServerTest(ServerTest):
+    token = "s3cret"
+
+    def test_token_required(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.post("/marketorders.ingest", self.orders())
+        self.assertEqual(cm.exception.code, 403)
+        status, body = self.post("/s3cret/marketorders.ingest", self.orders())
+        self.assertEqual(body["saved"], 2)
+        self.assertEqual(self.get("/api/status")["ingest_path"], "/s3cret")
+
+
+if __name__ == "__main__":
+    unittest.main()
