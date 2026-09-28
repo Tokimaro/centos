@@ -106,3 +106,17 @@ a { color: var(--accent); }
   main { padding: 16px; }
   header { padding: 10px 16px; }
 }
+
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button.secondary {
+  background: none; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px;
+  padding: 7px 12px; cursor: pointer; margin-top: 8px;
+}
+.intro { margin: 0 0 12px; }
+td.best { color: var(--good); font-weight: 600; }
+td.base { outline: 1px dashed var(--muted); outline-offset: -3px; }
+.sub { display: block; color: var(--muted); font-size: 11px; font-weight: normal; }
+code { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+details { margin-top: 12px; }
+summary { cursor: pointer; color: var(--muted); }
+.conn.bad { color: var(--bad); }

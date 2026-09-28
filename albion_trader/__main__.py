@@ -11,13 +11,14 @@ from pathlib import Path
 
 from . import db
 from .items import download_catalog
-from .server import AppConfig, serve
+from .capture.sniffer import Sniffer, read_pcap
+from .server import App, AppConfig, serve
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="albion_trader",
-        description="Локальный анализатор рынка Albion Online (данные только от вашего клиента).")
+        description="Локальный анализатор рынка Albion Online со встроенным сборщиком данных.")
     parser.add_argument("--data-dir", default=os.environ.get("ALBION_TRADER_DATA", "data"),
                         help="каталог для базы и справочников (по умолчанию ./data)")
     sub = parser.add_subparsers(dest="cmd")
@@ -30,7 +31,12 @@ def main(argv=None) -> int:
                          help="секрет в пути приёма данных; 'auto' — сгенерировать")
     p_serve.add_argument("--retention-hours", type=float, default=72,
                          help="сколько хранить не обновлявшиеся заказы (по умолчанию 72 ч)")
+    p_serve.add_argument("--no-capture", action="store_true",
+                         help="не запускать встроенный сборщик (данные только по HTTP от внешнего клиента)")
     p_serve.add_argument("-v", "--verbose", action="store_true")
+
+    p_replay = sub.add_parser("replay", help="загрузить данные из записи трафика (.pcap)")
+    p_replay.add_argument("pcap", help="файл .pcap (например, из Wireshark)")
 
     sub.add_parser("update-items", help="скачать названия предметов (RU/EN) из ao-bin-dumps")
 
@@ -41,6 +47,7 @@ def main(argv=None) -> int:
     data_dir = Path(args.data_dir)
     db_path = data_dir / "market.db"
     items_path = data_dir / "items.json"
+    opcodes_path = data_dir / "opcodes.json"
 
     cmd = args.cmd or "serve"
     if cmd == "serve":
@@ -57,13 +64,29 @@ def main(argv=None) -> int:
                 data_dir.mkdir(parents=True, exist_ok=True)
                 token_file.write_text(token)
         config = AppConfig(db_path=db_path, items_path=items_path, token=token,
-                           retention_hours=getattr(args, "retention_hours", 72))
+                           retention_hours=getattr(args, "retention_hours", 72),
+                           capture=not getattr(args, "no_capture", False),
+                           opcodes_path=opcodes_path)
         serve(config, getattr(args, "host", "127.0.0.1"), getattr(args, "port", 8484))
         return 0
     if cmd == "update-items":
         print("Скачиваю справочник предметов…")
         n = download_catalog(items_path)
         print(f"Готово: {n} предметов -> {items_path}")
+        return 0
+    if cmd == "replay":
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+        app = App(AppConfig(db_path=db_path, items_path=items_path, capture=False,
+                            opcodes_path=opcodes_path))
+        sniffer = app.sniffer = Sniffer(app.albion)
+        for packet in read_pcap(args.pcap):
+            sniffer.feed_ip_packet(packet)
+        st = app.capture_status()
+        print(f"Пакетов Albion: {st['packets']}, пакетов заказов: {st['order_batches']} "
+              f"({st['orders']} заказов), историй: {st['history_batches']}, "
+              f"последняя локация: {st['location'] or 'не определена'}")
+        if st["encrypted_at"]:
+            print("Внимание: данные рынка в записи зашифрованы.")
         return 0
     if cmd == "cleanup":
         db.init_db(db_path)

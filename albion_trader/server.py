@@ -15,9 +15,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import db
-from .deals import DealParams, find_deals, price_table
+from .deals import TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, fast_sell_table, find_deals, price_table
+from .capture.albion import AlbionState, load_opcodes
+from .capture.sniffer import Sniffer
 from .items import ItemCatalog, enchant_of, tier_of
-from .locations import DEFAULT_CITIES, MARKETS, market_info
+from .locations import DEFAULT_CITIES, MARKETS, market_info, normalize_location
 
 log = logging.getLogger("albion_trader")
 
@@ -33,6 +35,8 @@ class AppConfig:
     token: str = ""
     retention_hours: float = 72
     cleanup_interval: int = 600
+    capture: bool = True
+    opcodes_path: Path | None = None
 
 
 class App:
@@ -41,6 +45,23 @@ class App:
         db.init_db(config.db_path)
         self.catalog = ItemCatalog.load(config.items_path)
         self.write_lock = threading.Lock()
+        self.albion = AlbionState(self.ingest, load_opcodes(config.opcodes_path))
+        self.sniffer: Sniffer | None = None
+
+    def start_capture(self, open_sockets=None) -> bool:
+        kwargs = {"open_sockets": open_sockets} if open_sockets else {}
+        self.sniffer = Sniffer(self.albion, **kwargs)
+        return self.sniffer.start()
+
+    def capture_status(self) -> dict:
+        st = dict(self.albion.stats)
+        if self.sniffer is None:
+            st.update(enabled=False, running=False, error=None, packets=0, last_packet_at=None)
+        else:
+            st.update(enabled=True, **self.sniffer.status)
+        loc = st.get("location")
+        st["location_name"] = market_info(normalize_location(loc))["name"] if loc else None
+        return st
 
     @contextmanager
     def conn(self):
@@ -83,6 +104,7 @@ class App:
             "now": int(time.time()), "topics": topics, "locations": per_loc,
             "total_orders": total, "history_points": history,
             "items_catalog": len(self.catalog),
+            "capture": self.capture_status(),
             "ingest_path": f"/{self.config.token}" if self.config.token else "",
         }
 
@@ -136,6 +158,32 @@ class App:
         return {"now": now, "count": len(deals), "deals": out,
                 "tax": params.sales_tax, "setup_fee": params.setup_fee}
 
+    def api_fastsell(self, q) -> dict:
+        now = int(time.time())
+        max_age = _float(q.get("max_age"), 6)
+        locs = _split(q.get("locs")) or DEFAULT_CITIES + ["black_market"]
+        base = q.get("base") or None
+        if q.get("tax"):
+            tax = _float(q.get("tax"), 0) / 100
+        else:
+            tax = TAX_PREMIUM if q.get("premium", "1") != "0" else TAX_NO_PREMIUM
+        with self.conn() as conn:
+            orders = db.load_orders(conn, now - int(max_age * 3600), locs, now)
+            volumes = db.load_daily_volumes(conn, self.catalog.index, now)
+        ok = self._item_filter(q)
+        orders = [o for o in orders if o["auction_type"] == "request" and ok(o["item_id"])]
+        rows = fast_sell_table(orders, locs, tax, base, int(_float(q.get("min_markets"), 2)))
+        min_gain = _float(q.get("min_gain"), 0)
+        key = "gain_vs_base" if base else "spread"
+        rows = [r for r in rows if (r[key] or 0) >= min_gain]
+        lang = q.get("lang", "ru")
+        limit = int(_float(q.get("limit"), 300))
+        for r in rows[:limit]:
+            r["name"] = self.catalog.name(r["item_id"], lang)
+            r["daily_volume"] = volumes.get((r["item_id"], r["best_location"], r["quality"]))
+        return {"now": now, "count": len(rows), "tax": tax, "locations": locs, "base": base,
+                "rows": rows[:limit]}
+
     def api_prices(self, q) -> dict:
         item_id = (q.get("item") or "").strip()
         now = int(time.time())
@@ -181,6 +229,7 @@ def make_handler(app: App):
         "/api/status": app.api_status,
         "/api/deals": app.api_deals,
         "/api/prices": app.api_prices,
+        "/api/fastsell": app.api_fastsell,
         "/api/items": app.api_items,
     }
 
@@ -267,13 +316,17 @@ def _cleanup_loop(app: App, stop: threading.Event):
 def serve(config: AppConfig, host: str, port: int) -> None:
     app = App(config)
     app.cleanup()
+    if config.capture:
+        app.start_capture()
     httpd = ThreadingHTTPServer((host, port), make_handler(app))
     stop = threading.Event()
     threading.Thread(target=_cleanup_loop, args=(app, stop), daemon=True).start()
     base = f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}"
     ingest_url = base + (f"/{config.token}" if config.token else "")
     log.info("Интерфейс:           %s", base)
-    log.info("Адрес для клиента:   albiondata-client -i %s", ingest_url)
+    if app.sniffer and app.sniffer.status["running"]:
+        log.info("Встроенный сборщик работает — откройте рынок в игре.")
+    log.info("Внешний клиент (необязательно): albiondata-client -i %s", ingest_url)
     if not len(app.catalog):
         log.info("Названия предметов не загружены: python -m albion_trader update-items")
     try:
@@ -282,4 +335,6 @@ def serve(config: AppConfig, host: str, port: int) -> None:
         pass
     finally:
         stop.set()
+        if app.sniffer:
+            app.sniffer.stop()
         httpd.server_close()

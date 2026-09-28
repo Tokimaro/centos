@@ -221,3 +221,54 @@ def price_table(orders: list[dict]) -> list[dict]:
                 r["buy_max"], r["buy_seen_at"] = o["price"], o["seen_at"]
             r["buy_amount"] += o["amount"]
     return sorted(rows.values(), key=lambda r: (r["location"], r["quality"]))
+
+
+def fast_sell_table(orders: list[dict], locations, tax: float, base: str | None = None,
+                    min_markets: int = 2) -> list[dict]:
+    """Сравнение только по ценам быстрой продажи (лучшие запросы на покупку).
+
+    Для предмета качества Q подходит любой запрос качества ≤ Q, поэтому цена
+    быстрой продажи на рынке — максимум среди таких запросов. Строки строятся
+    для качеств, по которым есть хотя бы один запрос.
+    """
+    locations = list(locations)
+    wanted = set(locations)
+    # (item, loc) -> {quality: (price, amount, seen_at)} — лучший запрос каждого качества
+    best: dict[tuple, dict[int, tuple]] = defaultdict(dict)
+    qualities: dict[str, set] = defaultdict(set)
+    for o in orders:
+        if o["auction_type"] != "request" or o["location"] not in wanted:
+            continue
+        cur = best[(o["item_id"], o["location"])].get(o["quality"])
+        if cur is None or o["price"] > cur[0]:
+            best[(o["item_id"], o["location"])][o["quality"]] = (o["price"], o["amount"], o["seen_at"])
+        qualities[o["item_id"]].add(o["quality"])
+
+    rows = []
+    for item_id, qs in qualities.items():
+        for q in sorted(qs):
+            cells = {}
+            for loc in locations:
+                cands = [(v, k) for k, v in best.get((item_id, loc), {}).items() if k <= q]
+                if cands:
+                    (price, amount, seen), from_q = max(cands, key=lambda c: c[0][0])
+                    cells[loc] = {"price": price, "net": round(price * (1 - tax), 2),
+                                  "amount": amount, "seen_at": seen, "quality": from_q}
+            if len(cells) < min_markets:
+                continue
+            ranked = sorted(cells.items(), key=lambda kv: -kv[1]["price"])
+            best_loc, top = ranked[0]
+            worst = ranked[-1][1]
+            second = ranked[1][1] if len(ranked) > 1 else None
+            base_cell = cells.get(base) if base else None
+            rows.append({
+                "item_id": item_id, "quality": q, "cells": cells,
+                "best_location": best_loc, "best_price": top["price"], "best_net": top["net"],
+                "gain_vs_second": round(top["net"] - second["net"], 2) if second else 0,
+                "spread": round(top["net"] - worst["net"], 2),
+                "spread_pct": round((top["price"] - worst["price"]) / worst["price"] * 100, 2),
+                "gain_vs_base": (round(top["net"] - base_cell["net"], 2) if base_cell else None),
+            })
+    key = "gain_vs_base" if base else "spread"
+    rows.sort(key=lambda r: (r[key] if r[key] is not None else -1), reverse=True)
+    return rows

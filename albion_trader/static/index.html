@@ -12,10 +12,11 @@
   <h1>Albion Trader</h1>
   <nav>
     <button class="tab active" data-tab="deals">Сделки</button>
+    <button class="tab" data-tab="fastsell">Быстрая продажа</button>
     <button class="tab" data-tab="prices">Цены предмета</button>
     <button class="tab" data-tab="status">Статус</button>
   </nav>
-  <span id="conn" class="conn" title="Время последнего пакета от клиента">—</span>
+  <span id="conn" class="conn" title="Состояние встроенного сборщика">—</span>
 </header>
 
 <main>
@@ -45,7 +46,7 @@
           </select>
         </label>
         <label class="inline"><input type="checkbox" name="premium" checked> Премиум (налог 4%, без — 8%)</label>
-        <label>Свежесть данных, ч <input type="number" name="max_age" value="6" min="0.1" step="0.5"></label>
+        <label>Свежесть данных, ч <input type="number" name="max_age" value="6" min="0.1" step="any"></label>
         <label>Мин. прибыль / шт <input type="number" name="min_profit" value="1000" min="0" step="100"></label>
         <label>Мин. маржа, % <input type="number" name="min_margin" value="5" min="0" step="1"></label>
         <label>Мин. общая прибыль <input type="number" name="min_total" value="0" min="0" step="1000"></label>
@@ -56,7 +57,10 @@
         <div class="checks small" id="tiers"></div>
         <div class="checks small" id="enchants"></div>
         <label class="inline"><input type="checkbox" name="auto" checked> Автообновление (30 с)</label>
-        <button type="submit" class="primary">Найти сделки</button>
+        <div class="buttons">
+          <button type="submit" class="primary">Найти сделки</button>
+          <button type="button" class="secondary" id="preset-fastsell" title="Покупка — своим заказом по цене лучшего запроса, продажа — мгновенно в запросы: сравниваются только цены быстрой продажи">Только fast sell цены</button>
+        </div>
       </fieldset>
     </form>
     <div class="summary" id="deals-summary"></div>
@@ -81,6 +85,39 @@
     </div>
   </section>
 
+  <!-- Быстрая продажа -->
+  <section id="tab-fastsell" class="panel">
+    <p class="muted intro">Сравнение только по ценам быстрой продажи — лучшим заказам на покупку на каждом рынке.
+      Показывает, где выгоднее всего сразу сдать предмет. Предмет качества Q можно сдать в заказ качества Q и ниже.</p>
+    <form id="fs-filters" class="filters" autocomplete="off">
+      <fieldset class="locs">
+        <legend>Рынки для сравнения</legend>
+        <div id="fs-locs" class="checks"></div>
+      </fieldset>
+      <fieldset class="opts">
+        <legend>Параметры</legend>
+        <label>Мой рынок (с чем сравнивать)
+          <select name="base"><option value="">— лучший против худшего —</option></select>
+        </label>
+        <label class="inline"><input type="checkbox" name="premium" checked> Премиум (налог 4%, без — 8%)</label>
+        <label>Свежесть данных, ч <input type="number" name="max_age" value="6" min="0.1" step="any"></label>
+        <label>Мин. выгода, серебро <input type="number" name="min_gain" value="0" min="0" step="100"></label>
+        <label>Мин. рынков с ценой <input type="number" name="min_markets" value="2" min="1" max="20" step="1"></label>
+      </fieldset>
+      <fieldset class="opts">
+        <legend>Предметы</legend>
+        <label>Поиск <input type="search" name="q" placeholder="название или ID"></label>
+        <div class="checks small" id="fs-tiers"></div>
+        <div class="checks small" id="fs-enchants"></div>
+        <button type="submit" class="primary">Сравнить</button>
+      </fieldset>
+    </form>
+    <div class="summary" id="fs-summary"></div>
+    <div class="table-wrap">
+      <table id="fastsell"><thead></thead><tbody></tbody></table>
+    </div>
+  </section>
+
   <!-- Цены предмета -->
   <section id="tab-prices" class="panel">
     <form id="price-form" class="filters row" autocomplete="off">
@@ -88,7 +125,7 @@
         <input type="search" name="item" list="item-options" placeholder="начните вводить название или ID">
         <datalist id="item-options"></datalist>
       </label>
-      <label>Свежесть, ч <input type="number" name="max_age" value="72" min="0.1" step="1"></label>
+      <label>Свежесть, ч <input type="number" name="max_age" value="72" min="0.1" step="any"></label>
       <button type="submit" class="primary">Показать</button>
     </form>
     <h2 id="price-title"></h2>
@@ -108,14 +145,18 @@
   <!-- Статус -->
   <section id="tab-status" class="panel">
     <div id="status"></div>
-    <h2>Как подключить клиент</h2>
+    <h2>Как собирать данные</h2>
     <ol class="help">
-      <li>Установите <a href="https://github.com/ao-data/albiondata-client/releases" target="_blank" rel="noopener">albiondata-client</a> и закройте его, если он запущен (в том числе из трея).</li>
-      <li>Запустите его с параметром, указывающим на это приложение (публичный сервер при этом не используется):
-        <pre id="client-cmd"></pre></li>
-      <li>Зайдите в игру и открывайте рынки нужных городов и Чёрного рынка. Каждый просмотр страницы рынка сохраняется здесь.</li>
+      <li>Приложение само читает сетевой трафик игры — сторонние программы не нужны. В Windows запускайте его от имени администратора (<code>start.bat</code> попросит сам) и разрешите Python доступ в брандмауэре.</li>
+      <li>После запуска приложения смените зону в игре (выйдите из города и зайдите обратно), чтобы сборщик узнал, где вы находитесь.</li>
+      <li>Открывайте рынки нужных городов и Чёрного рынка. Каждая просмотренная страница рынка сохраняется здесь.</li>
       <li>Чтобы видеть объёмы продаж, открывайте у предметов вкладку истории цен (график).</li>
     </ol>
+    <details>
+      <summary>Внешний albiondata-client (необязательно)</summary>
+      <p>Если встроенный сборщик не работает на вашей системе, можно по-прежнему отправлять данные из albiondata-client только сюда:</p>
+      <pre id="client-cmd"></pre>
+    </details>
   </section>
 </main>
 

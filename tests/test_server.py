@@ -85,3 +85,17 @@ class TokenServerTest(ServerTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FastSellApiTest(ServerTest):
+    def test_fastsell_endpoint(self):
+        self.post("/marketorders.ingest", self.orders())
+        mk = {"Id": 9, "ItemTypeId": "T5_BAG", "LocationId": "0007", "QualityLevel": 1,
+              "UnitPriceSilver": 3000 * 10000, "Amount": 1, "AuctionType": "request",
+              "Expires": "2099-01-01T00:00:00"}
+        self.post("/marketorders.ingest", {"Orders": [mk]})
+        data = self.get("/api/fastsell?base=thetford&locs=thetford,black_market")
+        self.assertEqual(data["count"], 1)
+        row = data["rows"][0]
+        self.assertEqual(row["best_location"], "black_market")
+        self.assertAlmostEqual(row["gain_vs_base"], (5000 - 3000) * 0.96)

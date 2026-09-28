@@ -2,6 +2,7 @@
 
 const QUALITY = { 1: "Обычное", 2: "Хорошее", 3: "Выдающееся", 4: "Отличное", 5: "Шедевр" };
 const STORE_KEY = "albion-trader-settings";
+const FS_STORE_KEY = "albion-trader-fastsell";
 const $ = (sel, root = document) => root.querySelector(sel);
 
 let locations = [];
@@ -35,11 +36,11 @@ async function api(path, params = {}) {
   return r.json();
 }
 
-function loadSettings() {
-  try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; }
+function loadSettings(key = STORE_KEY) {
+  try { return JSON.parse(localStorage.getItem(key)) || {}; } catch { return {}; }
 }
-function saveSettings(s) {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch { /* приватный режим */ }
+function saveSettings(s, key = STORE_KEY) {
+  try { localStorage.setItem(key, JSON.stringify(s)); } catch { /* приватный режим */ }
 }
 
 // ---------- вкладки ----------
@@ -48,7 +49,9 @@ function showTab(name) {
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
   if (name === "status") loadStatus();
+  if (name === "fastsell" && !fastSellLoaded) loadFastSell();
 }
+let fastSellLoaded = false;
 
 // ---------- фильтры ----------
 function checkboxList(container, name, items, checked) {
@@ -100,7 +103,14 @@ async function init() {
   checkboxList($("#tiers"), "tier", [2, 3, 4, 5, 6, 7, 8].map((t) => ({ value: String(t), label: `T${t}` })), s.tiers || []);
   checkboxList($("#enchants"), "enchant", [0, 1, 2, 3, 4].map((e) => ({ value: String(e), label: `.${e}` })), s.enchants || []);
   applySettings(s);
+  initFastSell(data);
 
+  $("#preset-fastsell").addEventListener("click", () => {
+    const f = $("#filters");
+    f.buy.value = "order";
+    f.sell.value = "instant";
+    loadDeals();
+  });
   $("#filters").addEventListener("submit", (e) => { e.preventDefault(); loadDeals(); });
   $("#filters").addEventListener("change", () => { saveSettings(readFilters()); scheduleAuto(); });
   $("#price-form").addEventListener("submit", (e) => { e.preventDefault(); loadPrices(); });
@@ -229,11 +239,21 @@ async function loadPrices() {
 async function refreshConn() {
   try {
     const s = await api("/api/status");
-    const t = s.topics.find((x) => x.topic === "marketorders.ingest");
+    const c = s.capture;
     const el = $("#conn");
-    if (!t) { el.textContent = "клиент ещё не присылал данные"; el.className = "conn"; return; }
-    el.textContent = `последние данные: ${age(t.last_at, s.now)} назад`;
-    el.className = "conn " + (s.now - t.last_at < 600 ? "ok" : "old");
+    const t = s.topics.find((x) => x.topic === "marketorders.ingest");
+    const last = t ? `, данные ${age(t.last_at, s.now)} назад` : "";
+    if (c.enabled && c.error) {
+      el.textContent = `сборщик: ошибка — ${c.error}`; el.className = "conn bad";
+    } else if (c.enabled && c.running) {
+      const enc = c.encrypted_at && s.now - c.encrypted_at < 600;
+      const loc = c.location_name ? ` · ${c.location_name}` : " · локация не определена";
+      el.textContent = `сборщик работает${loc}${last}${enc ? " · данные рынка зашифрованы игрой" : ""}`;
+      el.className = "conn " + (enc ? "bad" : t && s.now - t.last_at < 600 ? "ok" : "old");
+    } else {
+      el.textContent = t ? `сборщик выключен${last}` : "сборщик выключен, данных нет";
+      el.className = "conn old";
+    }
   } catch { /* сервер недоступен */ }
 }
 
@@ -247,8 +267,15 @@ async function loadStatus() {
       <td class="num ${ageClass(r.last_seen, s.now)}">${age(r.last_seen, s.now)}</td></tr>`).join("");
   const topicRows = s.topics.map((t) => `<tr><td>${esc(t.topic)}</td><td class="num">${fmt(t.batches)}</td>
       <td class="num">${fmt(t.records)}</td><td class="num">${age(t.last_at, s.now)}</td></tr>`).join("");
+  const c = s.capture;
+  const capText = !c.enabled ? "выключен" : c.error ? "ошибка" : c.running ? "работает" : "остановлен";
   $("#status").innerHTML = `
+    ${c.error ? `<p class="bad">Сборщик: ${esc(c.error)}</p>` : ""}
+    ${c.encrypted_at ? `<p class="warn">Последний ответ рынка (${age(Math.round(c.encrypted_at), s.now)} назад) пришёл зашифрованным — игра сейчас не отдаёт цены в открытом виде.</p>` : ""}
     <div class="cards">
+      <div class="card"><div class="v ${c.running ? "good" : "bad"}">${capText}</div><div class="l">встроенный сборщик · пакетов игры: ${fmt(c.packets)}</div></div>
+      <div class="card"><div class="v">${esc(c.location_name || "—")}</div><div class="l">текущая локация${c.location ? "" : " — смените зону в игре"}</div></div>
+      <div class="card"><div class="v">${fmt(c.order_batches)}</div><div class="l">страниц рынка собрано (${fmt(c.orders)} заказов)</div></div>
       <div class="card"><div class="v">${fmt(s.total_orders)}</div><div class="l">заказов в базе</div></div>
       <div class="card"><div class="v">${fmt(s.history_points)}</div><div class="l">точек истории продаж</div></div>
       <div class="card"><div class="v">${s.items_catalog ? fmt(s.items_catalog) : "нет"}</div><div class="l">названий предметов${s.items_catalog ? "" : " — выполните update-items"}</div></div>
@@ -259,6 +286,90 @@ async function loadStatus() {
     <h2>Полученные пакеты</h2>
     <div class="table-wrap"><table><thead><tr><th>Топик</th><th class="num">Пакетов</th><th class="num">Записей</th><th class="num">Последний</th></tr></thead>
       <tbody>${topicRows || `<tr><td colspan="4" class="muted">Клиент ещё ничего не присылал</td></tr>`}</tbody></table></div>`;
+}
+
+// ---------- быстрая продажа ----------
+function initFastSell(data) {
+  const s = loadSettings(FS_STORE_KEY);
+  const f = $("#fs-filters");
+  checkboxList($("#fs-locs"), "fsloc",
+    locations.map((l) => ({ value: l.key, label: l.name, cls: l.kind === "black_market" ? "bm" : "" })),
+    s.locs || [...data.default_cities, "black_market"]);
+  checkboxList($("#fs-tiers"), "fstier", [2, 3, 4, 5, 6, 7, 8].map((t) => ({ value: String(t), label: `T${t}` })), s.tiers || []);
+  checkboxList($("#fs-enchants"), "fsench", [0, 1, 2, 3, 4].map((e) => ({ value: String(e), label: `.${e}` })), s.enchants || []);
+  for (const l of locations) f.base.insertAdjacentHTML("beforeend", `<option value="${esc(l.key)}">${esc(l.name)}</option>`);
+  for (const k of ["base", "max_age", "min_gain", "min_markets", "q"]) if (s[k] !== undefined) f[k].value = s[k];
+  if (s.premium !== undefined) f.premium.checked = s.premium;
+  f.addEventListener("submit", (e) => { e.preventDefault(); loadFastSell(); });
+  f.addEventListener("change", () => saveSettings(readFastSell(), FS_STORE_KEY));
+}
+
+function readFastSell() {
+  const f = $("#fs-filters");
+  const vals = (name) => [...f.querySelectorAll(`input[name=${name}]:checked`)].map((i) => i.value);
+  return {
+    locs: vals("fsloc"), tiers: vals("fstier"), enchants: vals("fsench"), base: f.base.value,
+    premium: f.premium.checked, max_age: f.max_age.value, min_gain: f.min_gain.value,
+    min_markets: f.min_markets.value, q: f.q.value,
+  };
+}
+
+async function loadFastSell() {
+  fastSellLoaded = true;
+  const f = readFastSell();
+  saveSettings(f, FS_STORE_KEY);
+  const summary = $("#fs-summary");
+  summary.textContent = "Загрузка…";
+  try {
+    const data = await api("/api/fastsell", {
+      locs: f.locs.join(","), tiers: f.tiers.join(","), enchants: f.enchants.join(","), base: f.base,
+      premium: f.premium ? 1 : 0, max_age: f.max_age, min_gain: f.min_gain, min_markets: f.min_markets,
+      q: f.q, limit: 500,
+    });
+    const shown = data.rows.length < data.count ? ` (показано ${data.rows.length})` : "";
+    summary.textContent = `Предметов: ${data.count}${shown}. Цена в ячейке — лучший заказ на покупку; «на руки» — после налога ${(data.tax * 100).toFixed(1)}%. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.`;
+    renderFastSell(data);
+  } catch (e) {
+    summary.innerHTML = `<span class="bad">Ошибка: ${esc(e.message)}</span>`;
+  }
+}
+
+function renderFastSell(data) {
+  const table = $("#fastsell");
+  const gainTitle = data.base ? `Выгода vs ${locNames[data.base] || data.base}` : "Разница лучший−худший";
+  table.querySelector("thead").innerHTML = `<tr><th>Предмет</th><th>Кач.</th>
+    ${data.locations.map((l) => `<th class="num ${l === "black_market" ? "bm" : ""}">${esc(locNames[l] || l)}</th>`).join("")}
+    <th>Лучший рынок</th><th class="num">На руки</th><th class="num">${esc(gainTitle)}</th><th class="num">Спред</th><th class="num">Объём/сут</th></tr>`;
+  const tbody = table.querySelector("tbody");
+  if (!data.rows.length) {
+    tbody.innerHTML = `<tr><td colspan="${data.locations.length + 7}" class="muted">Нет данных. Откройте в игре заказы на покупку (вкладка «Продать») на нескольких рынках или ослабьте фильтры.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = data.rows.map((r) => {
+    const cells = data.locations.map((l) => {
+      const c = r.cells[l];
+      const cls = [l === r.best_location ? "best" : "", l === data.base ? "base" : ""].join(" ");
+      if (!c) return `<td class="num muted ${cls}">—</td>`;
+      const from = c.quality !== r.quality ? `, заказ кач. ${c.quality}` : "";
+      return `<td class="num ${cls}" title="${c.amount} шт.${from}, ${age(c.seen_at, data.now)} назад">${fmt(c.price)}<span class="sub ${ageClass(c.seen_at, data.now)}">${age(c.seen_at, data.now)}</span></td>`;
+    }).join("");
+    const gain = data.base ? r.gain_vs_base : r.spread;
+    return `<tr>
+      <td><span class="item-name" data-item="${esc(r.item_id)}">${esc(r.name)}</span><br><span class="item-id">${esc(r.item_id)}</span></td>
+      <td title="${QUALITY[r.quality] || ""}">${r.quality}</td>
+      ${cells}
+      <td class="${r.best_location === "black_market" ? "bm" : ""}">${esc(locNames[r.best_location] || r.best_location)}</td>
+      <td class="num">${fmt(r.best_net)}</td>
+      <td class="num good"><b>${gain === null ? "—" : fmt(gain)}</b></td>
+      <td class="num">${r.spread_pct.toFixed(1)}%</td>
+      <td class="num">${r.daily_volume === null || r.daily_volume === undefined ? "—" : fmt(r.daily_volume)}</td>
+    </tr>`;
+  }).join("");
+  tbody.querySelectorAll(".item-name").forEach((el) => el.addEventListener("click", () => {
+    $("#price-form").item.value = el.dataset.item;
+    showTab("prices");
+    loadPrices();
+  }));
 }
 
 init().catch((e) => { $("#deals-summary").innerHTML = `<span class="bad">Не удалось загрузить: ${esc(e.message)}</span>`; });

@@ -125,3 +125,32 @@ class PriceTableTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FastSellTest(unittest.TestCase):
+    def test_best_market_and_gain_vs_base(self):
+        from albion_trader.deals import fast_sell_table
+        orders = [o("X", "thetford", "request", 1000, quality=1),
+                  o("X", "martlock", "request", 1500, quality=1),
+                  o("X", "black_market", "request", 2000, quality=1),
+                  o("X", "martlock", "offer", 100, quality=1),  # предложения не учитываются
+                  o("Y", "thetford", "request", 50)]           # только один рынок
+        rows = fast_sell_table(orders, ["thetford", "martlock", "black_market"], tax=0.04, base="thetford")
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r["best_location"], "black_market")
+        self.assertAlmostEqual(r["gain_vs_base"], (2000 - 1000) * 0.96)
+        self.assertAlmostEqual(r["gain_vs_second"], (2000 - 1500) * 0.96)
+        self.assertAlmostEqual(r["spread_pct"], 100)
+
+    def test_higher_quality_can_use_lower_quality_orders(self):
+        from albion_trader.deals import fast_sell_table
+        orders = [o("X", "thetford", "request", 1000, quality=1),
+                  o("X", "martlock", "request", 800, quality=3),
+                  o("X", "martlock", "request", 1200, quality=1)]
+        rows = {r["quality"]: r for r in fast_sell_table(orders, ["thetford", "martlock"], tax=0)}
+        self.assertEqual(sorted(rows), [1, 3])
+        # Предмет качества 3 выгоднее сдать в заказ качества 1 в Мартлоке.
+        self.assertEqual(rows[3]["cells"]["martlock"]["price"], 1200)
+        self.assertEqual(rows[3]["cells"]["martlock"]["quality"], 1)
+        self.assertEqual(rows[3]["cells"]["thetford"]["price"], 1000)
