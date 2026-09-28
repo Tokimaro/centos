@@ -42,7 +42,8 @@ Albion Online ──UDP 5056──> Albion Trader (встроенный сбор
 
 Нужен Python 3.10+ (сторонние библиотеки не нужны).
 
-**Windows** — запустите `start.bat`. Он запросит права администратора (без них
+**Windows** — запустите `start.bat`. Он сам находит Python через лаунчер `py`
+(команда `python` в Windows часто ведёт в Microsoft Store и не работает). Он запросит права администратора (без них
 Windows не даёт читать сетевой трафик), при первом запуске скачает названия
 предметов и откроет http://127.0.0.1:8484. Если брандмауэр Windows спросит про
 Python — разрешите доступ, иначе входящие пакеты игры не будут видны.
@@ -58,8 +59,8 @@ python3 -m albion_trader serve
 Вручную:
 
 ```sh
-python -m albion_trader update-items   # один раз: названия предметов (RU/EN)
-python -m albion_trader serve          # от администратора / root
+py -m albion_trader update-items       # Windows; в Linux — python3. Один раз: названия предметов (RU/EN)
+py -m albion_trader serve              # от администратора / root
 ```
 
 `update-items` только скачивает открытый справочник предметов из
