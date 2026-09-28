@@ -94,9 +94,28 @@ class LocationsTest(unittest.TestCase):
         self.assertEqual(normalize_location(7), "thetford")
         self.assertEqual(normalize_location("3003"), "black_market")
         self.assertEqual(normalize_location("5003"), "brecilien")
+        self.assertEqual(normalize_location("1301"), "lymhurst")
+        self.assertEqual(normalize_location("0301"), "thetford")
+        self.assertEqual(normalize_location(3013), "caerleon")
         self.assertEqual(normalize_location("BLACKBANK-2310"), "BLACKBANK-2310")
         self.assertIsNone(normalize_location(""))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MigrationTest(unittest.TestCase):
+    def test_portal_rows_moved_to_city(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.db"
+            db.init_db(path)
+            conn = db.connect(path)
+            with conn:
+                conn.execute("INSERT INTO orders(id, item_id, location, quality, enchant, price, amount,"
+                             " auction_type, seen_at) VALUES (1, 'X', 'lymhurst_portal', 1, 0, 5, 1, 'offer', 1)")
+            conn.close()
+            db.init_db(path)
+            conn = db.connect(path)
+            self.assertEqual(conn.execute("SELECT location FROM orders").fetchone()[0], "lymhurst")
+            conn.close()

@@ -271,11 +271,13 @@ async function loadStatus() {
   const capText = !c.enabled ? "выключен" : c.error ? "ошибка" : c.running ? "работает" : "остановлен";
   $("#status").innerHTML = `
     ${c.error ? `<p class="bad">Сборщик: ${esc(c.error)}</p>` : ""}
+    ${c.market_responses_lost ? `<p class="warn">Ответов рынка не дошло целиком: ${fmt(c.market_responses_lost)} из ${fmt(c.market_requests)}. Похоже, теряются сетевые пакеты (в людных зонах это случается чаще) — обновите страницу рынка ещё раз.</p>` : ""}
+    ${c.no_location_drops ? `<p class="warn">Страниц рынка без известной локации: ${fmt(c.no_location_drops)} — смените зону в игре.</p>` : ""}
     ${c.encrypted_at ? `<p class="warn">Последний ответ рынка (${age(Math.round(c.encrypted_at), s.now)} назад) пришёл зашифрованным — игра сейчас не отдаёт цены в открытом виде.</p>` : ""}
     <div class="cards">
       <div class="card"><div class="v ${c.running ? "good" : "bad"}">${capText}</div><div class="l">встроенный сборщик · пакетов игры: ${fmt(c.packets)}</div></div>
       <div class="card"><div class="v">${esc(c.location_name || "—")}</div><div class="l">текущая локация${c.location ? "" : " — смените зону в игре"}</div></div>
-      <div class="card"><div class="v">${fmt(c.order_batches)}</div><div class="l">страниц рынка собрано (${fmt(c.orders)} заказов)</div></div>
+      <div class="card"><div class="v">${fmt(c.order_batches)}</div><div class="l">страниц рынка собрано (${fmt(c.orders)} заказов) из ${fmt(c.market_requests)} запросов</div></div>
       <div class="card"><div class="v">${fmt(s.total_orders)}</div><div class="l">заказов в базе</div></div>
       <div class="card"><div class="v">${fmt(s.history_points)}</div><div class="l">точек истории продаж</div></div>
       <div class="card"><div class="v">${s.items_catalog ? fmt(s.items_catalog) : "нет"}</div><div class="l">названий предметов${s.items_catalog ? "" : " — выполните update-items"}</div></div>

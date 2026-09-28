@@ -253,3 +253,37 @@ class FakeSocket:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LostResponseTest(unittest.TestCase):
+    def test_lost_market_response_counted(self):
+        sink, state, parser = make_state()
+        state.location = "3005"
+        parser.receive_packet(pb.packet(pb.request(OFFERS, {})))
+        parser.receive_packet(pb.packet(pb.orders_response([order(1, 10)])))
+        parser.receive_packet(pb.packet(pb.request(OFFERS, {})))
+        # ответ потерян
+        parser.receive_packet(pb.packet(pb.request(OFFERS, {})))
+        parser.receive_packet(pb.packet(pb.response(OFFERS, {})))  # пустой ответ — не потеря
+        parser.receive_packet(pb.packet(pb.request(OFFERS, {})))
+        self.assertEqual(state.stats["market_requests"], 4)
+        self.assertEqual(state.stats["market_responses_lost"], 1)
+
+    def test_record_and_replay_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = str(Path(d) / "rec.pcap")
+            packets = [pb.ip_udp(pb.packet(pb.response(JOIN, {8: "1301"}))),
+                       pb.ip_udp(pb.packet(pb.orders_response([order(1, 10)])))]
+            fake = FakeSocket(packets)
+            s = Sniffer(AlbionState(Collector()), open_sockets=lambda: [fake], record_path=path)
+            s.start()
+            deadline = time.time() + 5
+            while (fake.packets or s.status["packets"] < 2) and time.time() < deadline:
+                time.sleep(0.01)
+            s.stop()
+            sink, state, _ = make_state()
+            replay = Sniffer(state)
+            for ip in read_pcap(path):
+                replay.feed_ip_packet(ip)
+            self.assertEqual(state.location, "1301")
+            self.assertEqual(len(sink.items), 1)

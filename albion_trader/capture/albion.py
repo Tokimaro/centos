@@ -100,9 +100,11 @@ class AlbionState:
         self.location = ""
         self.history_lookup: dict[int, tuple[int, int, int]] = {}
         self.last_market_request = 0.0
+        self.awaiting_market_response = False
         self.stats = {
             "location": "", "orders": 0, "order_batches": 0, "history_batches": 0,
             "last_data_at": None, "encrypted_at": None, "no_location_drops": 0,
+            "market_requests": 0, "market_responses_lost": 0,
         }
 
     # --- коды -----------------------------------------------------------
@@ -128,7 +130,13 @@ class AlbionState:
             if code == self.op["get_game_server_by_cluster"]:
                 self._set_location(params.get(0), "GetGameServerByCluster")
             elif code in (self.op["auction_get_offers"], self.op["auction_get_requests"]):
-                self.last_market_request = self.clock()
+                now = self.clock()
+                if self.awaiting_market_response and now - self.last_market_request < 30:
+                    # Предыдущий ответ рынка так и не собрался — потерян кусок.
+                    self._lost_response()
+                self.last_market_request = now
+                self.awaiting_market_response = True
+                self.stats["market_requests"] += 1
             elif code == self.op["auction_get_item_average_stats"]:
                 self._remember_history_request(params)
 
@@ -137,6 +145,8 @@ class AlbionState:
         orders = params.get(0)
         is_orders = isinstance(orders, list) and all(isinstance(o, str) for o in orders)
         with self.lock:
+            if code in (self.op["auction_get_offers"], self.op["auction_get_requests"]):
+                self.awaiting_market_response = False
             if is_orders and (code in (self.op["auction_get_offers"], self.op["auction_get_requests"],
                                        self.op["auction_buy_offer"]) or set(params) == {0}):
                 self._market_orders(orders)
@@ -153,10 +163,19 @@ class AlbionState:
     def on_event(self, _code: int, _params: dict) -> None:
         pass
 
+    def _lost_response(self) -> None:
+        self.stats["market_responses_lost"] += 1
+        lost = self.stats["market_responses_lost"]
+        if lost in (1, 5) or lost % 20 == 0:
+            log.warning("Ответ рынка не дошёл целиком (потеряно: %d из %d). Похоже, теряются "
+                        "пакеты — закройте лишние программы, нагружающие сеть, и попробуйте "
+                        "обновить страницу рынка ещё раз.", lost, self.stats["market_requests"])
+
     def on_encrypted(self) -> None:
         now = self.clock()
         with self.lock:
             if self.last_market_request and now - self.last_market_request <= ENCRYPTION_WINDOW:
+                self.awaiting_market_response = False
                 if self.stats["encrypted_at"] is None or now - self.stats["encrypted_at"] > 60:
                     log.warning("Данные рынка пришли зашифрованными — игра не отдаёт их в открытом виде.")
                 self.stats["encrypted_at"] = now
@@ -170,6 +189,7 @@ class AlbionState:
             self.stats["location"] = loc
 
     def _market_orders(self, raw_orders: list[str]) -> None:
+        self.awaiting_market_response = False
         orders = []
         for s in raw_orders:
             try:

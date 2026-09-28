@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import socket
 import struct
 import sys
@@ -25,6 +26,11 @@ log = logging.getLogger("albion_trader.capture")
 
 ALBION_PORTS = (5056,)
 ETH_P_IP = 0x0800
+# В людных зонах (Карлеон) игра шлёт очень много событий. Маленький буфер
+# сокета переполняется, теряются куски больших ответов рынка — просим у
+# системы большой буфер.
+RECV_BUFFER = 32 * 1024 * 1024
+QUEUE_LIMIT = 200_000
 
 
 class CaptureError(RuntimeError):
@@ -66,6 +72,15 @@ def local_ipv4_addresses() -> list[str]:
     return sorted(ip for ip in ips if not ip.startswith("127."))
 
 
+def _grow_buffer(s: socket.socket) -> None:
+    for size in (RECV_BUFFER, 8 * 1024 * 1024, 2 * 1024 * 1024):
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, size)
+            return
+        except OSError:
+            continue
+
+
 def _open_windows_sockets() -> list[socket.socket]:
     socks, errors = [], []
     for ip in local_ipv4_addresses():
@@ -73,6 +88,7 @@ def _open_windows_sockets() -> list[socket.socket]:
             s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
             s.bind((ip, 0))
             s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+            _grow_buffer(s)
             s.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)  # type: ignore[attr-defined]
             s.settimeout(1.0)
             socks.append(s)
@@ -91,6 +107,7 @@ def _open_linux_socket() -> list[socket.socket]:
     except PermissionError as e:
         raise CaptureError("нет прав на захват пакетов: запустите через sudo "
                            "или выдайте python cap_net_raw") from e
+    _grow_buffer(s)
     s.settimeout(1.0)
     log.info("Захват пакетов на всех интерфейсах (AF_PACKET)")
     return [s]
@@ -106,20 +123,28 @@ def open_capture_sockets() -> list[socket.socket]:
 
 
 class Sniffer:
-    """Читает пакеты в фоновых потоках и передаёт их парсеру Photon."""
+    """Читает пакеты в фоновых потоках и передаёт их парсеру Photon.
+
+    Потоки чтения только складывают пакеты в очередь, разбор идёт в отдельном
+    потоке — так медленный разбор не приводит к переполнению буфера сокета.
+    """
 
     def __init__(self, state, ports=ALBION_PORTS,
-                 open_sockets: Callable[[], list] = open_capture_sockets):
+                 open_sockets: Callable[[], list] = open_capture_sockets,
+                 record_path: str | None = None):
         self.state = state
         self.ports = ports
         self.open_sockets = open_sockets
-        self.parser = PhotonParser(state.on_request, state.on_response, state.on_event,
-                                   state.on_encrypted)
+        self.record_path = record_path
+        self._record = None
+        # События игры (движение, бой и т. п.) не нужны — не разбираем их вовсе.
+        self.parser = PhotonParser(state.on_request, state.on_response, None, state.on_encrypted)
         self.parser_lock = threading.Lock()
+        self.queue: queue.Queue = queue.Queue(maxsize=QUEUE_LIMIT)
         self.stop_event = threading.Event()
         self.threads: list[threading.Thread] = []
-        self.status = {"running": False, "error": None, "packets": 0,
-                       "last_packet_at": None, "started_at": None}
+        self.status = {"running": False, "error": None, "packets": 0, "queue_drops": 0,
+                       "last_packet_at": None, "started_at": None, "recording": None}
 
     def start(self) -> bool:
         try:
@@ -132,18 +157,27 @@ class Sniffer:
             self.status["error"] = f"ошибка открытия захвата: {e}"
             log.error("Захват не запущен: %s", e)
             return False
+        if self.record_path:
+            self._record = PcapWriter(self.record_path)
+            self.status["recording"] = self.record_path
+            log.info("Запись трафика игры в %s", self.record_path)
         self.status.update(running=True, error=None, started_at=time.time())
+        self.threads.append(threading.Thread(target=self._worker, daemon=True, name="capture-parse"))
         for s in socks:
-            t = threading.Thread(target=self._loop, args=(s,), daemon=True, name="capture")
+            self.threads.append(threading.Thread(target=self._reader, args=(s,), daemon=True,
+                                                 name="capture-read"))
+        for t in self.threads:
             t.start()
-            self.threads.append(t)
         return True
 
     def stop(self) -> None:
         self.stop_event.set()
         for t in self.threads:
-            t.join(timeout=3)
+            t.join(timeout=5)
         self.status["running"] = False
+        if self._record:
+            self._record.close()
+            self._record = None
 
     def feed_ip_packet(self, packet: bytes) -> None:
         payload = parse_ipv4_udp(packet, self.ports)
@@ -151,13 +185,15 @@ class Sniffer:
             return
         self.status["packets"] += 1
         self.status["last_packet_at"] = time.time()
+        if self._record:
+            self._record.write(packet)
         with self.parser_lock:
             try:
                 self.parser.receive_packet(payload)
             except Exception:  # pragma: no cover - битый пакет не должен ронять захват
                 log.debug("Ошибка разбора пакета", exc_info=True)
 
-    def _loop(self, sock) -> None:
+    def _reader(self, sock) -> None:
         try:
             while not self.stop_event.is_set():
                 try:
@@ -171,7 +207,13 @@ class Sniffer:
                 # На loopback Linux каждый пакет виден дважды (исходящий и входящий).
                 if isinstance(addr, tuple) and len(addr) >= 3 and addr[0] == "lo" and addr[2] == 4:
                     continue
-                self.feed_ip_packet(data)
+                # Быстрая отсечка чужого трафика прямо в потоке чтения.
+                if not _is_albion_udp(data, self.ports):
+                    continue
+                try:
+                    self.queue.put_nowait(data)
+                except queue.Full:
+                    self.status["queue_drops"] += 1
         finally:
             if sys.platform == "win32":
                 try:
@@ -179,6 +221,52 @@ class Sniffer:
                 except OSError:
                     pass
             sock.close()
+
+    def _worker(self) -> None:
+        while True:
+            try:
+                data = self.queue.get(timeout=0.2)
+            except queue.Empty:
+                if self.stop_event.is_set():
+                    return
+                continue
+            self.feed_ip_packet(data)
+
+
+def _is_albion_udp(packet: bytes, ports) -> bool:
+    if len(packet) < 28 or packet[0] >> 4 != 4 or packet[9] != 17:
+        return False
+    ihl = (packet[0] & 0x0F) * 4
+    if len(packet) < ihl + 4:
+        return False
+    src, dst = struct.unpack_from(">HH", packet, ihl)
+    return src in ports or dst in ports
+
+
+class PcapWriter:
+    """Пишет IP-пакеты в .pcap (LINKTYPE_RAW) — для диагностики."""
+
+    def __init__(self, path: str):
+        self.f = open(path, "wb")
+        self.f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, _LINKTYPE_RAW))
+        self.lock = threading.Lock()
+        self._flushed = 0.0
+
+    def write(self, packet: bytes) -> None:
+        now = time.time()
+        with self.lock:
+            if self.f.closed:
+                return
+            self.f.write(struct.pack("<IIII", int(now), int((now % 1) * 1e6), len(packet), len(packet)))
+            self.f.write(packet)
+            if now - self._flushed > 1:
+                # Окно консоли могут просто закрыть — не держим данные в буфере долго.
+                self.f.flush()
+                self._flushed = now
+
+    def close(self) -> None:
+        with self.lock:
+            self.f.close()
 
 
 # --- pcap ---------------------------------------------------------------

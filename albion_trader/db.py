@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .locations import normalize_location
+from .locations import LEGACY_KEYS, normalize_location
 
 # Клиент передаёт цены умноженными на 10 000.
 PRICE_SCALE = 10_000
@@ -79,6 +79,10 @@ def init_db(path: str | Path) -> None:
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
+        with conn:
+            for old, new in LEGACY_KEYS.items():
+                conn.execute("UPDATE orders SET location=? WHERE location=?", (new, old))
+                conn.execute("UPDATE OR REPLACE history SET location=? WHERE location=?", (new, old))
     finally:
         conn.close()
 

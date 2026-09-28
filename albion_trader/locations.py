@@ -30,18 +30,14 @@ _MARKETS = [
     Market("caerleon", "Карлеон", "Caerleon", "city"),
     Market("brecilien", "Брецилиэн", "Brecilien", "city"),
     Market(BLACK_MARKET, "Чёрный рынок", "Black Market", "black_market"),
-    Market("thetford_portal", "Портал Тетфорда", "Thetford Portal", "portal"),
-    Market("lymhurst_portal", "Портал Лимхерста", "Lymhurst Portal", "portal"),
-    Market("bridgewatch_portal", "Портал Бриджвотча", "Bridgewatch Portal", "portal"),
-    Market("martlock_portal", "Портал Мартлока", "Martlock Portal", "portal"),
-    Market("fort_sterling_portal", "Портал Форт Стерлинга", "Fort Sterling Portal", "portal"),
 ]
 
 MARKETS: dict[str, Market] = {m.key: m for m in _MARKETS}
 
 # Сырые ID локаций (см. ao-bin-dumps/formatted/world.txt) -> ключ рынка.
-# 3003 — зона Карлеона, где стоит Чёрный рынок; обычный рынок Карлеона —
-# 3005 или, в новых версиях, 3013-Auction2.
+# Как в AODP (albiondata-deduper): 3003 — Чёрный рынок, 3005 и 3013 — Карлеон,
+# рынки порталов (0301, 1301, …) — это рынки соответствующих городов, у них
+# общий стакан.
 _RAW_TO_KEY = {
     "0007": "thetford",
     "1002": "lymhurst",
@@ -49,14 +45,24 @@ _RAW_TO_KEY = {
     "3008": "martlock",
     "4002": "fort_sterling",
     "3005": "caerleon",
+    "3013": "caerleon",
     "3013-Auction2": "caerleon",
     "5003": "brecilien",
     "3003": BLACK_MARKET,
-    "0301": "thetford_portal",
-    "1301": "lymhurst_portal",
-    "2301": "bridgewatch_portal",
-    "3301": "martlock_portal",
-    "4301": "fort_sterling_portal",
+    "0301": "thetford",
+    "1301": "lymhurst",
+    "2301": "bridgewatch",
+    "3301": "martlock",
+    "4301": "fort_sterling",
+}
+
+# Ключи рынков порталов из версии 0.2 — переносятся в города при запуске.
+LEGACY_KEYS = {
+    "thetford_portal": "thetford",
+    "lymhurst_portal": "lymhurst",
+    "bridgewatch_portal": "bridgewatch",
+    "martlock_portal": "martlock",
+    "fort_sterling_portal": "fort_sterling",
 }
 
 DEFAULT_CITIES = [m.key for m in _MARKETS if m.kind == "city"]

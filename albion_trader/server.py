@@ -37,6 +37,7 @@ class AppConfig:
     cleanup_interval: int = 600
     capture: bool = True
     opcodes_path: Path | None = None
+    record_path: str | None = None
 
 
 class App:
@@ -50,7 +51,7 @@ class App:
 
     def start_capture(self, open_sockets=None) -> bool:
         kwargs = {"open_sockets": open_sockets} if open_sockets else {}
-        self.sniffer = Sniffer(self.albion, **kwargs)
+        self.sniffer = Sniffer(self.albion, record_path=self.config.record_path, **kwargs)
         return self.sniffer.start()
 
     def capture_status(self) -> dict:
@@ -59,6 +60,7 @@ class App:
             st.update(enabled=False, running=False, error=None, packets=0, last_packet_at=None)
         else:
             st.update(enabled=True, **self.sniffer.status)
+            st["incomplete_messages"] = self.sniffer.parser.evicted_segments
         loc = st.get("location")
         st["location_name"] = market_info(normalize_location(loc))["name"] if loc else None
         return st

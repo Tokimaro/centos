@@ -283,6 +283,7 @@ class PhotonParser:
         self.on_event = on_event
         self.on_encrypted = on_encrypted
         self.pending: dict[int, dict] = {}
+        self.evicted_segments = 0  # недособранные сообщения (потерян кусок)
 
     # --- пакеты -------------------------------------------------------
     def receive_packet(self, payload: bytes) -> bool:
@@ -410,6 +411,7 @@ class PhotonParser:
             if len(self.pending) >= MAX_PENDING_SEGMENTS:
                 # dict сохраняет порядок вставки — удаляем самую старую сборку.
                 self.pending.pop(next(iter(self.pending)))
+                self.evicted_segments += 1
             seg = {"total": total_len, "written": 0, "buf": bytearray(total_len)}
             self.pending[start_seq] = seg
         end = frag_offset + len(frag)
