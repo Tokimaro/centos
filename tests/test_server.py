@@ -58,6 +58,8 @@ class OpenServerTest(ServerTest):
         status_info = self.get("/api/status")
         self.assertEqual(status_info["total_orders"], 2)
         self.assertEqual(self.get("/api/items?q=t5")["items"][0]["item_id"], "T5_BAG")
+        recent = self.get("/api/items?recent=1")["items"][0]
+        self.assertEqual((recent["item_id"], recent["markets"], recent["orders"]), ("T5_BAG", 2, 2))
 
     def test_static_and_404(self):
         with urllib.request.urlopen(self.base + "/") as r:

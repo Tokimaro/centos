@@ -62,7 +62,11 @@ class App:
             st.update(enabled=True, **self.sniffer.status)
             st["incomplete_messages"] = self.sniffer.parser.evicted_segments
         loc = st.get("location")
-        st["location_name"] = market_info(normalize_location(loc))["name"] if loc else None
+        if loc == "3003":
+            # В зоне 3003 (город Карлеон) работает Чёрный рынок; обычный рынок — в зоне 3005.
+            st["location_name"] = "Карлеон, город (Чёрный рынок)"
+        else:
+            st["location_name"] = market_info(normalize_location(loc))["name"] if loc else None
         return st
 
     @contextmanager
@@ -206,11 +210,21 @@ class App:
 
     def api_items(self, q) -> dict:
         ok = self._item_filter(q)
+        lang = q.get("lang", "ru")
+        limit = int(_float(q.get("limit"), 50))
+        if q.get("recent"):
+            with self.conn() as conn:
+                rows = conn.execute(
+                    """SELECT item_id, MAX(seen_at) AS last, COUNT(DISTINCT location) AS markets,
+                              COUNT(*) AS orders
+                       FROM orders GROUP BY item_id ORDER BY last DESC""").fetchall()
+            out = [{"item_id": r["item_id"], "name": self.catalog.name(r["item_id"], lang),
+                    "last_seen": r["last"], "markets": r["markets"], "orders": r["orders"]}
+                   for r in rows if ok(r["item_id"])]
+            return {"now": int(time.time()), "items": out[:limit]}
         with self.conn() as conn:
             ids = [r[0] for r in conn.execute("SELECT DISTINCT item_id FROM orders")]
-        lang = q.get("lang", "ru")
         found = sorted((i for i in ids if ok(i)), key=lambda i: self.catalog.name(i, lang))
-        limit = int(_float(q.get("limit"), 50))
         return {"items": [{"item_id": i, "name": self.catalog.name(i, lang)} for i in found[:limit]]}
 
 

@@ -49,6 +49,7 @@ function showTab(name) {
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
   if (name === "status") loadStatus();
+  if (name === "prices" && !$("#price-form").item.value.trim()) loadRecent();
   if (name === "fastsell" && !fastSellLoaded) loadFastSell();
 }
 let fastSellLoaded = false;
@@ -207,10 +208,29 @@ async function suggestItems() {
   $("#item-options").innerHTML = data.items.map((i) => `<option value="${esc(i.item_id)}">${esc(i.name)}</option>`).join("");
 }
 
+async function loadRecent() {
+  $("#price-title").textContent = "";
+  $("#prices-wrap").hidden = true;
+  $("#recent-wrap").hidden = false;
+  const data = await api("/api/items", { recent: 1, limit: 100 });
+  const tbody = $("#recent tbody");
+  tbody.innerHTML = data.items.length ? data.items.map((i) => `<tr>
+      <td><span class="item-name" data-item="${esc(i.item_id)}">${esc(i.name)}</span><br><span class="item-id">${esc(i.item_id)}</span></td>
+      <td class="num">${i.markets}</td><td class="num">${fmt(i.orders)}</td>
+      <td class="num ${ageClass(i.last_seen, data.now)}">${age(i.last_seen, data.now)}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">Пока ничего не собрано. Откройте рынок в игре (после смены зоны).</td></tr>`;
+  tbody.querySelectorAll(".item-name").forEach((el) => el.addEventListener("click", () => {
+    $("#price-form").item.value = el.dataset.item;
+    loadPrices();
+  }));
+}
+
 async function loadPrices() {
   const f = $("#price-form");
   let item = f.item.value.trim();
-  if (!item) return;
+  if (!item) { loadRecent(); return; }
+  $("#prices-wrap").hidden = false;
+  $("#recent-wrap").hidden = true;
   if (!/^[A-Z0-9_@]+$/.test(item)) {
     const found = await api("/api/items", { q: item, limit: 1 });
     if (found.items.length) { item = found.items[0].item_id; f.item.value = item; }
@@ -247,9 +267,9 @@ async function refreshConn() {
       el.textContent = `сборщик: ошибка — ${c.error}`; el.className = "conn bad";
     } else if (c.enabled && c.running) {
       const enc = c.encrypted_at && s.now - c.encrypted_at < 600;
-      const loc = c.location_name ? ` · ${c.location_name}` : " · локация не определена";
+      const loc = c.location_name ? ` · ${c.location_name}` : " · локация не определена — смените зону в игре, иначе цены не сохраняются";
       el.textContent = `сборщик работает${loc}${last}${enc ? " · данные рынка зашифрованы игрой" : ""}`;
-      el.className = "conn " + (enc ? "bad" : t && s.now - t.last_at < 600 ? "ok" : "old");
+      el.className = "conn " + (enc || !c.location_name ? "bad" : t && s.now - t.last_at < 600 ? "ok" : "old");
     } else {
       el.textContent = t ? `сборщик выключен${last}` : "сборщик выключен, данных нет";
       el.className = "conn old";

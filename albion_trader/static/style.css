@@ -120,3 +120,4 @@ code { background: var(--panel); border: 1px solid var(--border); border-radius:
 details { margin-top: 12px; }
 summary { cursor: pointer; color: var(--muted); }
 .conn.bad { color: var(--bad); }
+[hidden] { display: none !important; }

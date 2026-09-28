@@ -89,6 +89,10 @@ def main(argv=None) -> int:
         print(f"Пакетов Albion: {st['packets']}, пакетов заказов: {st['order_batches']} "
               f"({st['orders']} заказов), историй: {st['history_batches']}, "
               f"последняя локация: {st['location'] or 'не определена'}")
+        unanswered = len(app.albion.pending_market_requests) + st["market_responses_lost"]
+        print(f"Запросов рынка: {st['market_requests']}, без ответа: {unanswered}, "
+              f"дублей пакетов отброшено: {st['duplicates']}, "
+              f"страниц без известной локации: {st['no_location_drops']}")
         if st["encrypted_at"]:
             print("Внимание: данные рынка в записи зашифрованы.")
         return 0

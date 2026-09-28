@@ -402,7 +402,7 @@ class PhotonParser:
     def _handle_fragment(self, data: bytes) -> None:
         if len(data) < FRAGMENT_HEADER_LENGTH:
             return
-        start_seq, _count, _num, total_len, frag_offset = struct.unpack_from(">IIIII", data, 0)
+        start_seq, count, num, total_len, frag_offset = struct.unpack_from(">IIIII", data, 0)
         frag = data[FRAGMENT_HEADER_LENGTH:]
         seg = self.pending.get(start_seq)
         if seg is None:
@@ -412,16 +412,23 @@ class PhotonParser:
                 # dict сохраняет порядок вставки — удаляем самую старую сборку.
                 self.pending.pop(next(iter(self.pending)))
                 self.evicted_segments += 1
-            seg = {"total": total_len, "written": 0, "buf": bytearray(total_len)}
+            seg = {"total": total_len, "written": 0, "buf": bytearray(total_len), "seen": set()}
             self.pending[start_seq] = seg
+        # Повторы одного и того же куска (переотправка, дубли на разных
+        # сетевых адаптерах) не должны засчитываться дважды — иначе сообщение
+        # «соберётся» раньше времени с дырами.
+        key = (num, frag_offset)
+        if key in seg["seen"]:
+            return
+        seg["seen"].add(key)
         end = frag_offset + len(frag)
         if end <= len(seg["buf"]):
             seg["buf"][frag_offset:end] = frag
         seg["written"] += len(frag)
-        if seg["written"] >= seg["total"]:
+        if seg["written"] >= seg["total"] or (count and len(seg["seen"]) >= count
+                                              and seg["written"] >= seg["total"]):
             del self.pending[start_seq]
             self._handle_reliable(bytes(seg["buf"]))
-
 
 def _identity(payload: bytes, offset: int):
     if len(payload) - offset < PHOTON_HEADER_LENGTH:

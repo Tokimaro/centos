@@ -208,7 +208,7 @@ class SnifferTest(unittest.TestCase):
             status = app.api_status({})
             self.assertEqual(status["total_orders"], 3)
             self.assertEqual(status["capture"]["location"], "3003")
-            self.assertEqual(status["capture"]["location_name"], "Чёрный рынок")
+            self.assertEqual(status["capture"]["location_name"], "Карлеон, город (Чёрный рынок)")
             deals = app.api_deals({"max_age": "1"})
             self.assertEqual(deals["count"], 1)
             self.assertEqual(deals["deals"][0]["destination"], "black_market")
@@ -257,17 +257,24 @@ if __name__ == "__main__":
 
 class LostResponseTest(unittest.TestCase):
     def test_lost_market_response_counted(self):
-        sink, state, parser = make_state()
+        now = [1000.0]
+        sink = Collector()
+        state = AlbionState(sink, clock=lambda: now[0])
+        parser = photon.PhotonParser(state.on_request, state.on_response, None, state.on_encrypted)
         state.location = "3005"
+        # Игра шлёт пачку из 4 запросов и получает 4 ответа — это не потери.
+        for code in (REQUESTS, OFFERS, OFFERS, REQUESTS):
+            parser.receive_packet(pb.packet(pb.request(code, {})))
+        for typ in ("request", "offer", "offer", "request"):
+            parser.receive_packet(pb.packet(pb.orders_response([order(1, 10, typ)])))
+        # Один запрос остался без ответа.
         parser.receive_packet(pb.packet(pb.request(OFFERS, {})))
-        parser.receive_packet(pb.packet(pb.orders_response([order(1, 10)])))
+        now[0] += 60
         parser.receive_packet(pb.packet(pb.request(OFFERS, {})))
-        # ответ потерян
-        parser.receive_packet(pb.packet(pb.request(OFFERS, {})))
-        parser.receive_packet(pb.packet(pb.response(OFFERS, {})))  # пустой ответ — не потеря
-        parser.receive_packet(pb.packet(pb.request(OFFERS, {})))
-        self.assertEqual(state.stats["market_requests"], 4)
+        parser.receive_packet(pb.packet(pb.response(OFFERS, {})))  # пустой ответ
+        self.assertEqual(state.stats["market_requests"], 6)
         self.assertEqual(state.stats["market_responses_lost"], 1)
+        self.assertEqual(state.pending_market_requests, [])
 
     def test_record_and_replay_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
@@ -287,3 +294,36 @@ class LostResponseTest(unittest.TestCase):
                 replay.feed_ip_packet(ip)
             self.assertEqual(state.location, "1301")
             self.assertEqual(len(sink.items), 1)
+
+
+class DuplicateTest(unittest.TestCase):
+    def test_same_packet_from_two_adapters_processed_once(self):
+        sink, state, _ = make_state()
+        s = Sniffer(state)
+        payload = pb.packet(pb.response(JOIN, {8: "3005"}))
+        state.location = ""
+        first = pb.ip_udp(payload)
+        # Тот же пакет через виртуальный адаптер: другой адрес получателя и TTL.
+        second = bytearray(first)
+        second[8] = 128
+        second[16:20] = bytes([172, 19, 0, 1])
+        s.feed_ip_packet(first)
+        s.feed_ip_packet(bytes(second))
+        self.assertEqual(s.status["packets"], 1)
+        self.assertEqual(s.status["duplicates"], 1)
+
+    def test_duplicate_fragments_do_not_complete_message_early(self):
+        seen = []
+        p = photon.PhotonParser(on_request=lambda c, prm: seen.append(prm[1]))
+        data = pb.command(2, bytes([1]) + pb.params({1: "y" * 3000}))[12:]
+        chunk = 1000
+        n = (len(data) + chunk - 1) // chunk
+
+        def frag(k):
+            part = data[k * chunk:(k + 1) * chunk]
+            f = struct.pack(">IIIII", 9, n, k, len(data), k * chunk) + part
+            return pb.packet(bytes([8, 0, 0, 0]) + struct.pack(">II", 12 + len(f), k) + f)
+        # Первый кусок приходит трижды, затем остальные.
+        for k in [0, 0, 0] + list(range(1, n)):
+            p.receive_packet(frag(k))
+        self.assertEqual(seen, ["y" * 3000])

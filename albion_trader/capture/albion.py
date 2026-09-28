@@ -33,6 +33,7 @@ DEFAULT_OPCODES = {
 
 HISTORY_CACHE_SIZE = 1024
 ENCRYPTION_WINDOW = 3.0
+MARKET_RESPONSE_TIMEOUT = 15.0
 
 _RE_ISLAND = re.compile(r"(?i)@island@[0-9a-f-]{36}")
 _RE_NUMERIC = re.compile(r"^[0-9]{3,6}$")
@@ -100,7 +101,10 @@ class AlbionState:
         self.location = ""
         self.history_lookup: dict[int, tuple[int, int, int]] = {}
         self.last_market_request = 0.0
-        self.awaiting_market_response = False
+        # Время отправки запросов рынка, на которые ещё не пришёл ответ.
+        # Игра шлёт по 4 запроса на один просмотр, поэтому считаем штучно.
+        self.pending_market_requests: list[float] = []
+        self._last_location_warning = 0.0
         self.stats = {
             "location": "", "orders": 0, "order_batches": 0, "history_batches": 0,
             "last_data_at": None, "encrypted_at": None, "no_location_drops": 0,
@@ -131,11 +135,9 @@ class AlbionState:
                 self._set_location(params.get(0), "GetGameServerByCluster")
             elif code in (self.op["auction_get_offers"], self.op["auction_get_requests"]):
                 now = self.clock()
-                if self.awaiting_market_response and now - self.last_market_request < 30:
-                    # Предыдущий ответ рынка так и не собрался — потерян кусок.
-                    self._lost_response()
+                self._expire_market_requests(now)
                 self.last_market_request = now
-                self.awaiting_market_response = True
+                self.pending_market_requests.append(now)
                 self.stats["market_requests"] += 1
             elif code == self.op["auction_get_item_average_stats"]:
                 self._remember_history_request(params)
@@ -145,8 +147,8 @@ class AlbionState:
         orders = params.get(0)
         is_orders = isinstance(orders, list) and all(isinstance(o, str) for o in orders)
         with self.lock:
-            if code in (self.op["auction_get_offers"], self.op["auction_get_requests"]):
-                self.awaiting_market_response = False
+            if code in (self.op["auction_get_offers"], self.op["auction_get_requests"]) and not is_orders:
+                self._market_response_arrived()
             if is_orders and (code in (self.op["auction_get_offers"], self.op["auction_get_requests"],
                                        self.op["auction_buy_offer"]) or set(params) == {0}):
                 self._market_orders(orders)
@@ -163,6 +165,15 @@ class AlbionState:
     def on_event(self, _code: int, _params: dict) -> None:
         pass
 
+    def _market_response_arrived(self) -> None:
+        if self.pending_market_requests:
+            self.pending_market_requests.pop(0)
+
+    def _expire_market_requests(self, now: float) -> None:
+        while self.pending_market_requests and now - self.pending_market_requests[0] > MARKET_RESPONSE_TIMEOUT:
+            self.pending_market_requests.pop(0)
+            self._lost_response()
+
     def _lost_response(self) -> None:
         self.stats["market_responses_lost"] += 1
         lost = self.stats["market_responses_lost"]
@@ -175,7 +186,7 @@ class AlbionState:
         now = self.clock()
         with self.lock:
             if self.last_market_request and now - self.last_market_request <= ENCRYPTION_WINDOW:
-                self.awaiting_market_response = False
+                self._market_response_arrived()
                 if self.stats["encrypted_at"] is None or now - self.stats["encrypted_at"] > 60:
                     log.warning("Данные рынка пришли зашифрованными — игра не отдаёт их в открытом виде.")
                 self.stats["encrypted_at"] = now
@@ -189,7 +200,7 @@ class AlbionState:
             self.stats["location"] = loc
 
     def _market_orders(self, raw_orders: list[str]) -> None:
-        self.awaiting_market_response = False
+        self._market_response_arrived()
         orders = []
         for s in raw_orders:
             try:
@@ -207,6 +218,10 @@ class AlbionState:
         if not orders:
             if raw_orders:
                 self.stats["no_location_drops"] += 1
+                now = self.clock()
+                if now - self._last_location_warning < 30:
+                    return
+                self._last_location_warning = now
                 log.warning("Не знаю текущую локацию — смените зону (войдите/выйдите из города), "
                             "чтобы привязать цены к рынку.")
             return

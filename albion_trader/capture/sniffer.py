@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import collections
 import logging
 import queue
 import socket
@@ -31,6 +32,8 @@ ETH_P_IP = 0x0800
 # системы большой буфер.
 RECV_BUFFER = 32 * 1024 * 1024
 QUEUE_LIMIT = 200_000
+DEDUP_WINDOW = 2.0
+DEDUP_SIZE = 8192
 
 
 class CaptureError(RuntimeError):
@@ -143,7 +146,12 @@ class Sniffer:
         self.queue: queue.Queue = queue.Queue(maxsize=QUEUE_LIMIT)
         self.stop_event = threading.Event()
         self.threads: list[threading.Thread] = []
+        # Один и тот же пакет может прийти через несколько адаптеров (сетевая
+        # карта + виртуальный адаптер WSL/Docker/Hyper-V/VPN) — отбрасываем дубли.
+        self._recent: dict = {}
+        self._recent_order: collections.deque = collections.deque()
         self.status = {"running": False, "error": None, "packets": 0, "queue_drops": 0,
+                       "duplicates": 0,
                        "last_packet_at": None, "started_at": None, "recording": None}
 
     def start(self) -> bool:
@@ -183,6 +191,9 @@ class Sniffer:
         payload = parse_ipv4_udp(packet, self.ports)
         if not payload:
             return
+        if self._is_duplicate(packet, payload):
+            self.status["duplicates"] += 1
+            return
         self.status["packets"] += 1
         self.status["last_packet_at"] = time.time()
         if self._record:
@@ -192,6 +203,25 @@ class Sniffer:
                 self.parser.receive_packet(payload)
             except Exception:  # pragma: no cover - битый пакет не должен ронять захват
                 log.debug("Ошибка разбора пакета", exc_info=True)
+
+    def _is_duplicate(self, packet: bytes, payload: bytes) -> bool:
+        ihl = (packet[0] & 0x0F) * 4
+        src_port = struct.unpack_from(">H", packet, ihl)[0]
+        # Сторона игрового сервера одинакова в обоих экземплярах, адрес нашей
+        # стороны может отличаться (NAT виртуального адаптера).
+        server = packet[12:16] if src_port in self.ports else packet[16:20]
+        key = hash((server, src_port in self.ports, payload))
+        now = time.monotonic()
+        seen = self._recent.get(key)
+        if seen is not None and now - seen < DEDUP_WINDOW:
+            return True
+        self._recent[key] = now
+        self._recent_order.append(key)
+        while len(self._recent_order) > DEDUP_SIZE:
+            old = self._recent_order.popleft()
+            if self._recent.get(old, 0) <= now - DEDUP_WINDOW or len(self._recent) > DEDUP_SIZE:
+                self._recent.pop(old, None)
+        return False
 
     def _reader(self, sock) -> None:
         try:
