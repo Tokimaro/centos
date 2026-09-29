@@ -6,6 +6,7 @@ import base64
 import hmac
 import json
 import logging
+import math
 import mimetypes
 import sys
 import threading
@@ -153,10 +154,14 @@ class App:
         with self.write_lock, self.conn() as conn:
             saved = db.ingest(conn, topic, payload)
             if saved and topic == "marketorders.ingest":
-                orders = [o for o in payload.get("Orders") or [] if isinstance(o, dict)]
-                items = {o.get("ItemTypeId") for o in orders}
-                touched = {(o.get("ItemTypeId"), normalize_location(o.get("LocationId"))) for o in orders}
                 try:
+                    # Некорректные заказы уже отброшены при сохранении — здесь тоже
+                    # берём только те, у которых id предмета строка.
+                    orders = [o for o in payload.get("Orders") or []
+                              if isinstance(o, dict) and isinstance(o.get("ItemTypeId"), str)]
+                    items = {o["ItemTypeId"] for o in orders}
+                    touched = {(o["ItemTypeId"], normalize_location(o.get("LocationId"))) for o in orders
+                               if isinstance(o.get("LocationId"), (str, int))}
                     self.alerts.check_market(conn, items, self.current_tax(conn), self._rule_filter, touched)
                     self.check_outbid(conn, items)
                 except Exception:  # pragma: no cover - ошибка правила не мешает сбору
@@ -325,7 +330,7 @@ class App:
                     p["value"] += r["value"] or 0
         q2 = dict(q)
         q2["limit"] = q.get("limit") or 2000
-        return {"now": now, "rows": rows[:int(_float(q2["limit"], 2000))],
+        return {"now": now, "rows": rows[:_limit(q2, 2000)],
                 "players": sorted(players.values(), key=lambda p: p["value"] + p["silver"], reverse=True),
                 "character": self.character()}
 
@@ -415,7 +420,7 @@ class App:
     # --- оповещения -----------------------------------------------------
     def api_alerts(self, q) -> dict:
         with self.conn() as conn:
-            items = self.alerts.list_alerts(conn, int(_float(q.get("since"), 0)), int(_float(q.get("limit"), 200)))
+            items = self.alerts.list_alerts(conn, int(_float(q.get("since"), 0)), _limit(q, 200))
             unseen = conn.execute("SELECT COUNT(*) FROM alerts WHERE seen = 0").fetchone()[0]
         return {"now": int(time.time()), "alerts": items, "unseen": unseen}
 
@@ -434,6 +439,13 @@ class App:
         with self.conn() as conn:
             return {"rules": self.alerts.rules(conn), "kinds": alerts_mod.KINDS}
 
+    @staticmethod
+    def _rule_id(v) -> int:
+        try:
+            return alerts_mod._rule_id(v)
+        except ValueError as e:
+            raise ApiError(str(e)) from e
+
     def api_alert_rules_post(self, _q, body) -> dict:
         if not isinstance(body, dict):
             raise ApiError("ожидается объект")
@@ -445,10 +457,10 @@ class App:
                 except ValueError as e:
                     raise ApiError(str(e)) from e
             elif action == "delete":
-                rule_id = int(body.get("id") or 0)
+                rule_id = self._rule_id(body.get("id"))
                 conn.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
             elif action == "toggle":
-                rule_id = int(body.get("id") or 0)
+                rule_id = self._rule_id(body.get("id"))
                 conn.execute("UPDATE alert_rules SET enabled = ? WHERE id = ?",
                              (int(bool(body.get("enabled"))), rule_id))
             else:
@@ -535,7 +547,7 @@ class App:
         ok = self._item_filter(q)
         orders = [o for o in orders if ok(o["item_id"])]
         deals = find_deals(orders, params)
-        limit = int(_float(q.get("limit"), 300))
+        limit = _limit(q, 300)
         lang = q.get("lang", "ru")
         out = []
         for d in deals[:limit]:
@@ -567,7 +579,7 @@ class App:
         key = "gain_vs_base" if base else "spread"
         rows = [r for r in rows if (r[key] or 0) >= min_gain]
         lang = q.get("lang", "ru")
-        limit = int(_float(q.get("limit"), 300))
+        limit = _limit(q, 300)
         for r in rows[:limit]:
             r["name"] = self.catalog.name(r["item_id"], lang)
             r["daily_volume"] = volumes.get((r["item_id"], r["best_location"], r["quality"]))
@@ -581,7 +593,7 @@ class App:
 
     def _named(self, rows: list[dict], q, limit_default: int = 300) -> list[dict]:
         lang = q.get("lang", "ru")
-        rows = rows[:int(_float(q.get("limit"), limit_default))]
+        rows = rows[:_limit(q, limit_default)]
         for r in rows:
             r["name"] = self.catalog.name(r["item_id"], lang)
         return rows
@@ -758,7 +770,7 @@ class App:
     def api_items(self, q) -> dict:
         ok = self._item_filter(q)
         lang = q.get("lang", "ru")
-        limit = int(_float(q.get("limit"), 50))
+        limit = _limit(q, 50)
         if q.get("recent"):
             with self.conn() as conn:
                 rows = conn.execute(
@@ -779,15 +791,31 @@ class ApiError(Exception):
     """Ошибка запроса к API (400)."""
 
 
+# Списки в параметрах (рынки, тиры…) обрезаются: у SQLite есть предел числа переменных в запросе.
+LIST_LIMIT = 100
+
+
 def _split(value) -> list[str]:
-    return [v for v in (value or "").split(",") if v]
+    return [v for v in (value or "").split(",") if v][:LIST_LIMIT]
+
+
+def _limit(q, default: int) -> int:
+    return max(0, int(_float(q.get("limit"), default)))
+
+
+# Предел для числовых параметров запросов: защищает от переполнений (дни × 86400 и т. п.).
+PARAM_LIMIT = 1e9
 
 
 def _float(value, default: float) -> float:
+    """Число из параметра запроса; NaN, бесконечность и мусор дают значение по умолчанию."""
     try:
-        return float(value)
+        v = float(value)
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(v):
+        return default
+    return max(-PARAM_LIMIT, min(PARAM_LIMIT, v))
 
 
 def make_handler(app: App):
@@ -848,7 +876,24 @@ def make_handler(app: App):
         def _json(self, status: int, obj):
             self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
+        def _host_allowed(self) -> bool:
+            """Защита от DNS rebinding: без пароля (только локальный режим) принимаем лишь
+            запросы, адресованные самому компьютеру."""
+            if app.config.password:
+                return True
+            host = (self.headers.get("Host") or "").strip().lower()
+            if host.startswith("["):
+                name = host[1:host.find("]")] if "]" in host else host
+            else:
+                name = host.rsplit(":", 1)[0] if ":" in host else host
+            if name in ("127.0.0.1", "localhost", "::1", ""):
+                return True
+            self._json(403, {"error": "forbidden host"})
+            return False
+
         def _authorized(self) -> bool:
+            if not self._host_allowed():
+                return False
             pwd = app.config.password
             if not pwd:
                 return True
@@ -952,7 +997,12 @@ def make_handler(app: App):
             except (ValueError, UnicodeDecodeError):
                 self._json(400, {"error": "invalid json"})
                 return
-            saved = app.ingest(topic, payload)
+            try:
+                saved = app.ingest(topic, payload)
+            except Exception as e:  # pragma: no cover - защитный путь: ответ вместо обрыва соединения
+                log.exception("Ошибка приёма %s", topic)
+                self._json(500, {"error": str(e)})
+                return
             if saved:
                 log.info("Получено %s: %d записей", topic, saved)
             self._json(200, {"ok": True, "saved": saved})

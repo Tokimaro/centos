@@ -53,13 +53,20 @@ class MyTradesTest(unittest.TestCase):
 
     def test_open_orders_replaced_by_full_list(self):
         self.mt.handle_my_orders("offers", [my_order(1, 100), my_order(2, 200)])
-        self.clock[0] += 10
+        self.clock[0] += mytrades.LIST_GRACE + 10
         self.mt.handle_my_orders("offers", [my_order(2, 190)])
         rows = {r["id"]: r for r in self.query("SELECT * FROM my_orders")}
         self.assertEqual((rows[1]["active"], rows[2]["active"], rows[2]["price"]), (0, 1, 190))
         self.assertEqual(rows[2]["location"], "martlock")
         # Список запросов не трогает предложения.
         self.mt.handle_my_orders("requests", [my_order(3, 50, "request")])
+        self.assertEqual(len(self.query("SELECT * FROM my_orders WHERE active = 1")), 2)
+
+    def test_paged_list_within_grace_keeps_orders(self):
+        # Список приходит страницами: вторая страница не должна гасить первую.
+        self.mt.handle_my_orders("offers", [my_order(1, 100)])
+        self.clock[0] += 2
+        self.mt.handle_my_orders("offers", [my_order(2, 200)])
         self.assertEqual(len(self.query("SELECT * FROM my_orders WHERE active = 1")), 2)
 
     def test_finished_auctions_become_trades_once(self):

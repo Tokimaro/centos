@@ -9,12 +9,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import sqlite3
 import time
 from typing import Callable
 
 from . import db
 from .deals import DealParams, find_deals, underpriced
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS alert_rules (
@@ -52,6 +56,50 @@ REPEAT_SECONDS = 30 * 60
 KEEP_DAYS = 30
 
 
+NUMBER_PARAMS = ("max_age", "quality", "price", "min_profit", "min_margin", "min_total", "min_discount")
+LIST_PARAMS = ("locations", "src", "dst", "tiers", "enchants")
+TEXT_PARAMS = ("item", "q", "side", "buy", "sell")
+
+
+def _clean_params(params: dict) -> dict:
+    """Проверяет типы параметров правила, чтобы испорченное правило не ломало проверку остальных."""
+    out = dict(params)
+    for key in NUMBER_PARAMS:
+        v = out.get(key)
+        if v in (None, ""):
+            continue
+        try:
+            num = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"параметр {key} должен быть числом") from None
+        if isinstance(v, bool) or not math.isfinite(num):
+            raise ValueError(f"параметр {key} должен быть числом")
+        out[key] = num
+    for key in LIST_PARAMS:
+        v = out.get(key)
+        if v in (None, ""):
+            continue
+        if not isinstance(v, list) or not all(isinstance(x, (str, int)) and not isinstance(x, bool) for x in v):
+            raise ValueError(f"параметр {key} должен быть списком")
+    for key in TEXT_PARAMS:
+        v = out.get(key)
+        if v is not None and not isinstance(v, str):
+            raise ValueError(f"параметр {key} должен быть строкой")
+    return out
+
+
+def _rule_id(v) -> int:
+    if isinstance(v, bool) or not isinstance(v, (int, str)):
+        raise ValueError("некорректный id правила")
+    try:
+        n = int(v)
+    except ValueError as e:
+        raise ValueError("некорректный id правила") from e
+    if not 0 < n < 2**63:
+        raise ValueError("некорректный id правила")
+    return n
+
+
 def init(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
 
@@ -86,12 +134,18 @@ class AlertEngine:
         return out
 
     def save_rule(self, conn, rule: dict) -> int:
+        if not isinstance(rule, dict):
+            raise ValueError("правило должно быть объектом")
         kind = rule.get("kind")
         if kind not in KINDS:
             raise ValueError(f"неизвестный тип правила: {kind}")
         params = rule.get("params") or {}
-        name = (rule.get("name") or "").strip() or KINDS[kind]
+        if not isinstance(params, dict):
+            raise ValueError("параметры правила должны быть объектом")
+        params = _clean_params(params)
+        name = str(rule.get("name") or "").strip()[:200] or KINDS[kind]
         if rule.get("id"):
+            rule["id"] = _rule_id(rule["id"])
             conn.execute("UPDATE alert_rules SET name=?, kind=?, params=?, enabled=? WHERE id=?",
                          (name, kind, json.dumps(params, ensure_ascii=False), int(rule.get("enabled", True)),
                           int(rule["id"])))
@@ -149,8 +203,9 @@ class AlertEngine:
         return out
 
     def mark_seen(self, conn, ids=None) -> None:
-        if ids:
-            conn.executemany("UPDATE alerts SET seen = 1 WHERE id = ?", [(int(i),) for i in ids])
+        if isinstance(ids, list) and ids:
+            valid = [i for i in ids if isinstance(i, int) and not isinstance(i, bool) and 0 < i < 2**63]
+            conn.executemany("UPDATE alerts SET seen = 1 WHERE id = ?", [(i,) for i in valid])
         else:
             conn.execute("UPDATE alerts SET seen = 1 WHERE seen = 0")
 
@@ -169,15 +224,39 @@ class AlertEngine:
             return []
         now = int(self.clock())
         fired = []
+        cache: dict[tuple, list] = {}   # выборки заказов в пределах одного пакета
+
+        def load(max_age: float, wanted: frozenset) -> list:
+            key = (max_age, wanted)
+            if key not in cache:
+                cache[key] = db.load_orders(conn, now - int(max_age * 3600), None, now, items=wanted)
+            return cache[key]
+
+        all_items = frozenset(items)
         for rule in rules:
             p = rule["params"]
-            max_age = float(p.get("max_age") or 6)
-            orders = db.load_orders(conn, now - int(max_age * 3600), None, now, items=items)
-            if filter_factory:
-                ok = filter_factory(p)
-                orders = [o for o in orders if ok(o["item_id"])]
-            handler = getattr(self, "_check_" + rule["kind"])
-            fired.extend(a for a in handler(conn, rule, orders, tax) if a)
+            if not isinstance(p, dict):
+                continue            # повреждённое правило не мешает остальным
+            try:
+                max_age = min(max(float(p.get("max_age") or 6), 0.01), 24 * 30)
+            except (TypeError, ValueError):
+                max_age = 6
+            if rule["kind"] in ("price_below", "price_above"):
+                # Ценовое правило касается одного предмета: нет его в пакете — нечего проверять.
+                if not isinstance(p.get("item"), str) or p["item"] not in items:
+                    continue
+                orders = load(max_age, frozenset([p["item"]]))
+            else:
+                orders = load(max_age, all_items)
+            try:
+                if filter_factory:
+                    ok = filter_factory(p)
+                    orders = [o for o in orders if ok(o["item_id"])]
+                handler = getattr(self, "_check_" + rule["kind"])
+                fired.extend(a for a in handler(conn, rule, orders, tax) if a)
+            except (TypeError, ValueError, KeyError, AttributeError):
+                # Правило, испорченное в базе вручную, не мешает остальным.
+                log.warning("Правило оповещения #%s пропущено: некорректные параметры", rule["id"], exc_info=True)
         return fired
 
     def _price_rule(self, conn, rule, orders, below: bool):

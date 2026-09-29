@@ -463,6 +463,8 @@ function tableToCsv(table) {
       const compact = text.replace(/[\s  ]/g, "");
       if (/^[−-]?\d+(\.\d+)?%?$/.test(compact)) text = compact.replace("−", "-").replace(".", ",");
     }
+    // Защита от формул в Excel: текст, начинающийся с = + - @, выводим как текст.
+    if (/^[=+\-@\t\r]/.test(text) && !(td.classList && td.classList.contains("num") && /^-?\d/.test(text))) text = `'${text}`;
     return /[";\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
   const rows = [...table.querySelectorAll("tr")].filter((tr) => !tr.querySelector("td[colspan]"));

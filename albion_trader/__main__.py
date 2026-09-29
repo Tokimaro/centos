@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import os
 import secrets
 import sys
@@ -17,7 +18,7 @@ from .capture.sniffer import Sniffer, read_pcap
 from .server import App, AppConfig, serve
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="albion_trader",
         description="Локальный анализатор рынка Albion Online со встроенным сборщиком данных.")
@@ -56,7 +57,11 @@ def main(argv=None) -> int:
 
     p_clean = sub.add_parser("cleanup", help="удалить истёкшие и устаревшие заказы")
     p_clean.add_argument("--retention-hours", type=float, default=72)
+    return parser
 
+
+def main(argv=None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     data_dir = Path(args.data_dir)
     db_path = data_dir / "market.db"
@@ -67,11 +72,11 @@ def main(argv=None) -> int:
     if cmd == "serve":
         verbose = getattr(args, "verbose", False)
         log_kwargs = {}
-        # У .exe без консоли нет stderr — пишем лог в файл.
+        # У .exe без консоли нет stderr — пишем лог в файл (с ротацией: 5 МБ × 3 файла).
         if getattr(args, "log_file", False) or sys.stderr is None:
             data_dir.mkdir(parents=True, exist_ok=True)
-            log_kwargs["filename"] = str(data_dir / "albion_trader.log")
-            log_kwargs["encoding"] = "utf-8"
+            log_kwargs["handlers"] = [logging.handlers.RotatingFileHandler(
+                data_dir / "albion_trader.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")]
         logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO,
                             format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S", **log_kwargs)
         token = getattr(args, "token", "")

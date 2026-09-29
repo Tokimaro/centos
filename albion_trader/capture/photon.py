@@ -420,12 +420,11 @@ class PhotonParser:
         # сетевых адаптерах) не должны засчитываться дважды — иначе сообщение
         # «соберётся» раньше времени с дырами.
         key = (num, frag_offset)
-        if key in seg["seen"]:
-            return
-        seg["seen"].add(key)
         end = frag_offset + len(frag)
-        if end <= len(seg["buf"]):
-            seg["buf"][frag_offset:end] = frag
+        if key in seg["seen"] or end > len(seg["buf"]):
+            return          # повтор или кусок за пределами сообщения — не засчитываем
+        seg["seen"].add(key)
+        seg["buf"][frag_offset:end] = frag
         seg["written"] += len(frag)
         if seg["written"] >= seg["total"] or (count and len(seg["seen"]) >= count
                                               and seg["written"] >= seg["total"]):

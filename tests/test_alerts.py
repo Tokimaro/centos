@@ -103,3 +103,41 @@ class TouchedTest(EngineTest):
         db.ingest(self.conn, "marketorders.ingest", {"Orders": [order(2, 600)]}, now=NOW)
         fired = self.engine.check_market(self.conn, {"T4_BAG"}, 0.04, None, {("T4_BAG", "martlock")})
         self.assertEqual([a["payload"]["location"] for a in fired], ["martlock"])
+
+
+class BatchCacheTest(EngineTest):
+    def test_orders_loaded_once_per_batch(self):
+        from unittest import mock
+        for _ in range(5):
+            self.engine.save_rule(self.conn, {"kind": "deal", "params": {"min_profit": 1}})
+        for item in ("T8_A", "T8_B", "T8_C"):   # предметов нет в пакете — не грузим вовсе
+            self.engine.save_rule(self.conn, {"kind": "price_below", "params": {"item": item, "price": 1}})
+        self.engine.save_rule(self.conn, {"kind": "price_below", "params": {"item": "T4_BAG", "price": 1}})
+        # Повреждённое правило в базе (например, правка вручную) пропускается.
+        self.conn.execute("INSERT INTO alert_rules (name, kind, params, created) VALUES ('x', 'deal', '\"bad\"', 0)")
+        with mock.patch.object(db, "load_orders", wraps=db.load_orders) as spy:
+            self.engine.check_market(self.conn, {"T4_BAG", "T5_BAG"}, 0.04)
+        # Одна выборка для всех правил «сделка» и одна — для ценового правила по T4_BAG.
+        self.assertEqual(spy.call_count, 2)
+        self.assertEqual(spy.call_args_list[1].kwargs["items"], frozenset({"T4_BAG"}))
+
+
+class RuleParamsTest(EngineTest):
+    def test_bad_param_types_rejected(self):
+        for params in ({"item": "T4_BAG", "price": "x"}, {"price": float("nan")}, {"price": True},
+                       {"locations": "martlock"}, {"src": [["a"]]}, {"item": 5}):
+            with self.assertRaises(ValueError, msg=params):
+                self.engine.save_rule(self.conn, {"kind": "price_below", "params": params})
+        rid = self.engine.save_rule(self.conn, {"kind": "price_below", "params": {
+            "item": "T4_BAG", "price": "1500", "locations": ["martlock"], "tiers": ["4"]}})
+        rule = [r for r in self.engine.rules(self.conn) if r["id"] == rid][0]
+        self.assertEqual(rule["params"]["price"], 1500.0)
+
+    def test_broken_rule_does_not_block_others(self):
+        self.conn.execute("INSERT INTO alert_rules (name, kind, params, created) VALUES "
+                          "('x', 'price_below', '{\"item\": \"T4_BAG\", \"price\": \"x\"}', 0)")
+        self.engine.save_rule(self.conn, {"kind": "price_below", "params": {"item": "T4_BAG", "price": 10**9}})
+        db.ingest(self.conn, "marketorders.ingest", {"Orders": [order(1, 500)]}, now=NOW)
+        with self.assertLogs("albion_trader.alerts", "WARNING"):
+            fired = self.engine.check_market(self.conn, {"T4_BAG"}, 0.04)
+        self.assertEqual(len(fired), 1)

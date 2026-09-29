@@ -31,7 +31,7 @@ IS_WINDOWS = sys.platform == "win32"
 def launch_command() -> str:
     """Команда запуска приложения: сам .exe, либо pythonw -m albion_trader serve."""
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
+        return f'"{sys.executable}" --autostart'
     exe = PureWindowsPath(sys.executable)  # функция нужна только в Windows
     pythonw = exe.with_name("pythonw.exe") if exe.name.lower() == "python.exe" else exe
     workdir = Path(__file__).resolve().parent.parent

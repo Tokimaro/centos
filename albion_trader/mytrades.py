@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS mails (
 );
 """
 
+LIST_GRACE = 60
+
 SELL_FINISHED = ("MARKETPLACE_SELLORDER_FINISHED_SUMMARY",)
 BUY_FINISHED = ("MARKETPLACE_BUYORDER_FINISHED_SUMMARY",)
 
@@ -187,8 +189,11 @@ class MyTrades:
                      _int(o.get("Amount"), 0), auction, parse_expires(o.get("Expires")), now))
             # Список «мои предложения/запросы» полный: заказов, которых в нём нет, больше не существует.
             types = {"offers": {"offer"}, "requests": {"request"}}.get(kind, seen_types)
+            # Список может прийти несколькими страницами подряд — закрытыми считаем только
+            # заказы, которых не было ни в одном ответе последние LIST_GRACE секунд.
             for t in types:
-                conn.execute("UPDATE my_orders SET active = 0 WHERE auction_type = ? AND seen_at < ?", (t, now))
+                conn.execute("UPDATE my_orders SET active = 0 WHERE auction_type = ? AND seen_at < ?",
+                             (t, now - LIST_GRACE))
             self.stats["orders_updates"] += 1
 
         self._write(work)

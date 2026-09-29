@@ -129,22 +129,41 @@ def _bump_stats(conn: sqlite3.Connection, topic: str, records: int, now: int) ->
     )
 
 
+INT64_MAX = 2**63 - 1
+
+
+def _i64(v, lo: int = -INT64_MAX, hi: int = INT64_MAX) -> int:
+    """Целое в пределах SQLite INTEGER (и заданного диапазона), иначе ValueError."""
+    if isinstance(v, bool) or isinstance(v, (list, dict)) or v is None:
+        raise ValueError(f"not an int: {v!r}")
+    n = int(v)
+    if not lo <= n <= hi:
+        raise ValueError(f"out of range: {n}")
+    return n
+
+
 def _normalize_order(o: dict, now: int) -> tuple | None:
     try:
-        order_id = int(o["Id"])
-        item_id = str(o["ItemTypeId"]).strip()
-        price = round(int(o["UnitPriceSilver"]) / PRICE_SCALE)
-        amount = int(o["Amount"])
+        order_id = _i64(o["Id"])
+        item_id = o["ItemTypeId"]
+        if not isinstance(item_id, str):
+            return None
+        item_id = item_id.strip()
+        price = round(_i64(o["UnitPriceSilver"], 1, INT64_MAX) / PRICE_SCALE)
+        amount = _i64(o["Amount"], 1, 2**31)
         auction_type = str(o["AuctionType"]).lower()
-    except (KeyError, TypeError, ValueError):
+        quality = _i64(o.get("QualityLevel") or 1, 0, 10)
+        enchant = _i64(o.get("EnchantmentLevel") or 0, 0, 10)
+    except (KeyError, TypeError, ValueError, OverflowError):
         return None
-    location = normalize_location(o.get("LocationId"))
-    if not item_id or not location or price <= 0 or amount <= 0:
+    loc_raw = o.get("LocationId")
+    if not isinstance(loc_raw, (str, int)) or isinstance(loc_raw, bool):
+        return None
+    location = normalize_location(loc_raw)
+    if not item_id or not location or price <= 0:
         return None
     if auction_type not in ("offer", "request"):
         return None
-    quality = int(o.get("QualityLevel") or 1)
-    enchant = int(o.get("EnchantmentLevel") or 0)
     raw_location = None if o.get("LocationId") is None else str(o.get("LocationId"))
     return (order_id, item_id, location, raw_location, quality, enchant, price,
             amount, auction_type, parse_expires(o.get("Expires")), now)
@@ -301,21 +320,23 @@ def ingest_market_history(conn: sqlite3.Connection, payload: dict, now: int | No
     """Сохраняет историю продаж (топик ``markethistories.ingest``)."""
     now = int(now if now is not None else time.time())
     try:
-        albion_id = int(payload["AlbionId"])
-        location = normalize_location(payload.get("LocationId"))
-        quality = int(payload.get("QualityLevel") or 0)
-        timescale = int(payload.get("Timescale") or 0)
-    except (KeyError, TypeError, ValueError):
+        albion_id = _i64(payload["AlbionId"], 0, 2**31)
+        loc_raw = payload.get("LocationId")
+        location = normalize_location(loc_raw) if isinstance(loc_raw, (str, int)) else None
+        quality = _i64(payload.get("QualityLevel") or 0, 0, 10)
+        timescale = _i64(payload.get("Timescale") or 0, 0, 10)
+    except (KeyError, TypeError, ValueError, OverflowError):
         return 0
     if not location:
         return 0
     rows = []
-    for h in payload.get("MarketHistories") or []:
+    histories = payload.get("MarketHistories")
+    for h in histories if isinstance(histories, list) else []:
         try:
             rows.append((albion_id, location, quality, timescale,
-                         dotnet_ticks_to_unix(h["Timestamp"]), int(h["ItemAmount"]),
-                         int(h["SilverAmount"]), now))
-        except (KeyError, TypeError, ValueError):
+                         dotnet_ticks_to_unix(_i64(h["Timestamp"], 0)), _i64(h["ItemAmount"], 0, 2**31),
+                         _i64(h["SilverAmount"], 0), now))
+        except (KeyError, TypeError, ValueError, OverflowError):
             continue
     conn.executemany(
         """INSERT OR REPLACE INTO history(albion_id, location, quality, timescale, ts,
@@ -329,20 +350,20 @@ def ingest_market_history(conn: sqlite3.Connection, payload: dict, now: int | No
 
 def ingest_gold_prices(conn: sqlite3.Connection, payload: dict, now: int | None = None) -> int:
     now = int(now if now is not None else time.time())
-    prices = payload.get("Prices") or []
-    stamps = payload.get("Timestamps") or []
+    prices = payload.get("Prices") if isinstance(payload.get("Prices"), list) else []
+    stamps = payload.get("Timestamps") if isinstance(payload.get("Timestamps"), list) else []
     rows = []
     for price, ts in zip(prices, stamps):
         try:
-            ts = int(ts)
+            ts = _i64(ts, 0)
             # Клиент может прислать тики .NET вместо unix-времени.
             if ts > 10**14:
                 ts = dotnet_ticks_to_unix(ts)
-            price = int(price)
+            price = _i64(price, 1)
             if price > 10**6:  # на случай, если игра пришлёт цену в формате × 10 000
                 price //= PRICE_SCALE
             rows.append((ts, price))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
     conn.executemany("INSERT OR REPLACE INTO gold_prices(ts, price) VALUES (?, ?)", rows)
     _bump_stats(conn, "goldprices.ingest", len(rows), now)
