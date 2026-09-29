@@ -125,6 +125,16 @@
       <button type="submit" class="primary">Показать</button>
     </form>
     <h2 id="price-title"></h2>
+    <div id="chart-wrap" hidden>
+      <form class="chart-controls" id="chart-form" autocomplete="off">
+        <label>Рынок <select name="location"></select></label>
+        <label>Качество <select name="quality"></select></label>
+        <label>Период <select name="days">
+          <option value="1">сутки</option><option value="7" selected>неделя</option>
+          <option value="30">месяц</option><option value="90">3 месяца</option></select></label>
+      </form>
+      <div id="price-chart"></div>
+    </div>
     <div class="table-wrap" id="prices-wrap">
       <table id="prices">
         <thead><tr>

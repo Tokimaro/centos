@@ -22,6 +22,7 @@ class ItemCatalog:
     def __init__(self, names: dict | None = None, index: dict | None = None):
         self.names: dict[str, dict] = names or {}
         self.index: dict[str, str] = index or {}  # AlbionId (числовой индекс) -> UniqueName
+        self.reverse_index: dict[str, int] = {v: int(k) for k, v in self.index.items() if str(k).isdigit()}
 
     @classmethod
     def load(cls, path: str | Path) -> "ItemCatalog":

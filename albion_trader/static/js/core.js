@@ -338,3 +338,112 @@ function standardTab({ id, group, title, intro, storeKey, spec, columns, sort, a
     },
   });
 }
+
+// ---------- линейный график (SVG, без библиотек) ----------
+// series: [{name, slot: 1..3, points: [[ts, value], ...]}]; одна ось Y.
+function lineChart(container, series, { height = 260, yFormat = fmt, empty = "Нет данных для графика" } = {}) {
+  container.innerHTML = "";
+  container.classList.add("viz");
+  const all = series.flatMap((s) => s.points.filter((p) => p[1] !== null && p[1] !== undefined));
+  if (!all.length) { container.innerHTML = `<p class="muted">${esc(empty)}</p>`; return; }
+  const legend = document.createElement("div");
+  legend.className = "viz-legend";
+  for (const s of series) {
+    const item = document.createElement("span");
+    item.innerHTML = `<svg width="18" height="8" aria-hidden="true"><line x1="1" y1="4" x2="17" y2="4" stroke="var(--series-${s.slot})" stroke-width="2" stroke-linecap="round"/></svg>`;
+    item.appendChild(document.createTextNode(s.name));
+    legend.appendChild(item);
+  }
+  container.appendChild(legend);
+
+  const width = Math.max(320, container.clientWidth || 600);
+  const m = { l: 64, r: 110, t: 10, b: 28 };
+  const xs = all.map((p) => p[0]), ys = all.map((p) => p[1]);
+  let x0 = Math.min(...xs), x1 = Math.max(...xs);
+  if (x0 === x1) { x0 -= 3600; x1 += 3600; }
+  let y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const pad = (y1 - y0) * 0.1 || Math.abs(y1) * 0.1 || 1;
+  y0 = Math.max(0, y0 - pad); y1 += pad;
+  const X = (t) => m.l + (t - x0) / (x1 - x0) * (width - m.l - m.r);
+  const Y = (v) => m.t + (1 - (v - y0) / (y1 - y0)) * (height - m.t - m.b);
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("width", width); svg.setAttribute("height", height);
+  svg.setAttribute("role", "img");
+  let html = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = y0 + (y1 - y0) * i / 4, y = Y(v);
+    html += `<line class="viz-grid" x1="${m.l}" x2="${width - m.r}" y1="${y}" y2="${y}"/>`
+      + `<text class="viz-axis" x="${m.l - 6}" y="${y + 4}" text-anchor="end">${esc(yFormat(v))}</text>`;
+  }
+  const spanDays = (x1 - x0) / 86400;
+  for (let i = 0; i <= 4; i++) {
+    const t = x0 + (x1 - x0) * i / 4, x = X(t);
+    const d = new Date(t * 1000);
+    const label = spanDays > 2 ? d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" })
+      : d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+    html += `<text class="viz-axis" x="${x}" y="${height - 8}" text-anchor="middle">${label}</text>`;
+  }
+  const ends = [];
+  for (const s of series) {
+    const pts = s.points.filter((p) => p[1] !== null && p[1] !== undefined).sort((a, b) => a[0] - b[0]);
+    if (!pts.length) continue;
+    const d = pts.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+    html += `<path d="${d}" fill="none" stroke="var(--series-${s.slot})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    if (pts.length === 1) html += `<circle cx="${X(pts[0][0])}" cy="${Y(pts[0][1])}" r="4" fill="var(--series-${s.slot})" stroke="var(--panel)" stroke-width="2"/>`;
+    const last = pts[pts.length - 1];
+    ends.push({ s, y: Y(last[1]), x: X(last[0]), v: last[1] });
+  }
+  // Подписи у концов линий; при наложении раздвигаем с выносками.
+  ends.sort((a, b) => a.y - b.y);
+  let prev = -Infinity;
+  for (const e of ends) {
+    const ly = Math.max(e.y, prev + 14);
+    prev = ly;
+    const lx = width - m.r + 8;
+    html += `<line class="viz-leader" x1="${e.x}" y1="${e.y}" x2="${lx - 2}" y2="${ly}"/>`
+      + `<text class="viz-label" x="${lx}" y="${ly + 4}">${esc(yFormat(e.v))}</text>`;
+  }
+  html += `<line class="viz-cross" x1="0" x2="0" y1="${m.t}" y2="${height - m.b}" visibility="hidden"/>`;
+  svg.innerHTML = html;
+  const box = document.createElement("div");
+  box.className = "viz-box";
+  box.appendChild(svg);
+  const tip = document.createElement("div");
+  tip.className = "viz-tip";
+  tip.hidden = true;
+  box.appendChild(tip);
+  container.appendChild(box);
+
+  const cross = svg.querySelector(".viz-cross");
+  const move = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = ev.clientX - rect.left;
+    if (px < m.l || px > width - m.r) { cross.setAttribute("visibility", "hidden"); tip.hidden = true; return; }
+    const t = x0 + (px - m.l) / (width - m.l - m.r) * (x1 - x0);
+    const nearestT = xs.reduce((a, b) => (Math.abs(b - t) < Math.abs(a - t) ? b : a));
+    const x = X(nearestT);
+    cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.setAttribute("visibility", "visible");
+    tip.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "viz-tip-head";
+    head.textContent = dateTime(nearestT);
+    tip.appendChild(head);
+    for (const s of series) {
+      const pts = s.points.filter((p) => p[1] !== null && p[1] !== undefined && p[0] <= nearestT);
+      if (!pts.length) continue;
+      const p = pts[pts.length - 1];
+      const row = document.createElement("div");
+      row.innerHTML = `<svg width="14" height="8" aria-hidden="true"><line x1="1" y1="4" x2="13" y2="4" stroke="var(--series-${s.slot})" stroke-width="2"/></svg>`;
+      const b = document.createElement("b"); b.textContent = yFormat(p[1]);
+      const n = document.createElement("span"); n.className = "muted"; n.textContent = " " + s.name;
+      row.append(b, n);
+      tip.appendChild(row);
+    }
+    tip.hidden = false;
+    tip.style.left = `${Math.min(x + 12, width - 180)}px`;
+    tip.style.top = `${m.t}px`;
+  };
+  svg.addEventListener("pointermove", move);
+  svg.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); tip.hidden = true; });
+}

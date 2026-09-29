@@ -215,7 +215,33 @@ async function suggestItems() {
   $("#item-options").innerHTML = data.items.map((i) => `<option value="${esc(i.item_id)}">${esc(i.name)}</option>`).join("");
 }
 
+async function loadChart() {
+  const f = $("#chart-form");
+  const item = $("#price-form").item.value.trim();
+  if (!item || !f.location.value) return;
+  const data = await api("/api/history", { item, location: f.location.value, quality: f.quality.value, days: f.days.value });
+  lineChart($("#price-chart"), [
+    { name: "Мин. цена продажи", slot: 1, points: data.snapshots.map((r) => [r.ts, r.sell_min]) },
+    { name: "Макс. цена покупки", slot: 2, points: data.snapshots.map((r) => [r.ts, r.buy_max]) },
+    { name: "Средняя цена сделок", slot: 3, points: data.sales.map((r) => [r.ts, r.avg_price]) },
+  ], { empty: "История пока пуста: снимки цен копятся при каждом просмотре рынка, средняя цена сделок — когда вы открываете график цен предмета в игре." });
+}
+
+function fillChartControls(rows) {
+  const f = $("#chart-form");
+  const prevLoc = f.location.value, prevQ = f.quality.value;
+  const locs = [...new Set(rows.map((r) => r.location))];
+  const qs = [...new Set(rows.map((r) => r.quality))].sort();
+  f.location.innerHTML = locs.map((l) => `<option value="${esc(l)}">${esc(App.locName(l))}</option>`).join("");
+  f.quality.innerHTML = qs.map((q) => `<option value="${q}">${esc(QUALITY[q] || q)}</option>`).join("");
+  if (locs.includes(prevLoc)) f.location.value = prevLoc;
+  if (qs.map(String).includes(prevQ)) f.quality.value = prevQ;
+  $("#chart-wrap").hidden = !locs.length;
+  if (locs.length) loadChart();
+}
+
 async function loadRecent() {
+  $("#chart-wrap").hidden = true;
   $("#price-title").textContent = "";
   $("#prices-wrap").hidden = true;
   $("#recent-wrap").hidden = false;
@@ -244,6 +270,7 @@ async function loadPrices() {
   }
   const data = await api("/api/prices", { item, max_age: f.max_age.value });
   $("#price-title").textContent = `${data.name} (${data.item_id})`;
+  fillChartControls(data.rows);
   const sells = data.rows.filter((r) => r.sell_min !== null && r.location !== "black_market").map((r) => r.sell_min);
   const buys = data.rows.filter((r) => r.buy_max !== null).map((r) => r.buy_max);
   const minSell = sells.length ? Math.min(...sells) : null;
@@ -270,6 +297,8 @@ App.tab({
   init() {
     $("#price-form").addEventListener("submit", (e) => { e.preventDefault(); loadPrices(); });
     $("#price-form").item.addEventListener("input", debounce(suggestItems, 250));
+    $("#chart-form").addEventListener("change", loadChart);
+    window.addEventListener("resize", debounce(() => { if (!$("#chart-wrap").hidden) loadChart(); }, 300));
   },
   show() { if (!$("#price-form").item.value.trim()) loadRecent(); },
 });

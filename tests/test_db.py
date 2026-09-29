@@ -119,3 +119,50 @@ class MigrationTest(unittest.TestCase):
             conn = db.connect(path)
             self.assertEqual(conn.execute("SELECT location FROM orders").fetchone()[0], "lymhurst")
             conn.close()
+
+
+class SnapshotTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        path = Path(self.tmp.name) / "m.db"
+        db.init_db(path)
+        self.conn = db.connect(path)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def snaps(self):
+        return db.load_snapshots(self.conn, "T4_BAG", 0)
+
+    def test_snapshot_written_on_change_or_interval(self):
+        db.ingest(self.conn, "marketorders.ingest",
+                  {"Orders": [order(1, 100), order(2, 80, "request")]}, now=NOW)
+        s = self.snaps()
+        self.assertEqual(len(s), 1)
+        self.assertEqual((s[0]["sell_min"], s[0]["buy_max"], s[0]["location"]), (100, 80, "martlock"))
+        # Та же цена через минуту — нового снимка нет.
+        db.ingest(self.conn, "marketorders.ingest", {"Orders": [order(1, 100)]}, now=NOW + 60)
+        self.assertEqual(len(self.snaps()), 1)
+        # Цена изменилась — снимок есть.
+        db.ingest(self.conn, "marketorders.ingest", {"Orders": [order(3, 95)]}, now=NOW + 120)
+        self.assertEqual(self.snaps()[-1]["sell_min"], 95)
+        # Та же цена, но прошло больше интервала — снимок есть.
+        db.ingest(self.conn, "marketorders.ingest", {"Orders": [order(3, 95)]}, now=NOW + 120 + db.SNAPSHOT_INTERVAL)
+        self.assertEqual(len(self.snaps()), 3)
+
+    def test_sales_prefer_daily_points(self):
+        ticks = lambda ts: ts * 10_000_000 + 621_355_968_000_000_000
+        for timescale, amount in ((0, 5), (1, 10)):
+            db.ingest(self.conn, "markethistories.ingest", {
+                "AlbionId": 7, "LocationId": "3008", "QualityLevel": 1, "Timescale": timescale,
+                "MarketHistories": [{"ItemAmount": amount, "SilverAmount": amount * 250 * 10000,
+                                     "Timestamp": ticks(NOW - 3600)}]}, now=NOW)
+        sales = db.load_sales(self.conn, 7, 0)
+        self.assertEqual(len(sales), 1)
+        self.assertEqual((sales[0]["amount"], sales[0]["avg_price"]), (10, 250))
+
+    def test_cleanup_old_snapshots(self):
+        db.ingest(self.conn, "marketorders.ingest", {"Orders": [order(1, 100)]}, now=NOW)
+        res = db.cleanup(self.conn, retention_hours=10**6, now=NOW + 91 * 86400)
+        self.assertEqual(res["snapshots"], 1)

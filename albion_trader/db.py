@@ -57,6 +57,18 @@ CREATE TABLE IF NOT EXISTS gold_prices (
     price INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS price_snapshots (
+    item_id     TEXT    NOT NULL,
+    location    TEXT    NOT NULL,
+    quality     INTEGER NOT NULL,
+    ts          INTEGER NOT NULL,
+    sell_min    INTEGER,
+    sell_amount INTEGER,
+    buy_max     INTEGER,
+    buy_amount  INTEGER,
+    PRIMARY KEY (item_id, location, quality, ts)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -177,7 +189,86 @@ def ingest_market_orders(conn: sqlite3.Connection, payload: dict, now: int | Non
         rows,
     )
     _bump_stats(conn, "marketorders.ingest", len(rows), now)
+    record_snapshots(conn, {(r[1], r[2], r[4]) for r in rows}, now)
     return len(rows)
+
+
+# Снимок лучших цен пишется, если цена изменилась или с прошлого прошло столько секунд.
+SNAPSHOT_INTERVAL = 600
+# Заказы старше этого не участвуют в снимке (их могли уже выкупить).
+SNAPSHOT_FRESHNESS = 6 * 3600
+
+
+def record_snapshots(conn: sqlite3.Connection, keys, now: int) -> int:
+    """Сохраняет лучшие цены затронутых стаканов (предмет, рынок, качество)."""
+    written = 0
+    for item_id, location, quality in keys:
+        best = conn.execute(
+            """SELECT
+                 (SELECT MIN(price) FROM orders WHERE item_id=?1 AND location=?2 AND quality=?3
+                    AND auction_type='offer' AND seen_at >= ?4),
+                 (SELECT SUM(amount) FROM orders WHERE item_id=?1 AND location=?2 AND quality=?3
+                    AND auction_type='offer' AND seen_at >= ?4),
+                 (SELECT MAX(price) FROM orders WHERE item_id=?1 AND location=?2 AND quality=?3
+                    AND auction_type='request' AND seen_at >= ?4),
+                 (SELECT SUM(amount) FROM orders WHERE item_id=?1 AND location=?2 AND quality=?3
+                    AND auction_type='request' AND seen_at >= ?4)""",
+            (item_id, location, quality, now - SNAPSHOT_FRESHNESS)).fetchone()
+        if best[0] is None and best[2] is None:
+            continue
+        last = conn.execute(
+            """SELECT ts, sell_min, buy_max FROM price_snapshots
+               WHERE item_id=? AND location=? AND quality=? ORDER BY ts DESC LIMIT 1""",
+            (item_id, location, quality)).fetchone()
+        if last and last[1] == best[0] and last[2] == best[2] and now - last[0] < SNAPSHOT_INTERVAL:
+            continue
+        conn.execute(
+            """INSERT OR REPLACE INTO price_snapshots
+               (item_id, location, quality, ts, sell_min, sell_amount, buy_max, buy_amount)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (item_id, location, quality, now, best[0], best[1], best[2], best[3]))
+        written += 1
+    return written
+
+
+def load_snapshots(conn: sqlite3.Connection, item_id: str, since: int, location: str | None = None,
+                   quality: int | None = None) -> list[dict]:
+    sql = ("SELECT location, quality, ts, sell_min, sell_amount, buy_max, buy_amount FROM price_snapshots "
+           "WHERE item_id = ? AND ts >= ?")
+    args: list = [item_id, since]
+    if location:
+        sql += " AND location = ?"
+        args.append(location)
+    if quality:
+        sql += " AND quality = ?"
+        args.append(quality)
+    return [dict(r) for r in conn.execute(sql + " ORDER BY ts", args)]
+
+
+def load_sales(conn: sqlite3.Connection, albion_id: int, since: int, location: str | None = None,
+               quality: int | None = None) -> list[dict]:
+    """Средняя цена и объём сделок по истории продаж (дневные точки, иначе часовые)."""
+    sql = ("SELECT location, quality, timescale, ts, item_amount, silver_amount FROM history "
+           "WHERE albion_id = ? AND ts >= ?")
+    args: list = [albion_id, since]
+    if location:
+        sql += " AND location = ?"
+        args.append(location)
+    if quality:
+        sql += " AND quality = ?"
+        args.append(quality)
+    rows = [dict(r) for r in conn.execute(sql + " ORDER BY ts", args)]
+    daily = {(r["location"], r["quality"]) for r in rows if r["timescale"] == 1}
+    out = []
+    for r in rows:
+        key = (r["location"], r["quality"])
+        wanted = 1 if key in daily else 0
+        if r["timescale"] != wanted or not r["item_amount"]:
+            continue
+        out.append({"location": r["location"], "quality": r["quality"], "ts": r["ts"],
+                    "amount": r["item_amount"],
+                    "avg_price": round(r["silver_amount"] / r["item_amount"] / PRICE_SCALE, 2)})
+    return out
 
 
 def ingest_market_history(conn: sqlite3.Connection, payload: dict, now: int | None = None) -> int:
@@ -267,7 +358,9 @@ def cleanup(conn: sqlite3.Connection, retention_hours: float, now: int | None = 
         "DELETE FROM orders WHERE seen_at < ?", (now - int(retention_hours * 3600),)).rowcount
     old_hist = conn.execute(
         "DELETE FROM history WHERE ts < ?", (now - 60 * 86400,)).rowcount
-    return {"expired": expired, "stale": stale, "history": old_hist}
+    old_snap = conn.execute(
+        "DELETE FROM price_snapshots WHERE ts < ?", (now - 90 * 86400,)).rowcount
+    return {"expired": expired, "stale": stale, "history": old_hist, "snapshots": old_snap}
 
 
 def load_orders(conn: sqlite3.Connection, min_seen_at: int, locations=None, now: int | None = None):

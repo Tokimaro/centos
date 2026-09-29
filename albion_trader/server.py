@@ -242,6 +242,19 @@ class App:
                 and (not min_volume or (r["daily_volume"] or 0) >= min_volume)]
         return {"now": now, "count": len(rows), "rows": self._named(rows, q)}
 
+    def api_history(self, q) -> dict:
+        item_id = (q.get("item") or "").strip()
+        now = int(time.time())
+        since = now - int(_float(q.get("days"), 7) * 86400)
+        location = q.get("location") or None
+        quality = int(_float(q.get("quality"), 0)) or None
+        albion_id = self.catalog.reverse_index.get(item_id)
+        with self.conn() as conn:
+            snaps = db.load_snapshots(conn, item_id, since, location, quality)
+            sales = db.load_sales(conn, albion_id, since, location, quality) if albion_id is not None else []
+        return {"now": now, "item_id": item_id, "name": self.catalog.name(item_id, q.get("lang", "ru")),
+                "snapshots": snaps, "sales": sales}
+
     def api_prices(self, q) -> dict:
         item_id = (q.get("item") or "").strip()
         now = int(time.time())
@@ -304,6 +317,7 @@ def make_handler(app: App):
         "/api/fastsell": app.api_fastsell,
         "/api/settings": app.api_settings,
         "/api/flips": app.api_flips,
+        "/api/history": app.api_history,
         "/api/items": app.api_items,
     }
 
