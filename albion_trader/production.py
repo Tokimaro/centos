@@ -209,3 +209,67 @@ def journal_table(gd: GameData, book: PriceBook, buy_market: str, sell_market: s
         })
     rows.sort(key=lambda r: (r["fill_profit"] if r["fill_profit"] is not None else -10**12), reverse=True)
     return rows
+
+
+def farming_table(gd: GameData, book: PriceBook, buy_market: str, sell_market: str, tax: float,
+                  focus: bool = False, yield_mult: float = 1.0, feed_cost: float = 0.0,
+                  item_ok=lambda i: True) -> list[dict]:
+    """Остров: доходность растений (за цикл) и животных (за выращивание).
+
+    Растение: Σ шанс × средний объём × выручка продукта × множитель − семя × (1 − шанс возврата);
+    с фокусом (полив) шанс возврата растёт на бонус из игровых таблиц (не выше 100 %).
+    Животное: выручка за выросшее + шанс потомства × цена детёныша − детёныш − корм.
+    Цена семени/детёныша — рыночная, иначе цена у фермера-торговца из таблиц.
+    """
+    rows = []
+    for p in gd.plants:
+        if not item_ok(p["seed"]):
+            continue
+        seed_price = book.buy_price(p["seed"], buy_market, "instant")
+        seed_source = "рынок"
+        if seed_price is None and p.get("silver"):
+            seed_price, seed_source = p["silver"], "торговец"
+        revenue, parts, missing = 0.0, [], []
+        for item, chance, avg in p.get("yield", []):
+            _, rev = book.sell_price(item, sell_market, "instant", tax)
+            if rev is None:
+                missing.append(item)
+                continue
+            revenue += chance * avg * rev * yield_mult
+            parts.append({"item_id": item, "chance": chance, "amount": avg, "price": round(rev, 2)})
+        if not parts:
+            continue
+        ret = min(1.0, p["seed_chance"] + (p["focus_bonus"] if focus else 0))
+        seed_cost = seed_price * (1 - ret) if seed_price is not None else None
+        profit = revenue - seed_cost if seed_cost is not None else None
+        rows.append({
+            "kind": "plant", "item_id": p["seed"], "product_id": parts[0]["item_id"], "tier": p["t"],
+            "cycle_hours": round(p["grow"] / 3600, 1), "fame": p.get("fame"),
+            "input_price": round(seed_price, 2) if seed_price is not None else None, "input_source": seed_source,
+            "return_chance": round(ret * 100, 1), "revenue": round(revenue, 2), "parts": parts, "missing": missing,
+            "cost": round(seed_cost, 2) if seed_cost is not None else None,
+            "profit": round(profit, 2) if profit is not None else None,
+            "profit_per_day": round(profit * 24 * 3600 / p["grow"], 2) if profit is not None and p["grow"] else None,
+        })
+    for a in gd.animals:
+        if not (item_ok(a["baby"]) or item_ok(a["grown"] or "")):
+            continue
+        baby = book.buy_price(a["baby"], buy_market, "instant")
+        source = "рынок"
+        if baby is None and a.get("silver"):
+            baby, source = a["silver"], "торговец"
+        grown_book, grown_rev = book.sell_price(a["grown"], sell_market, "instant", tax)
+        if baby is None or grown_rev is None:
+            continue
+        chance = min(1.0, a["offspring_chance"] + (a["focus_bonus"] if focus else 0))
+        profit = grown_rev + chance * baby - baby - feed_cost
+        rows.append({
+            "kind": "animal", "item_id": a["baby"], "product_id": a["grown"], "tier": a["t"],
+            "cycle_hours": round(a["grow"] / 3600, 1), "fame": a.get("fame"),
+            "input_price": round(baby, 2), "input_source": source, "return_chance": round(chance * 100, 1),
+            "revenue": round(grown_rev, 2), "parts": [], "missing": [], "cost": round(baby + feed_cost, 2),
+            "profit": round(profit, 2),
+            "profit_per_day": round(profit * 24 * 3600 / a["grow"], 2) if a["grow"] else None,
+        })
+    rows.sort(key=lambda r: (r["profit_per_day"] if r["profit_per_day"] is not None else -10**12), reverse=True)
+    return rows

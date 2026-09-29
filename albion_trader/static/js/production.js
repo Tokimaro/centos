@@ -160,3 +160,47 @@ standardTab({
     return { rows: data.rows, summary: `Дневников: ${data.count}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
   },
 });
+
+// ---------- остров ----------
+standardTab({
+  id: "farming", group: "prod", title: "Остров",
+  intro: "Упрощённая модель доходности фермы. Растения — за один цикл роста: ожидаемый урожай по таблице (шанс × средний "
+    + "объём) × цена продукта минус стоимость семени с учётом шанса его возврата (с поливом/фокусом шанс выше). Животные — "
+    + "за выращивание: выросшее животное + шанс потомства × детёныш − детёныш − корм (введите стоимость корма на одно "
+    + "животное). Если детёныша/семени нет на рынке, берётся цена фермера-торговца.",
+  spec: [
+    { legend: "Рынки", fields: [
+      { type: "market", name: "buy_market", label: "Покупать семена и детёнышей в", buyable: true, value: "martlock" },
+      { type: "market", name: "sell_market", label: "Продавать урожай в", value: "martlock" },
+    ] },
+    { legend: "Параметры", fields: [
+      { type: "select", name: "kind", label: "Показывать", value: "", options: [["", "всё"], ["plant", "растения"], ["animal", "животных"]] },
+      { type: "check", name: "focus", label: "С поливом / фокусом", value: false },
+      { type: "number", name: "yield_mult", label: "Множитель урожая, %", value: 100, min: 0, step: 1, title: "Например, 200 — если премиум удваивает урожай" },
+      { type: "number", name: "feed_cost", label: "Корм на одно животное, серебро", value: 0, min: 0 },
+      { type: "check", name: "premium", label: "Премиум (налог)", value: true },
+      { type: "number", name: "max_age", label: "Цены не старше, ч", value: 24, min: 0.1 },
+      { type: "tiers" },
+    ] },
+  ],
+  columns: [
+    { key: "name", title: "Семя / детёныш", html: itemCell, sort: (r) => r.name },
+    { key: "product_name", title: "Продукт", html: (r) => esc(r.product_name) },
+    { key: "input_price", title: "Цена", num: true, html: (r) => `${fmt(r.input_price)}${r.input_source === "торговец" ? ' <span class="muted" title="цена фермера-торговца">т</span>' : ""}` },
+    { key: "return_chance", title: "Возврат / потомство", num: true, html: (r) => pct(r.return_chance) },
+    { key: "revenue", title: "Выручка", num: true,
+      html: (r) => r.parts.length ? `<span class="hint" title="${esc(r.parts.map((x) => `${x.name}: ${x.chance * 100}% × ${x.amount} × ${fmt(x.price)}`).join("\n"))}">${fmt(r.revenue)}</span>` : fmt(r.revenue) },
+    { key: "cost", title: "Затраты", num: true, html: (r) => fmt(r.cost) },
+    profitCol(),
+    { key: "cycle_hours", title: "Цикл, ч", num: true, html: (r) => fmt1(r.cycle_hours) },
+    profitCol("profit_per_day", "Прибыль в сутки"),
+    { key: "fame", title: "Слава", num: true, html: (r) => fmt(r.fame) },
+  ],
+  sort: "profit_per_day",
+  empty: "Нет цен урожая. Откройте в игре рынок с продуктами фермы (категория «Фермерство»).",
+  async load(f) {
+    const data = await api("/api/farming", { ...f, limit: 400 });
+    if (data.no_gamedata) return { rows: [], summary: NO_GAMEDATA };
+    return { rows: data.rows, summary: `Позиций: ${data.count}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
+  },
+});

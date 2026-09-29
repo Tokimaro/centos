@@ -22,7 +22,7 @@ from .alerts import AlertEngine
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from .gamedata import GameData
-from .production import CraftParams, PriceBook, craft_table, enchant_table, journal_table
+from .production import CraftParams, PriceBook, craft_table, enchant_table, farming_table, journal_table
 from .items import ItemCatalog, enchant_of, tier_of
 from .locations import DEFAULT_CITIES, MARKETS, market_info, normalize_location
 
@@ -411,6 +411,26 @@ class App:
                              _float(q.get("happiness"), 100) / 100, self._item_filter(q))
         return {"now": now, "count": len(rows), "rows": self._named(rows, q, 400)}
 
+    def api_farming(self, q) -> dict:
+        if not self.gamedata:
+            return self._no_gamedata()
+        now = int(time.time())
+        buy = q.get("buy_market") or "martlock"
+        sell = q.get("sell_market") or buy
+        with self.conn() as conn:
+            orders = db.load_orders(conn, now - int(_float(q.get("max_age"), 24) * 3600), sorted({buy, sell}), now)
+        rows = farming_table(self.gamedata, PriceBook(orders), buy, sell, self._tax(q),
+                             focus=q.get("focus") == "1", yield_mult=_float(q.get("yield_mult"), 100) / 100,
+                             feed_cost=_float(q.get("feed_cost"), 0), item_ok=self._item_filter(q))
+        if q.get("kind") in ("plant", "animal"):
+            rows = [r for r in rows if r["kind"] == q.get("kind")]
+        rows = self._named(rows, q, 400)
+        for r in rows:
+            r["product_name"] = self.catalog.name(r["product_id"]) if r["product_id"] else ""
+            for part in r["parts"]:
+                part["name"] = self.catalog.name(part["item_id"])
+        return {"now": now, "count": len(rows), "rows": rows}
+
     def api_history(self, q) -> dict:
         item_id = (q.get("item") or "").strip()
         now = int(time.time())
@@ -492,6 +512,7 @@ def make_handler(app: App):
         "/api/craft": app.api_craft,
         "/api/enchant": app.api_enchant,
         "/api/journals": app.api_journals,
+        "/api/farming": app.api_farming,
         "/api/alerts": app.api_alerts,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,

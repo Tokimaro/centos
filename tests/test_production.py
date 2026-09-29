@@ -129,3 +129,33 @@ class JournalTest(unittest.TestCase):
         self.assertAlmostEqual(r["laborer_value"], round(per * 48 * 1.5, 2))
         self.assertAlmostEqual(r["coverage"], round(100 / 101 * 100, 1))
         self.assertAlmostEqual(r["laborer_vs_sell"], round(per * 48 * 1.5 - 9000 * 0.96, 2))
+
+
+class FarmingTest(unittest.TestCase):
+    GD = GameData({"items": {}, "recipes": {},
+                   "plants": [{"seed": "T5_SEED", "t": 5, "grow": 79200, "fame": 100, "seed_chance": 0.8,
+                               "focus_bonus": 0.4, "silver": 10000,
+                               "yield": [["T5_CABBAGE", 1.0, 4.5], ["T1_WORM", 0.1, 1.0]]}],
+                   "animals": [{"baby": "T5_OX_BABY", "grown": "T5_OX_GROWN", "t": 5, "grow": 504000, "fame": 300,
+                                "offspring_chance": 0.78, "focus_bonus": 0.09, "silver": 225000}]})
+
+    def test_plant_and_animal(self):
+        from albion_trader.production import farming_table
+        book = PriceBook([o("T5_CABBAGE", "m", "request", 1000), o("T5_SEED", "m", "offer", 8000),
+                          o("T5_OX_GROWN", "m", "request", 400000)])
+        rows = {r["kind"]: r for r in farming_table(self.GD, book, "m", "m", 0.04, feed_cost=20000)}
+        p = rows["plant"]
+        self.assertAlmostEqual(p["revenue"], 4.5 * 960)
+        self.assertAlmostEqual(p["cost"], round(8000 * 0.2, 2))
+        self.assertEqual(p["missing"], ["T1_WORM"])
+        self.assertAlmostEqual(p["profit_per_day"], round((4320 - 1600) * 86400 / 79200, 2))
+        a = rows["animal"]
+        self.assertEqual(a["input_source"], "торговец")    # детёныша на рынке нет — цена торговца
+        self.assertAlmostEqual(a["profit"], 400000 * 0.96 + 0.78 * 225000 - 225000 - 20000)
+
+    def test_focus_caps_seed_return(self):
+        from albion_trader.production import farming_table
+        book = PriceBook([o("T5_CABBAGE", "m", "request", 1000)])
+        p = [r for r in farming_table(self.GD, book, "m", "m", 0.04, focus=True) if r["kind"] == "plant"][0]
+        self.assertEqual(p["return_chance"], 100.0)
+        self.assertEqual(p["cost"], 0)
