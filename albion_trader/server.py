@@ -28,6 +28,13 @@ STATIC_DIR = Path(__file__).parent / "static"
 MAX_BODY = 20 * 1024 * 1024
 KNOWN_TOPIC_SUFFIXES = (".ingest", "marketnotifications", "skills")
 
+# Значения настроек по умолчанию; хранятся в таблице settings.
+DEFAULT_SETTINGS = {
+    "premium": True,
+    "station_fee": 400,          # серебро за 100 питания на станции
+    "use_focus": False,
+}
+
 
 @dataclass
 class AppConfig:
@@ -88,6 +95,21 @@ class App:
     def cleanup(self) -> dict:
         with self.write_lock, self.conn() as conn:
             return db.cleanup(conn, self.config.retention_hours)
+
+    # --- настройки ------------------------------------------------------
+    def settings(self) -> dict:
+        with self.conn() as conn:
+            return {**DEFAULT_SETTINGS, **db.get_settings(conn)}
+
+    def api_settings(self, _q) -> dict:
+        return self.settings()
+
+    def api_settings_post(self, _q, body) -> dict:
+        if not isinstance(body, dict):
+            raise ApiError("ожидается объект настроек")
+        with self.write_lock, self.conn() as conn:
+            db.set_settings(conn, body)
+        return self.settings()
 
     # --- API ------------------------------------------------------------
     def api_locations(self, _q) -> dict:
@@ -231,6 +253,10 @@ class App:
         return {"items": [{"item_id": i, "name": self.catalog.name(i, lang)} for i in found[:limit]]}
 
 
+class ApiError(Exception):
+    """Ошибка запроса к API (400)."""
+
+
 def _split(value) -> list[str]:
     return [v for v in (value or "").split(",") if v]
 
@@ -249,7 +275,12 @@ def make_handler(app: App):
         "/api/deals": app.api_deals,
         "/api/prices": app.api_prices,
         "/api/fastsell": app.api_fastsell,
+        "/api/settings": app.api_settings,
         "/api/items": app.api_items,
+    }
+
+    post_api = {
+        "/api/settings": app.api_settings_post,
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -275,6 +306,8 @@ def make_handler(app: App):
                 q = {k: v[-1] for k, v in parse_qs(url.query).items()}
                 try:
                     self._json(200, api[url.path](q))
+                except ApiError as e:
+                    self._json(400, {"error": str(e)})
                 except Exception as e:  # pragma: no cover - защитный путь
                     log.exception("API error")
                     self._json(500, {"error": str(e)})
@@ -289,7 +322,38 @@ def make_handler(app: App):
                 ctype += "; charset=utf-8"
             self._send(200, path.read_bytes(), ctype)
 
+        def _api_post(self, path: str) -> None:
+            # Защита от запросов со сторонних сайтов: только JSON и только с этого же адреса.
+            origin = self.headers.get("Origin")
+            if origin and urlparse(origin).netloc != self.headers.get("Host"):
+                self._json(403, {"error": "forbidden origin"})
+                return
+            if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                self._json(415, {"error": "expected application/json"})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            if length < 0 or length > MAX_BODY:
+                self._json(400, {"error": "bad body size"})
+                return
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                self._json(400, {"error": "invalid json"})
+                return
+            q = {k: v[-1] for k, v in parse_qs(urlparse(self.path).query).items()}
+            try:
+                self._json(200, post_api[path](q, body))
+            except ApiError as e:
+                self._json(400, {"error": str(e)})
+            except Exception as e:  # pragma: no cover
+                log.exception("API error")
+                self._json(500, {"error": str(e)})
+
         def do_POST(self):  # noqa: N802
+            path = urlparse(self.path).path
+            if path in post_api:
+                self._api_post(path)
+                return
             # albiondata-client шлёт POST <базовый URL>/<топик>, например
             # http://127.0.0.1:8484/marketorders.ingest или, с токеном,
             # http://127.0.0.1:8484/<токен>/marketorders.ingest

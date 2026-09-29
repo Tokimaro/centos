@@ -101,3 +101,29 @@ class FastSellApiTest(ServerTest):
         row = data["rows"][0]
         self.assertEqual(row["best_location"], "black_market")
         self.assertAlmostEqual(row["gain_vs_base"], (5000 - 3000) * 0.96)
+
+
+class SettingsApiTest(ServerTest):
+    def post_json(self, path, body, headers=None):
+        h = {"Content-Type": "application/json", **(headers or {})}
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(), headers=h, method="POST")
+        with urllib.request.urlopen(req) as r:
+            return json.load(r)
+
+    def test_defaults_and_update(self):
+        s = self.get("/api/settings")
+        self.assertTrue(s["premium"])
+        s = self.post_json("/api/settings", {"premium": False, "station_fee": 250})
+        self.assertEqual((s["premium"], s["station_fee"]), (False, 250))
+        self.assertEqual(self.get("/api/settings")["station_fee"], 250)
+
+    def test_rejects_cross_origin_and_non_json(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.post_json("/api/settings", {"premium": False}, {"Origin": "http://evil.example"})
+        self.assertEqual(cm.exception.code, 403)
+        req = urllib.request.Request(self.base + "/api/settings", data=b"premium=0",
+                                     headers={"Content-Type": "text/plain"}, method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req)
+        self.assertEqual(cm.exception.code, 415)
+        self.assertTrue(self.get("/api/settings")["premium"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from collections import defaultdict
@@ -54,6 +55,11 @@ CREATE TABLE IF NOT EXISTS history (
 CREATE TABLE IF NOT EXISTS gold_prices (
     ts    INTEGER PRIMARY KEY,
     price INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ingest_stats (
@@ -235,6 +241,21 @@ def ingest(conn: sqlite3.Connection, topic: str, payload, now: int | None = None
         return ingest_gold_prices(conn, payload, now)
     _bump_stats(conn, topic, 0, int(now if now is not None else time.time()))
     return 0
+
+
+def get_settings(conn: sqlite3.Connection) -> dict:
+    out = {}
+    for key, value in conn.execute("SELECT key, value FROM settings"):
+        try:
+            out[key] = json.loads(value)
+        except ValueError:
+            continue
+    return out
+
+
+def set_settings(conn: sqlite3.Connection, values: dict) -> None:
+    conn.executemany("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                     [(k, json.dumps(v, ensure_ascii=False)) for k, v in values.items()])
 
 
 def cleanup(conn: sqlite3.Connection, retention_hours: float, now: int | None = None) -> dict:
