@@ -311,3 +311,34 @@ def flip_table(orders: list[dict], tax: float, fee: float = SETUP_FEE, volumes: 
         })
     rows.sort(key=lambda r: (r["daily_potential"] or 0, r["profit"]), reverse=True)
     return rows
+
+
+def median(values: list[float]) -> float:
+    v = sorted(values)
+    n = len(v)
+    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+
+
+def underpriced(offers: list[dict], refs: dict, tax: float, fee: float = SETUP_FEE) -> list[dict]:
+    """Предложения заметно дешевле опорной цены.
+
+    ``refs``: {(item, location, quality): (опорная цена, источник, число точек)}.
+    Прибыль перепродажи — выставить по опорной цене своим предложением.
+    """
+    rows = []
+    for o in offers:
+        ref = refs.get((o["item_id"], o["location"], o["quality"]))
+        if not ref or not ref[0] or o["price"] >= ref[0]:
+            continue
+        ref_price, source, points = ref
+        profit = ref_price * (1 - tax - fee) - o["price"]
+        rows.append({
+            "item_id": o["item_id"], "location": o["location"], "quality": o["quality"],
+            "price": o["price"], "amount": o["amount"], "ref_price": round(ref_price, 2),
+            "ref_source": source, "ref_points": points,
+            "discount": round((1 - o["price"] / ref_price) * 100, 2),
+            "profit": round(profit, 2), "total_profit": round(profit * o["amount"], 2),
+            "seen_at": o["seen_at"],
+        })
+    rows.sort(key=lambda r: r["total_profit"], reverse=True)
+    return rows

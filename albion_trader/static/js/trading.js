@@ -346,3 +346,43 @@ standardTab({
     return { rows: data.rows, summary: `Вариантов: ${data.count}${data.rows.length < data.count ? ` (показано ${data.rows.length})` : ""}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
   },
 });
+
+// ---------- недооценённые лоты ----------
+standardTab({
+  id: "underpriced", group: "trade", title: "Недооценённые",
+  intro: "Предложения заметно дешевле обычной цены — кто-то ошибся или сливает товар. Опорная цена — медиана "
+    + "минимальных цен за 7 дней по снимкам (нужно ≥3 снимков), иначе средняя цена сделок. Прибыль — если купить "
+    + "и перевыставить по опорной цене своим предложением (налог и комиссия учтены).",
+  spec: [
+    { legend: "Рынки", cls: "locs", fields: [{ type: "markets", name: "locs", buyable: true }] },
+    { legend: "Параметры", fields: [
+      { type: "check", name: "premium", label: "Премиум (налог 4%, без — 8%)", value: true },
+      { type: "number", name: "max_age", label: "Свежесть предложений, ч", value: 2, min: 0.1 },
+      { type: "number", name: "min_discount", label: "Мин. скидка, %", value: 20, min: 0 },
+      { type: "number", name: "min_profit", label: "Мин. прибыль / шт", value: 1000, min: 0 },
+    ] },
+    { legend: "Предметы", fields: [
+      { type: "search", name: "q", label: "Поиск", placeholder: "название или ID" },
+      { type: "tiers" }, { type: "enchants" },
+    ] },
+  ],
+  columns: [
+    { key: "name", title: "Предмет", html: itemCell, sort: (r) => r.name },
+    { key: "quality", title: "Кач.", html: (r) => `<span title="${QUALITY[r.quality] || ""}">${r.quality}</span>` },
+    { key: "location", title: "Рынок", html: (r) => locCell(r.location), sort: (r) => App.locName(r.location) },
+    { key: "price", title: "Цена", num: true, html: (r) => fmt(r.price) },
+    { key: "ref_price", title: "Обычно", num: true, html: (r) => `<span title="${r.ref_source === "median" ? `медиана ${r.ref_points} снимков` : `средняя цена сделок, ${r.ref_points} дн.`}">${fmt(r.ref_price)}</span>` },
+    { key: "discount", title: "Скидка", num: true, html: (r) => `<b>${pct(r.discount)}</b>`, cls: () => "good" },
+    { key: "amount", title: "Шт.", num: true, html: (r) => fmt(r.amount) },
+    { key: "profit", title: "Прибыль/шт", num: true, html: (r) => fmt(r.profit), cls: () => "good" },
+    { key: "total_profit", title: "Итого", num: true, html: (r) => `<b>${fmt(r.total_profit)}</b>`, cls: () => "good" },
+    { key: "seen_at", title: "Возраст", num: true, html: (r) => `<span class="${ageClass(r.seen_at, r._now)}">${age(r.seen_at, r._now)}</span>`, sort: (r) => -r.seen_at },
+  ],
+  sort: "total_profit",
+  empty: "Недооценённых лотов нет. Для опорной цены нужна история: один и тот же рынок надо посмотреть хотя бы 3 раза с интервалом (или открыть график цен предмета в игре).",
+  async load(f) {
+    const data = await api("/api/underpriced", { ...f, limit: 500 });
+    data.rows.forEach((r) => { r._now = data.now; });
+    return { rows: data.rows, summary: `Лотов: ${data.count}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
+  },
+});

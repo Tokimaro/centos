@@ -245,6 +245,32 @@ def load_snapshots(conn: sqlite3.Connection, item_id: str, since: int, location:
     return [dict(r) for r in conn.execute(sql + " ORDER BY ts", args)]
 
 
+def reference_prices(conn: sqlite3.Connection, since: int, index_to_item: dict,
+                     min_snapshots: int = 3) -> dict:
+    """Опорные цены: медиана мин. цены продажи по снимкам (если снимков ≥ min_snapshots),
+    иначе средняя цена сделок из истории. {(item, location, quality): (цена, источник, точек)}."""
+    series: dict[tuple, list] = {}
+    for r in conn.execute("SELECT item_id, location, quality, sell_min FROM price_snapshots "
+                          "WHERE ts >= ? AND sell_min IS NOT NULL", (since,)):
+        series.setdefault((r[0], r[1], r[2]), []).append(r[3])
+    refs = {}
+    for key, values in series.items():
+        if len(values) >= min_snapshots:
+            v = sorted(values)
+            n = len(v)
+            refs[key] = (v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2, "median", n)
+    for r in conn.execute(
+            """SELECT albion_id, location, quality, SUM(silver_amount) AS silver, SUM(item_amount) AS amount,
+                      COUNT(*) AS points
+               FROM history WHERE timescale = 1 AND ts >= ? AND item_amount > 0
+               GROUP BY albion_id, location, quality""", (since,)):
+        item_id = index_to_item.get(str(r["albion_id"]))
+        key = (item_id, r["location"], r["quality"])
+        if item_id and key not in refs and r["amount"]:
+            refs[key] = (r["silver"] / r["amount"] / PRICE_SCALE, "sales", r["points"])
+    return refs
+
+
 def load_sales(conn: sqlite3.Connection, albion_id: int, since: int, location: str | None = None,
                quality: int | None = None) -> list[dict]:
     """Средняя цена и объём сделок по истории продаж (дневные точки, иначе часовые)."""

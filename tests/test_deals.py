@@ -173,3 +173,17 @@ class FlipTest(unittest.TestCase):
         y = rows[("Y", "martlock")]
         self.assertAlmostEqual(y["instant_profit"], 1000 * 0.96 - 900)
         self.assertNotIn(("X", "thetford", 2), [(r["item_id"], r["location"], r["quality"]) for r in rows.values()])
+
+
+class UnderpricedTest(unittest.TestCase):
+    def test_discount_and_profit(self):
+        from albion_trader.deals import underpriced
+        offers = [o("X", "thetford", "offer", 600, amount=2), o("X", "thetford", "offer", 1100),
+                  o("Y", "thetford", "offer", 10)]
+        refs = {("X", "thetford", 1): (1000, "median", 5)}
+        rows = underpriced(offers, refs, tax=0.04)
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual((r["price"], r["discount"], r["ref_source"]), (600, 40.0, "median"))
+        self.assertAlmostEqual(r["profit"], 1000 * (1 - 0.04 - 0.025) - 600)
+        self.assertAlmostEqual(r["total_profit"], round(r["profit"] * 2, 2))

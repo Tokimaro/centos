@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import db
 from .deals import (TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, fast_sell_table, find_deals, flip_table,
-                    price_table)
+                    price_table, underpriced)
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from .gamedata import GameData
@@ -242,6 +242,19 @@ class App:
                 and (not min_volume or (r["daily_volume"] or 0) >= min_volume)]
         return {"now": now, "count": len(rows), "rows": self._named(rows, q)}
 
+    def api_underpriced(self, q) -> dict:
+        now = int(time.time())
+        locs = [l for l in (_split(q.get("locs")) or DEFAULT_CITIES) if l != "black_market"]
+        with self.conn() as conn:
+            orders = db.load_orders(conn, now - int(_float(q.get("max_age"), 2) * 3600), locs, now)
+            refs = db.reference_prices(conn, now - 7 * 86400, self.catalog.index)
+        ok = self._item_filter(q)
+        offers = [o for o in orders if o["auction_type"] == "offer" and ok(o["item_id"])]
+        rows = underpriced(offers, refs, self._tax(q))
+        min_discount, min_profit = _float(q.get("min_discount"), 20), _float(q.get("min_profit"), 0)
+        rows = [r for r in rows if r["discount"] >= min_discount and r["profit"] >= min_profit]
+        return {"now": now, "count": len(rows), "rows": self._named(rows, q)}
+
     def api_history(self, q) -> dict:
         item_id = (q.get("item") or "").strip()
         now = int(time.time())
@@ -318,6 +331,7 @@ def make_handler(app: App):
         "/api/settings": app.api_settings,
         "/api/flips": app.api_flips,
         "/api/history": app.api_history,
+        "/api/underpriced": app.api_underpriced,
         "/api/items": app.api_items,
     }
 

@@ -166,3 +166,20 @@ class SnapshotTest(unittest.TestCase):
         db.ingest(self.conn, "marketorders.ingest", {"Orders": [order(1, 100)]}, now=NOW)
         res = db.cleanup(self.conn, retention_hours=10**6, now=NOW + 91 * 86400)
         self.assertEqual(res["snapshots"], 1)
+
+
+class ReferencePriceTest(SnapshotTest):
+    def test_median_needs_three_snapshots_else_sales(self):
+        for i, price in enumerate((100, 300, 200)):
+            db.ingest(self.conn, "marketorders.ingest", {"Orders": [order(10 + i, price)]},
+                      now=NOW + i * (db.SNAPSHOT_INTERVAL + db.PRUNE_GRACE_SECONDS + 1))
+        refs = db.reference_prices(self.conn, 0, {"7": "T4_BAG", "8": "T5_BAG"})
+        # Снимки: 100; затем свежий стакан начинается с 300 — заказ за 100 считается выкупленным;
+        # затем лучший 200. Медиана (100, 300, 200) = 200.
+        self.assertEqual(refs[("T4_BAG", "martlock", 1)], (200, "median", 3))
+        ticks = lambda ts: ts * 10_000_000 + 621_355_968_000_000_000
+        db.ingest(self.conn, "markethistories.ingest", {
+            "AlbionId": 8, "LocationId": "3008", "QualityLevel": 1, "Timescale": 1,
+            "MarketHistories": [{"ItemAmount": 4, "SilverAmount": 4 * 500 * 10000, "Timestamp": ticks(NOW)}]}, now=NOW)
+        refs = db.reference_prices(self.conn, 0, {"7": "T4_BAG", "8": "T5_BAG"})
+        self.assertEqual(refs[("T5_BAG", "martlock", 1)], (500, "sales", 1))
