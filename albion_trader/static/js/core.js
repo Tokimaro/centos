@@ -449,3 +449,50 @@ function lineChart(container, series, { height = 260, yFormat = fmt, empty = "Н
   svg.addEventListener("pointermove", move);
   svg.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); tip.hidden = true; });
 }
+
+// ---------- экспорт таблиц в CSV ----------
+// Разделитель «;», BOM и десятичная запятая — так файл сразу открывается в русском Excel.
+function tableToCsv(table) {
+  const clean = (td) => {
+    let text = (td.innerText || td.textContent || "").trim().replace(/\s*\n\s*/g, " / ");
+    if (td.classList && td.classList.contains("num")) {
+      const compact = text.replace(/[\s  ]/g, "");
+      if (/^[−-]?\d+(\.\d+)?%?$/.test(compact)) text = compact.replace("−", "-").replace(".", ",");
+    }
+    return /[";\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  const rows = [...table.querySelectorAll("tr")].filter((tr) => !tr.querySelector("td[colspan]"));
+  return "﻿" + rows.map((tr) => [...tr.children].map(clean).join(";")).join("\r\n");
+}
+
+function downloadCsv(table, name) {
+  const blob = new Blob([tableToCsv(table)], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${name}-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+function addCsvButtons(root = document) {
+  for (const wrap of root.querySelectorAll(".table-wrap")) {
+    if (wrap.dataset.csv) continue;
+    wrap.dataset.csv = "1";
+    const bar = document.createElement("div");
+    bar.className = "table-tools";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "csv-btn";
+    btn.textContent = "CSV";
+    btn.title = "Скачать таблицу для Excel";
+    btn.addEventListener("click", () => {
+      const table = wrap.querySelector("table");
+      const panel = wrap.closest(".panel");
+      if (table) downloadCsv(table, panel ? panel.id.replace(/^tab-/, "") : "table");
+    });
+    bar.appendChild(btn);
+    wrap.parentNode.insertBefore(bar, wrap);
+  }
+}
+new MutationObserver(() => addCsvButtons()).observe(document.documentElement, { childList: true, subtree: true });

@@ -172,3 +172,7 @@ summary { cursor: pointer; color: var(--muted); }
 .title-row button { margin-top: 0; }
 .rule-kind { display: inline-flex; min-width: 240px; margin-right: 12px; }
 .hint { border-bottom: 1px dotted var(--muted); cursor: help; }
+.table-tools { display: flex; justify-content: flex-end; margin: 4px 0 2px; }
+.csv-btn { font-size: 11px; padding: 1px 8px; border: 1px solid var(--border); background: var(--panel);
+  color: var(--muted); border-radius: 4px; cursor: pointer; }
+.csv-btn:hover { color: var(--accent); border-color: var(--accent); }
