@@ -104,9 +104,12 @@ albiondata-client (см. ниже).
 Если игра начнёт отдавать данные рынка в зашифрованном виде, приложение покажет
 это в статусе — в таком случае цены не может собрать ни один сборщик.
 
-После крупных обновлений игры могут измениться номера операций протокола. Их можно
-переопределить без правки кода файлом `data/opcodes.json` (значения по умолчанию —
-в `albion_trader/capture/albion.py`), например:
+После крупных обновлений игры могут измениться номера операций протокола. Заказы
+рынка всё равно распознаются по содержимому, а «Статус» предупредит, что коды
+устарели. Актуальные номера подтягиваются из albiondata-client кнопкой «Обновить
+коды операций» во вкладке «Статус» или командой
+`python -m albion_trader update-opcodes` (пишет `data/opcodes.json`). Файл можно
+править и вручную (значения по умолчанию — в `albion_trader/capture/albion.py`):
 
 ```json
 {"auction_get_offers": 81, "auction_get_requests": 82, "join": 2}
@@ -211,6 +214,7 @@ python -m albion_trader [--data-dir DIR] serve [--host 127.0.0.1] [--port 8484]
                                          [--no-capture] [--record FILE.pcap] [-v]
 python -m albion_trader replay FILE.pcap
 python -m albion_trader update-items
+python -m albion_trader update-opcodes
 python -m albion_trader cleanup [--retention-hours 72]
 ```
 

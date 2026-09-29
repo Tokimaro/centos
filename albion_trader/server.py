@@ -25,6 +25,7 @@ from .activity import Activity
 from .world import World
 from .alerts import AlertEngine
 from .mytrades import MyTrades
+from .capture import opcodes as opcodes_mod
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from .gamedata import GameData
@@ -292,6 +293,17 @@ class App:
         return {"now": now, "rows": rows[:int(_float(q2["limit"], 2000))],
                 "players": sorted(players.values(), key=lambda p: p["value"] + p["silver"], reverse=True),
                 "character": self.albion.character_name}
+
+    def api_update_opcodes(self, _q, _body) -> dict:
+        path = self.config.opcodes_path or Path(self.config.db_path).with_name("opcodes.json")
+        try:
+            res = opcodes_mod.update(path)
+        except (OSError, ValueError) as e:
+            raise ApiError(f"не удалось обновить коды: {e}") from e
+        with self.albion.lock:
+            self.albion.set_opcodes(load_opcodes(path))
+        self.albion.stats["orders_by_content"] = 0
+        return {"ok": True, "missing": res["missing"]}
 
     def api_world(self, _q) -> dict:
         now = int(time.time())
@@ -708,6 +720,7 @@ def make_handler(app: App):
         "/api/settings": app.api_settings_post,
         "/api/alerts/seen": app.api_alerts_seen,
         "/api/session/new": app.api_session_new,
+        "/api/update-opcodes": app.api_update_opcodes,
         "/api/alert-rules": app.api_alert_rules_post,
     }
 

@@ -114,6 +114,13 @@ def _loads(s):
     return v if isinstance(v, dict) else None
 
 
+def _looks_like_market_orders(orders: list) -> bool:
+    if not orders:
+        return False
+    first = _loads(orders[0])
+    return bool(first) and "AuctionType" in first and "UnitPriceSilver" in first and "ItemTypeId" in first
+
+
 def _as_int(v) -> int | None:
     if isinstance(v, bool):
         return int(v)
@@ -133,13 +140,8 @@ class AlbionState:
     def __init__(self, sink: Callable[[str, dict], object], opcodes: dict | None = None,
                  clock: Callable[[], float] = time.time):
         self.sink = sink
-        opcodes = dict(opcodes or DEFAULT_OPCODES)
-        self.ev = dict(opcodes.pop("events", None) or DEFAULT_EVENTS)
-        self.op = {**DEFAULT_OPCODES, **opcodes}
-        self._interesting = set(self.op.values())
-        self._event_names = {v: k for k, v in self.ev.items()}
-        self._op_names = {v: k for k, v in self.op.items()}
         self._listeners: dict[str, list[Callable]] = {}
+        self.set_opcodes(opcodes)
         self.character_name = ""
         self.clock = clock
         self.lock = threading.Lock()
@@ -155,6 +157,9 @@ class AlbionState:
             "last_data_at": None, "encrypted_at": None, "no_location_drops": 0,
             "market_requests": 0, "market_responses_lost": 0,
             "character": "", "events": 0,
+            # Заказы, опознанные только по содержимому (код операции неизвестен) — признак
+            # того, что после патча сместились номера операций.
+            "orders_by_content": 0, "orders_by_content_at": None,
         }
 
     # --- коды -----------------------------------------------------------
@@ -172,6 +177,15 @@ class AlbionState:
     def _code(self, params: dict, fallback: int) -> int:
         v = _as_int(params.get(253))
         return self._normalize(fallback if v is None else v)
+
+    def set_opcodes(self, opcodes: dict | None) -> None:
+        """Применяет коды операций/событий (в том числе на лету после update-opcodes)."""
+        opcodes = dict(opcodes or DEFAULT_OPCODES)
+        self.ev = {**DEFAULT_EVENTS, **(opcodes.pop("events", None) or {})}
+        self.op = {**DEFAULT_OPCODES, **opcodes}
+        self._interesting = set(self.op.values())
+        self._event_names = {v: k for k, v in self.ev.items()}
+        self._op_names = {v: k for k, v in self.op.items()}
 
     # --- подписчики ---------------------------------------------------
     def on(self, name: str, fn: Callable) -> None:
@@ -221,6 +235,11 @@ class AlbionState:
                 self._my_orders(own_kind, orders)
             elif is_orders and (code in (self.op["auction_get_offers"], self.op["auction_get_requests"],
                                          self.op["auction_buy_offer"]) or set(params) == {0}):
+                self._market_orders(orders)
+            elif is_orders and _looks_like_market_orders(orders):
+                # Код операции неизвестен, но это явно заказы рынка — сохраняем и отмечаем.
+                self.stats["orders_by_content"] += 1
+                self.stats["orders_by_content_at"] = self.clock()
                 self._market_orders(orders)
             elif code == self.op["join"]:
                 self._set_location(params.get(8), "Join")

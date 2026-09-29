@@ -414,3 +414,28 @@ class GoldCaptureTest(unittest.TestCase):
             data = app.api_gold({"days": "1"})
             self.assertEqual([p["price"] for p in data["prices"]], [4800, 4900])
             self.assertEqual(data["current"]["price"], 4900)
+
+
+class PatchResilienceTest(unittest.TestCase):
+    def test_orders_with_unknown_code_saved_by_content(self):
+        sink, state, parser = make_state()
+        state.location = "3008"
+        # Код 81 сдвинулся на 84, и ответ пришёл таблицей параметров, а не в слоте debug.
+        parser.receive_packet(pb.packet(pb.response(84, {0: [json.dumps(order(1, 10))], 1: 5})))
+        self.assertEqual(len(sink.items), 1)
+        self.assertEqual(state.stats["orders_by_content"], 1)
+
+    def test_set_opcodes_live(self):
+        sink, state, parser = make_state()
+        state.set_opcodes({"join": 7, "events": {"update_fame": 90}})
+        parser.receive_packet(pb.packet(pb.response(7, {8: "5003"})))
+        self.assertEqual(state.location, "5003")
+        self.assertEqual(state.ev["update_fame"], 90)
+        self.assertEqual(state.op["auction_get_offers"], 81)   # остальное — по умолчанию
+
+    def test_parse_go_enum(self):
+        from albion_trader.capture.opcodes import build_opcodes, parse_go_enum
+        ops = "const (\n\topUnused OperationType = iota\n\topPing\n\topJoin // вход\n\topFoo = 10\n\topBar\n)\n"
+        self.assertEqual(parse_go_enum(ops, "op"), {"opUnused": 0, "opPing": 1, "opJoin": 2, "opFoo": 10, "opBar": 11})
+        with self.assertRaises(ValueError):
+            build_opcodes(ops, "")

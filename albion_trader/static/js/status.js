@@ -39,6 +39,9 @@ async function loadStatus() {
     ${c.error ? `<p class="bad">Сборщик: ${esc(c.error)}</p>` : ""}
     ${c.market_responses_lost ? `<p class="warn">Ответов рынка не дошло целиком: ${fmt(c.market_responses_lost)} из ${fmt(c.market_requests)}. Похоже, теряются сетевые пакеты (в людных зонах это случается чаще) — обновите страницу рынка ещё раз.</p>` : ""}
     ${c.no_location_drops ? `<p class="warn">Страниц рынка без известной локации: ${fmt(c.no_location_drops)} — смените зону в игре.</p>` : ""}
+    ${c.orders_by_content ? `<p class="warn">Заказы рынка приходят с неизвестным кодом операции (${fmt(c.orders_by_content)} раз) — похоже, игра обновилась.
+      Цены сохраняются, но история цен, почта и часть событий могут не распознаваться.
+      <button type="button" class="secondary" id="update-opcodes">Обновить коды операций</button></p>` : ""}
     ${c.encrypted_at ? `<p class="warn">Последний ответ рынка (${age(Math.round(c.encrypted_at), s.now)} назад) пришёл зашифрованным — игра сейчас не отдаёт цены в открытом виде.</p>` : ""}
     <div class="cards">
       <div class="card"><div class="v ${c.running ? "good" : "bad"}">${capText}</div><div class="l">встроенный сборщик · пакетов игры: ${fmt(c.packets)}</div></div>
@@ -54,7 +57,21 @@ async function loadStatus() {
       <tbody>${locRows || `<tr><td colspan="5" class="muted">Данных пока нет</td></tr>`}</tbody></table></div>
     <h2>Полученные пакеты</h2>
     <div class="table-wrap"><table><thead><tr><th>Топик</th><th class="num">Пакетов</th><th class="num">Записей</th><th class="num">Последний</th></tr></thead>
-      <tbody>${topicRows || `<tr><td colspan="4" class="muted">Клиент ещё ничего не присылал</td></tr>`}</tbody></table></div>`;
+      <tbody>${topicRows || `<tr><td colspan="4" class="muted">Клиент ещё ничего не присылал</td></tr>`}</tbody></table></div>
+    <p class="muted">После крупного обновления игры можно подтянуть актуальные номера операций из albiondata-client:
+      <button type="button" class="secondary" id="update-opcodes-any">Обновить коды операций</button> <span id="opcodes-result"></span></p>`;
+  for (const id of ["update-opcodes", "update-opcodes-any"]) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    btn.addEventListener("click", async () => {
+      const out = $("#opcodes-result");
+      out.textContent = "Обновляю…";
+      try {
+        const r = await apiPost("/api/update-opcodes", {});
+        out.textContent = r.missing.length ? `Готово, но не найдены: ${r.missing.join(", ")}` : "Готово — коды обновлены и применены.";
+      } catch (e) { out.textContent = `Ошибка: ${e.message}`; }
+    });
+  }
 }
 
 

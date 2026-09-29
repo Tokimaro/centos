@@ -12,6 +12,7 @@ from pathlib import Path
 from . import db
 from .gamedata import download as download_gamedata
 from .items import download_catalog
+from .capture.opcodes import update as update_opcodes
 from .capture.sniffer import Sniffer, read_pcap
 from .server import App, AppConfig, serve
 
@@ -41,6 +42,8 @@ def main(argv=None) -> int:
 
     p_replay = sub.add_parser("replay", help="загрузить данные из записи трафика (.pcap)")
     p_replay.add_argument("pcap", help="файл .pcap (например, из Wireshark)")
+
+    sub.add_parser("update-opcodes", help="обновить номера операций игры из albiondata-client (после патчей)")
 
     sub.add_parser("update-items", help="скачать названия предметов (RU/EN) и игровые таблицы из ao-bin-dumps")
 
@@ -82,6 +85,12 @@ def main(argv=None) -> int:
         stats = download_gamedata(data_dir / "gamedata.json")
         print(f"Готово: рецептов {stats['recipes']}, дневников {stats['journals']}, "
               f"растений {stats['plants']}, животных {stats['animals']}")
+        return 0
+    if cmd == "update-opcodes":
+        res = update_opcodes(opcodes_path)
+        print(f"Готово: {opcodes_path}")
+        if res["missing"]:
+            print("Не найдены в исходниках:", ", ".join(res["missing"]))
         return 0
     if cmd == "replay":
         logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
