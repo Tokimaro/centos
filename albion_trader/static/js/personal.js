@@ -149,3 +149,50 @@ App.tab({
   },
   show() { if (this.reload) this.reload(); },
 });
+
+// ---------- журнал лута ----------
+App.tab({
+  id: "loot", group: "my", title: "Лут группы",
+  init(el) {
+    el.innerHTML = `
+      <p class="muted intro">Кто что подобрал рядом с вами — полезно для честного дележа в группе. Стоимость предметов —
+        по медиане лучших цен продажи в городах (иначе по средней цене сделок).</p>
+      <form class="chart-controls" id="loot-form" autocomplete="off">
+        <label>Период <select name="period">
+          <option value="session">текущая сессия</option><option value="1">сутки</option>
+          <option value="7" selected>неделя</option><option value="30">месяц</option></select></label>
+        <label>Игрок <input type="search" name="player" placeholder="имя"></label>
+      </form>
+      <h2>Итоги по игрокам</h2><div id="loot-players"></div>
+      <h2>Журнал</h2><div id="loot-rows"></div>`;
+    this.players = makeTable($("#loot-players"), [
+      { key: "player", title: "Игрок", html: (r) => `${esc(r.player)}${r.player === this.me ? ' <span class="pill good">вы</span>' : ""}` },
+      { key: "items", title: "Предметов", num: true, html: (r) => fmt(r.items) },
+      { key: "value", title: "Стоимость предметов", num: true, html: (r) => fmt(r.value) },
+      { key: "silver", title: "Серебро", num: true, html: (r) => fmt(r.silver) },
+      { key: "total", title: "Итого", num: true, html: (r) => `<b>${fmt(r.value + r.silver)}</b>`, sort: (r) => r.value + r.silver },
+    ], { sort: "total", empty: "Лута пока не было." });
+    this.rows = makeTable($("#loot-rows"), [
+      { key: "ts", title: "Когда", html: (r) => dateTime(r.ts) },
+      { key: "actor", title: "Кто", html: (r) => esc(r.actor || "?") },
+      { key: "name", title: "Что", html: (r) => (r.silver ? "серебро" : itemCell(r)), sort: (r) => r.name },
+      { key: "amount", title: "Шт.", num: true, html: (r) => fmt(r.amount) },
+      { key: "value", title: "Стоимость", num: true, html: (r) => fmt(r.value) },
+      { key: "target", title: "У кого", html: (r) => esc(r.target || "") },
+    ], { sort: "ts", empty: "—" });
+    $("#loot-form").addEventListener("input", debounce(() => this.reload(), 250));
+    this.reload = async () => {
+      const f = $("#loot-form");
+      const params = f.period.value === "session"
+        ? { session: (await api("/api/session")).current, days: 3650 } : { days: f.period.value };
+      const data = await api("/api/loot", params);
+      this.me = data.character;
+      const who = f.player.value.trim().toLowerCase();
+      const match = (name) => !who || (name || "").toLowerCase().includes(who);
+      this.players.set(data.players.filter((p) => match(p.player)));
+      this.rows.set(data.rows.filter((r) => match(r.actor)));
+    };
+    this.reload();
+  },
+  show() { if (this.reload) this.reload(); },
+});
