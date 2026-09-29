@@ -18,7 +18,9 @@ from . import db
 from .deals import (TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, bm_demand, fast_sell_table, find_deals, flip_table,
                     price_table, underpriced)
 from . import alerts as alerts_mod
+from . import mytrades as mytrades_mod
 from .alerts import AlertEngine
+from .mytrades import MyTrades
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from .gamedata import GameData
@@ -65,6 +67,10 @@ class App:
                                   loc_name=lambda l: market_info(l)["name"])
         self.alerts.index = self.catalog.index
         self.albion = AlbionState(self.ingest, load_opcodes(config.opcodes_path))
+        with self.conn() as conn:
+            mytrades_mod.init(conn)
+        self.mytrades = MyTrades(self.conn, self.write_lock)
+        self.mytrades.attach(self.albion)
         self.sniffer: Sniffer | None = None
 
     def start_capture(self, open_sockets=None) -> bool:
@@ -124,6 +130,22 @@ class App:
             res = db.cleanup(conn, self.config.retention_hours)
             res["alerts"] = self.alerts.cleanup(conn)
             return res
+
+    # --- мои сделки -----------------------------------------------------
+    def api_my_orders(self, q) -> dict:
+        with self.conn() as conn:
+            rows = mytrades_mod.open_orders(conn)
+        return {"now": int(time.time()), "rows": self._named(rows, q, 1000),
+                "character": self.albion.character_name}
+
+    def api_my_trades(self, q) -> dict:
+        now = int(time.time())
+        since = now - int(_float(q.get("days"), 30) * 86400)
+        with self.conn() as conn:
+            rows = mytrades_mod.trades(conn, since)
+        report = mytrades_mod.summary(rows, self.current_tax())
+        self._named(report["items"], q, 10**6)
+        return {"now": now, "trades": self._named(rows, q, 2000), **report}
 
     # --- оповещения -----------------------------------------------------
     def api_alerts(self, q) -> dict:
@@ -514,6 +536,8 @@ def make_handler(app: App):
         "/api/journals": app.api_journals,
         "/api/farming": app.api_farming,
         "/api/alerts": app.api_alerts,
+        "/api/my/orders": app.api_my_orders,
+        "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,
     }

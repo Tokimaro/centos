@@ -34,6 +34,7 @@ DEFAULT_OPCODES = {
     "auction_get_my_requests": 93,
     "auction_get_my_auctions": 94,
     "auction_get_item_average_stats": 95,
+    "auction_sell_specific_item": 315,
     "get_mail_infos": 174,
     "read_mail": 176,
     "gold_market_get_average_info": 250,
