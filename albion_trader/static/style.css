@@ -176,3 +176,9 @@ summary { cursor: pointer; color: var(--muted); }
 .csv-btn { font-size: 11px; padding: 1px 8px; border: 1px solid var(--border); background: var(--panel);
   color: var(--muted); border-radius: 4px; cursor: pointer; }
 .csv-btn:hover { color: var(--accent); border-color: var(--accent); }
+#groups { flex-wrap: wrap; }
+@media (max-width: 600px) {
+  #groups { width: 100%; }
+  #groups .tab { padding: 4px 8px; }
+  .conn { margin-left: 0; }
+}

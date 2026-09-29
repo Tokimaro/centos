@@ -41,6 +41,25 @@ Albion Online ──UDP 5056──> Albion Trader (встроенный сбор
 
 ## Установка и запуск
 
+### Вариант 1: AlbionTrader.exe (Windows, без Python)
+
+Готовый `AlbionTrader.exe` собирается автоматически в GitHub Actions (вкладка
+Actions → последний запуск «tests-and-exe» → артефакт `AlbionTrader-exe`) или
+локально скриптом `build_exe.bat`. Запуск: двойной щелчок — Windows спросит права
+администратора (нужны для чтения трафика игры), откроется браузер, в трее
+появится золотой значок. При первом запуске справочники скачаются сами; данные
+хранятся в `%LOCALAPPDATA%\AlbionTrader\data`, лог — там же
+(`albion_trader.log`).
+
+Значок в трее: двойной щелчок открывает интерфейс, правая кнопка — меню
+«Открыть», «Запускать вместе с Windows», «Выход». Оповещения дублируются
+всплывающими уведомлениями Windows, даже когда браузер закрыт. Автозапуск
+делается задачей Планировщика с наивысшими правами (так программа с правами
+администратора стартует при входе без запроса UAC); включается в меню значка
+или во вкладке «Статус».
+
+### Вариант 2: из исходников (Python)
+
 Нужен Python 3.10+ (сторонние библиотеки не нужны).
 
 **Windows** — запустите `start.bat`. Он сам находит Python через лаунчер `py`
@@ -218,7 +237,8 @@ albiondata-client (см. ниже).
 python -m albion_trader [--data-dir DIR] serve [--host 127.0.0.1] [--port 8484]
                                          [--token TOKEN|auto] [--retention-hours 72]
                                          [--no-capture] [--record FILE.pcap]
-                                         [--password PASSWORD] [-v]
+                                         [--password PASSWORD] [--tray] [--open-browser]
+                                         [--fetch-reference] [--log-file] [-v]
 python -m albion_trader replay FILE.pcap
 python -m albion_trader update-items
 python -m albion_trader update-opcodes
@@ -248,6 +268,11 @@ python -m unittest discover -s tests -v
 - `albion_trader/deals.py` — расчёт сделок и таблицы быстрой продажи;
 - `albion_trader/locations.py` — ID локаций → рынки;
 - `albion_trader/items.py` — названия предметов;
+- `albion_trader/gamedata.py` — рецепты, зачарование, дневники, фермерство, зоны;
+- `albion_trader/production.py` — калькуляторы производства;
+- `albion_trader/alerts.py`, `notify.py` — правила оповещений и отправка в Telegram/Discord;
+- `albion_trader/mytrades.py`, `activity.py`, `world.py` — мои сделки, сессия/лут/персонаж, события мира;
+- `albion_trader/tray.py`, `launcher.py` — значок в трее, автозапуск, точка входа .exe;
 - `albion_trader/static/` — веб-интерфейс.
 
 ## Благодарности

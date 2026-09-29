@@ -58,8 +58,11 @@ async function loadStatus() {
     <h2>Полученные пакеты</h2>
     <div class="table-wrap"><table><thead><tr><th>Топик</th><th class="num">Пакетов</th><th class="num">Записей</th><th class="num">Последний</th></tr></thead>
       <tbody>${topicRows || `<tr><td colspan="4" class="muted">Клиент ещё ничего не присылал</td></tr>`}</tbody></table></div>
+    <h2>Приложение</h2>
+    <div id="system-box" class="muted">…</div>
     <p class="muted">После крупного обновления игры можно подтянуть актуальные номера операций из albiondata-client:
       <button type="button" class="secondary" id="update-opcodes-any">Обновить коды операций</button> <span id="opcodes-result"></span></p>`;
+  loadSystem();
   for (const id of ["update-opcodes", "update-opcodes-any"]) {
     const btn = document.getElementById(id);
     if (!btn) continue;
@@ -76,3 +79,22 @@ async function loadStatus() {
 
 
 App.tab({ id: "status", group: "status", title: "Статус", show: loadStatus });
+
+async function loadSystem() {
+  const box = $("#system-box");
+  if (!box) return;
+  const sys = await api("/api/system");
+  box.innerHTML = `Версия ${esc(sys.version)}${sys.frozen ? " (AlbionTrader.exe)" : ""}. `
+    + (sys.windows
+      ? `<label class="inline"><input type="checkbox" id="autostart"${sys.autostart ? " checked" : ""}> Запускать вместе с Windows
+         (задача Планировщика с правами администратора — без запроса UAC при входе)</label><span id="autostart-result"></span>`
+      : "Автозапуск и значок в трее доступны в Windows.");
+  const cb = $("#autostart");
+  if (cb) cb.addEventListener("change", async () => {
+    try {
+      const r = await apiPost("/api/system", { autostart: cb.checked });
+      cb.checked = r.autostart;
+      $("#autostart-result").textContent = r.autostart ? " — включено" : " — выключено";
+    } catch (e) { cb.checked = !cb.checked; $("#autostart-result").textContent = ` — ошибка: ${e.message}`; }
+  });
+}

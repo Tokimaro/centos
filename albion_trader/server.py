@@ -7,8 +7,10 @@ import hmac
 import json
 import logging
 import mimetypes
+import sys
 import threading
 import time
+import webbrowser
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -31,7 +33,11 @@ from .mytrades import MyTrades
 from .capture import opcodes as opcodes_mod
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
+from . import __version__
+from . import tray as tray_mod
 from .gamedata import GameData
+from .gamedata import download as download_gamedata
+from .items import download_catalog
 from .production import CraftParams, PriceBook, craft_table, enchant_table, farming_table, journal_table
 from .items import ItemCatalog, enchant_of, tier_of
 from .locations import DEFAULT_CITIES, MARKETS, market_info, normalize_location
@@ -69,6 +75,9 @@ class AppConfig:
     capture: bool = True
     opcodes_path: Path | None = None
     record_path: str | None = None
+    tray: bool = False           # значок в трее Windows
+    open_browser: bool = False   # открыть интерфейс в браузере после запуска
+    fetch_reference: bool = False  # при первом запуске скачать справочники (для .exe)
     password: str = ""           # пароль для доступа к интерфейсу из сети (HTTP Basic)
     auth_local: bool = False     # требовать пароль и с этого же компьютера
 
@@ -306,6 +315,49 @@ class App:
         return {"now": now, "rows": rows[:int(_float(q2["limit"], 2000))],
                 "players": sorted(players.values(), key=lambda p: p["value"] + p["silver"], reverse=True),
                 "character": self.albion.character_name}
+
+    def reload_reference(self) -> None:
+        self.catalog = ItemCatalog.load(self.config.items_path)
+        self.gamedata = GameData.load(Path(self.config.items_path).with_name("gamedata.json"))
+        self.alerts.name_of = self.catalog.name
+        self.alerts.index = self.catalog.index
+        self.activity.index = self.catalog.index
+
+    def fetch_reference_async(self) -> None:
+        """Скачать справочники в фоне, если их ещё нет (первый запуск .exe)."""
+        items = Path(self.config.items_path)
+        game = items.with_name("gamedata.json")
+        if items.exists() and game.exists():
+            return
+
+        def work():
+            try:
+                log.info("Скачиваю справочники предметов и рецептов (первый запуск)…")
+                if not items.exists():
+                    download_catalog(items)
+                if not game.exists():
+                    download_gamedata(game)
+                self.reload_reference()
+                log.info("Справочники загружены.")
+            except (OSError, ValueError) as e:
+                log.warning("Не удалось скачать справочники: %s", e)
+        threading.Thread(target=work, daemon=True, name="reference").start()
+
+    def api_system(self, _q) -> dict:
+        try:
+            enabled = tray_mod.autostart_enabled()
+        except OSError:
+            enabled = False
+        return {"windows": tray_mod.IS_WINDOWS, "frozen": bool(getattr(sys, "frozen", False)),
+                "autostart": enabled, "version": __version__}
+
+    def api_system_post(self, _q, body) -> dict:
+        if "autostart" in (body or {}):
+            try:
+                tray_mod.set_autostart(bool(body["autostart"]))
+            except OSError as e:
+                raise ApiError(str(e)) from e
+        return self.api_system({})
 
     def api_update_opcodes(self, _q, _body) -> dict:
         path = self.config.opcodes_path or Path(self.config.db_path).with_name("opcodes.json")
@@ -730,6 +782,7 @@ def make_handler(app: App):
         "/api/loot": app.api_loot,
         "/api/character": app.api_character,
         "/api/world": app.api_world,
+        "/api/system": app.api_system,
         "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,
@@ -741,6 +794,7 @@ def make_handler(app: App):
         "/api/notify-test": app.api_notify_test,
         "/api/session/new": app.api_session_new,
         "/api/update-opcodes": app.api_update_opcodes,
+        "/api/system": app.api_system_post,
         "/api/alert-rules": app.api_alert_rules_post,
     }
 
@@ -893,6 +947,8 @@ def serve(config: AppConfig, host: str, port: int) -> None:
     if config.capture:
         app.start_capture()
     app.notifier.start()
+    if config.fetch_reference:
+        app.fetch_reference_async()
     httpd = ThreadingHTTPServer((host, port), make_handler(app))
     stop = threading.Event()
     threading.Thread(target=_cleanup_loop, args=(app, stop), daemon=True).start()
@@ -902,6 +958,13 @@ def serve(config: AppConfig, host: str, port: int) -> None:
     if app.sniffer and app.sniffer.status["running"]:
         log.info("Встроенный сборщик работает — откройте рынок в игре.")
     log.info("Внешний клиент (необязательно): albiondata-client -i %s", ingest_url)
+    if config.tray:
+        tray = tray_mod.Tray(base, on_exit=httpd.shutdown, icon_path=str(STATIC_DIR / "icon.ico"))
+        if tray.start():
+            app.alerts.listeners.append(lambda a: tray.notify(a["title"], a["text"]))
+            log.info("Значок в трее: двойной щелчок открывает интерфейс, «Выход» — в меню.")
+    if config.open_browser:
+        threading.Timer(1.0, lambda: webbrowser.open(base)).start()
     if not len(app.catalog):
         log.info("Названия предметов не загружены: python -m albion_trader update-items")
     try:

@@ -1,0 +1,44 @@
+name: tests-and-exe
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -v
+
+  exe:
+    runs-on: windows-latest
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests
+      - run: python -m pip install pyinstaller
+      - run: >
+          pyinstaller --noconfirm --onefile --noconsole --uac-admin --name AlbionTrader
+          --icon albion_trader/static/icon.ico --add-data "albion_trader/static;albion_trader/static" launcher.py
+      - name: Smoke test (frozen build answers /api/status)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\AlbionTrader.exe -ArgumentList "--data-dir","$env:RUNNER_TEMP\at","serve","--no-capture","--log-file" -PassThru
+          Start-Sleep -Seconds 8
+          $r = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8484/api/status
+          Stop-Process -Id $p.Id -Force
+          if ($r.StatusCode -ne 200) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AlbionTrader-exe
+          path: dist/AlbionTrader.exe

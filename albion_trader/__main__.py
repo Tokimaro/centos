@@ -40,6 +40,11 @@ def main(argv=None) -> int:
     p_serve.add_argument("--record", metavar="FILE.pcap",
                          help="записывать трафик игры в файл для диагностики "
                               "(содержит и ваш чат/ник — не выкладывайте публично)")
+    p_serve.add_argument("--tray", action="store_true", help="значок в трее Windows")
+    p_serve.add_argument("--open-browser", action="store_true", help="открыть интерфейс в браузере")
+    p_serve.add_argument("--fetch-reference", action="store_true",
+                         help="скачать справочники, если их нет (первый запуск)")
+    p_serve.add_argument("--log-file", action="store_true", help="писать лог в data/albion_trader.log")
     p_serve.add_argument("-v", "--verbose", action="store_true")
 
     p_replay = sub.add_parser("replay", help="загрузить данные из записи трафика (.pcap)")
@@ -61,8 +66,14 @@ def main(argv=None) -> int:
     cmd = args.cmd or "serve"
     if cmd == "serve":
         verbose = getattr(args, "verbose", False)
+        log_kwargs = {}
+        # У .exe без консоли нет stderr — пишем лог в файл.
+        if getattr(args, "log_file", False) or sys.stderr is None:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            log_kwargs["filename"] = str(data_dir / "albion_trader.log")
+            log_kwargs["encoding"] = "utf-8"
         logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO,
-                            format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+                            format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S", **log_kwargs)
         token = getattr(args, "token", "")
         if token == "auto":
             token_file = data_dir / "token.txt"
@@ -77,7 +88,10 @@ def main(argv=None) -> int:
                            capture=not getattr(args, "no_capture", False),
                            opcodes_path=opcodes_path,
                            record_path=getattr(args, "record", None),
-                           password=getattr(args, "password", ""))
+                           password=getattr(args, "password", ""),
+                           tray=getattr(args, "tray", False),
+                           open_browser=getattr(args, "open_browser", False),
+                           fetch_reference=getattr(args, "fetch_reference", False))
         serve(config, getattr(args, "host", "127.0.0.1"), getattr(args, "port", 8484))
         return 0
     if cmd == "update-items":
