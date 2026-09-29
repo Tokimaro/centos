@@ -139,3 +139,27 @@ class FlipsApiTest(ServerTest):
         self.assertEqual(data["count"], 1)
         self.assertEqual(data["rows"][0]["location"], "martlock")
         self.assertEqual(self.get("/api/flips?min_margin=500")["count"], 0)
+
+
+class AlertsApiTest(SettingsApiTest):
+    def test_rule_lifecycle_and_alert_on_ingest(self):
+        res = self.post_json("/api/alert-rules", {"action": "save", "rule": {
+            "kind": "price_below", "name": "Дешёвая сумка", "params": {"item": "T5_BAG", "price": 1500}}})
+        rid = res["id"]
+        self.assertEqual(res["rules"][0]["name"], "Дешёвая сумка")
+        self.assertIn("price_below", res["kinds"])
+        self.post("/marketorders.ingest", self.orders())   # предложение T5_BAG за 1000 в Тетфорде
+        data = self.get("/api/alerts")
+        self.assertEqual((len(data["alerts"]), data["unseen"]), (1, 1))
+        self.assertIn("Тетфорд", data["alerts"][0]["text"])
+        self.post_json("/api/alerts/seen", {})
+        self.assertEqual(self.get("/api/alerts")["unseen"], 0)
+        self.post_json("/api/alert-rules", {"action": "toggle", "id": rid, "enabled": False})
+        self.assertFalse(self.get("/api/alert-rules")["rules"][0]["enabled"])
+        self.post_json("/api/alert-rules", {"action": "delete", "id": rid})
+        self.assertEqual(self.get("/api/alert-rules")["rules"], [])
+
+    def test_bad_rule_is_400(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.post_json("/api/alert-rules", {"action": "save", "rule": {"kind": "bogus"}})
+        self.assertEqual(cm.exception.code, 400)

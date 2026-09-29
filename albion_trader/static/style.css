@@ -161,3 +161,13 @@ summary { cursor: pointer; color: var(--muted); }
 .viz-tip-head { color: var(--muted); margin-bottom: 2px; }
 .chart-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-top: 12px; }
 .chart-controls label { min-width: 160px; }
+
+#toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 10; max-width: min(380px, calc(100vw - 32px)); }
+.toast { background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.2); cursor: pointer; font-size: 13px; }
+.toast b { display: block; margin-bottom: 2px; }
+.tab[data-badge]:not([data-badge=""])::after { content: attr(data-badge); margin-left: 6px; background: var(--bad);
+  color: #fff; border-radius: 9px; padding: 0 6px; font-size: 11px; }
+.title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.title-row button { margin-top: 0; }
+.rule-kind { display: inline-flex; min-width: 240px; margin-right: 12px; }

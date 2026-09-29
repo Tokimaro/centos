@@ -124,7 +124,8 @@
       <label>Свежесть, ч <input type="number" name="max_age" value="72" min="0.1" step="any"></label>
       <button type="submit" class="primary">Показать</button>
     </form>
-    <h2 id="price-title"></h2>
+    <div class="title-row"><h2 id="price-title"></h2>
+      <button type="button" class="secondary" id="price-alert" hidden>Оповестить о цене</button></div>
     <div id="chart-wrap" hidden>
       <form class="chart-controls" id="chart-form" autocomplete="off">
         <label>Рынок <select name="location"></select></label>
@@ -177,6 +178,7 @@
 
 <script src="js/core.js"></script>
 <script src="js/trading.js"></script>
+<script src="js/alerts.js"></script>
 <script src="js/status.js"></script>
 <script src="js/main.js"></script>
 </body>

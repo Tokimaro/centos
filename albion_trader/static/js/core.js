@@ -199,15 +199,17 @@ function buildForm(container, storeKey, spec, { submitText = "Показать",
   if (intro) container.insertAdjacentHTML("beforeend", `<p class="muted intro">${intro}</p>`);
   container.appendChild(form);
 
+  // По атрибуту name, а не form.elements[name]: у коллекции есть свои методы (item, length…).
+  const field = (name) => form.querySelector(`[name="${name}"]`);
   const read = () => {
     const out = {};
     for (const f of spec.flatMap((g) => g.fields)) {
       if (["markets", "tiers", "enchants", "qualities"].includes(f.type)) {
         out[f.name || f.type] = $$(`input[name=${f.name || f.type}]:checked`, form).map((i) => i.value);
       } else if (f.type === "check") {
-        out[f.name] = form.elements[f.name].checked;
+        out[f.name] = field(f.name).checked;
       } else if (f.name) {
-        out[f.name] = form.elements[f.name].value;
+        out[f.name] = field(f.name).value;
       }
     }
     return out;

@@ -242,6 +242,7 @@ function fillChartControls(rows) {
 
 async function loadRecent() {
   $("#chart-wrap").hidden = true;
+  $("#price-alert").hidden = true;
   $("#price-title").textContent = "";
   $("#prices-wrap").hidden = true;
   $("#recent-wrap").hidden = false;
@@ -270,6 +271,8 @@ async function loadPrices() {
   }
   const data = await api("/api/prices", { item, max_age: f.max_age.value });
   $("#price-title").textContent = `${data.name} (${data.item_id})`;
+  $("#price-alert").hidden = false;
+  $("#price-alert").onclick = () => presetPriceAlert(data.item_id);
   fillChartControls(data.rows);
   const sells = data.rows.filter((r) => r.sell_min !== null && r.location !== "black_market").map((r) => r.sell_min);
   const buys = data.rows.filter((r) => r.buy_max !== null).map((r) => r.buy_max);

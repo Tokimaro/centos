@@ -17,6 +17,8 @@ from urllib.parse import parse_qs, urlparse
 from . import db
 from .deals import (TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, bm_demand, fast_sell_table, find_deals, flip_table,
                     price_table, underpriced)
+from . import alerts as alerts_mod
+from .alerts import AlertEngine
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from .gamedata import GameData
@@ -56,6 +58,11 @@ class App:
         self.catalog = ItemCatalog.load(config.items_path)
         self.gamedata = GameData.load(Path(config.items_path).with_name("gamedata.json"))
         self.write_lock = threading.Lock()
+        with self.conn() as conn:
+            alerts_mod.init(conn)
+        self.alerts = AlertEngine(self.conn, name_of=self.catalog.name,
+                                  loc_name=lambda l: market_info(l)["name"])
+        self.alerts.index = self.catalog.index
         self.albion = AlbionState(self.ingest, load_opcodes(config.opcodes_path))
         self.sniffer: Sniffer | None = None
 
@@ -91,11 +98,68 @@ class App:
     # --- приём данных -------------------------------------------------
     def ingest(self, topic: str, payload) -> int:
         with self.write_lock, self.conn() as conn:
-            return db.ingest(conn, topic, payload)
+            saved = db.ingest(conn, topic, payload)
+            if saved and topic == "marketorders.ingest":
+                orders = [o for o in payload.get("Orders") or [] if isinstance(o, dict)]
+                items = {o.get("ItemTypeId") for o in orders}
+                touched = {(o.get("ItemTypeId"), normalize_location(o.get("LocationId"))) for o in orders}
+                try:
+                    self.alerts.check_market(conn, items, self.current_tax(conn), self._rule_filter, touched)
+                except Exception:  # pragma: no cover - ошибка правила не мешает сбору
+                    log.exception("Ошибка проверки оповещений")
+            return saved
+
+    def current_tax(self, conn=None) -> float:
+        settings = {**DEFAULT_SETTINGS, **(db.get_settings(conn) if conn else self.settings())}
+        return TAX_PREMIUM if settings.get("premium", True) else TAX_NO_PREMIUM
+
+    def _rule_filter(self, params: dict):
+        join = lambda v: ",".join(str(x) for x in v) if isinstance(v, list) else (v or "")
+        return self._item_filter({"q": params.get("q") or "", "tiers": join(params.get("tiers")),
+                                  "enchants": join(params.get("enchants"))})
 
     def cleanup(self) -> dict:
         with self.write_lock, self.conn() as conn:
-            return db.cleanup(conn, self.config.retention_hours)
+            res = db.cleanup(conn, self.config.retention_hours)
+            res["alerts"] = self.alerts.cleanup(conn)
+            return res
+
+    # --- оповещения -----------------------------------------------------
+    def api_alerts(self, q) -> dict:
+        with self.conn() as conn:
+            items = self.alerts.list_alerts(conn, int(_float(q.get("since"), 0)), int(_float(q.get("limit"), 200)))
+            unseen = conn.execute("SELECT COUNT(*) FROM alerts WHERE seen = 0").fetchone()[0]
+        return {"now": int(time.time()), "alerts": items, "unseen": unseen}
+
+    def api_alerts_seen(self, _q, body) -> dict:
+        with self.write_lock, self.conn() as conn:
+            self.alerts.mark_seen(conn, body.get("ids") if isinstance(body, dict) else None)
+        return {"ok": True}
+
+    def api_alert_rules(self, _q) -> dict:
+        with self.conn() as conn:
+            return {"rules": self.alerts.rules(conn), "kinds": alerts_mod.KINDS}
+
+    def api_alert_rules_post(self, _q, body) -> dict:
+        if not isinstance(body, dict):
+            raise ApiError("ожидается объект")
+        action = body.get("action", "save")
+        with self.write_lock, self.conn() as conn:
+            if action == "save":
+                try:
+                    rule_id = self.alerts.save_rule(conn, body.get("rule") or {})
+                except ValueError as e:
+                    raise ApiError(str(e)) from e
+            elif action == "delete":
+                rule_id = int(body.get("id") or 0)
+                conn.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+            elif action == "toggle":
+                rule_id = int(body.get("id") or 0)
+                conn.execute("UPDATE alert_rules SET enabled = ? WHERE id = ?",
+                             (int(bool(body.get("enabled"))), rule_id))
+            else:
+                raise ApiError(f"неизвестное действие: {action}")
+        return {"ok": True, "id": rule_id, **self.api_alert_rules({})}
 
     # --- настройки ------------------------------------------------------
     def settings(self) -> dict:
@@ -359,11 +423,15 @@ def make_handler(app: App):
         "/api/history": app.api_history,
         "/api/underpriced": app.api_underpriced,
         "/api/bm-demand": app.api_bm_demand,
+        "/api/alerts": app.api_alerts,
+        "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,
     }
 
     post_api = {
         "/api/settings": app.api_settings_post,
+        "/api/alerts/seen": app.api_alerts_seen,
+        "/api/alert-rules": app.api_alert_rules_post,
     }
 
     class Handler(BaseHTTPRequestHandler):

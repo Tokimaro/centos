@@ -389,7 +389,8 @@ def cleanup(conn: sqlite3.Connection, retention_hours: float, now: int | None = 
     return {"expired": expired, "stale": stale, "history": old_hist, "snapshots": old_snap}
 
 
-def load_orders(conn: sqlite3.Connection, min_seen_at: int, locations=None, now: int | None = None):
+def load_orders(conn: sqlite3.Connection, min_seen_at: int, locations=None, now: int | None = None,
+                items=None):
     now = int(now if now is not None else time.time())
     sql = ("SELECT item_id, location, quality, price, amount, auction_type, seen_at "
            "FROM orders WHERE seen_at >= ? AND (expires IS NULL OR expires >= ?)")
@@ -397,6 +398,10 @@ def load_orders(conn: sqlite3.Connection, min_seen_at: int, locations=None, now:
     if locations:
         sql += f" AND location IN ({','.join('?' * len(locations))})"
         args.extend(locations)
+    if items:
+        items = list(items)
+        sql += f" AND item_id IN ({','.join('?' * len(items))})"
+        args.extend(items)
     return [dict(r) for r in conn.execute(sql, args)]
 
 
