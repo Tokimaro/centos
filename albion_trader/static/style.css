@@ -171,3 +171,4 @@ summary { cursor: pointer; color: var(--muted); }
 .title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .title-row button { margin-top: 0; }
 .rule-kind { display: inline-flex; min-width: 240px; margin-right: 12px; }
+.hint { border-bottom: 1px dotted var(--muted); cursor: help; }

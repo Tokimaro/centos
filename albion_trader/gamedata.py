@@ -66,6 +66,17 @@ def _resources(req: dict) -> list:
     return out
 
 
+def recipe_kind(info: dict, rec: dict) -> str:
+    """craft — крафт, refine — переработка, transmute — трансмутация ресурсов/фрагментов
+    (ресурс ниже тиром или руна + серебро, без фокуса и без возврата)."""
+    if info.get("sub") == "refinedresources":
+        return "refine"
+    if info.get("sub") in ("resources", "fragments") and not rec.get("focus") \
+            and all(not r[2] for r in rec.get("res", [])):
+        return "transmute"
+    return "craft"
+
+
 def build(raw_items: dict, raw_loot: dict | None = None, raw_modifiers: dict | None = None) -> dict:
     items_root = raw_items.get("items", raw_items)
     meta: dict[str, dict] = {}
@@ -103,8 +114,8 @@ def build(raw_items: dict, raw_loot: dict | None = None, raw_modifiers: dict | N
                     "n": int(_num(req.get("@amountcrafted"), 1)) or 1,
                     "silver": _num(req.get("@silver")),
                     "focus": _num(req.get("@craftingfocus")),
-                    "kind": "refine" if info["sub"] == "refinedresources" else "craft",
                 }
+                recipes[mid]["kind"] = recipe_kind(info, recipes[mid])
 
             steps = []
             for ench in _as_list((it.get("enchantments") or {}).get("enchantment")):
@@ -210,6 +221,8 @@ class GameData:
         data = data or {}
         self.items: dict = data.get("items", {})
         self.recipes: dict = data.get("recipes", {})
+        for mid, rec in self.recipes.items():  # файлы старых версий могли не различать трансмутацию
+            rec["kind"] = recipe_kind(data.get("items", {}).get(mid, {}), rec)
         self.upgrades: dict = data.get("upgrades", {})
         self.journals: dict = data.get("journals", {})
         self.plants: list = data.get("plants", [])

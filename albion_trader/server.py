@@ -22,6 +22,7 @@ from .alerts import AlertEngine
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from .gamedata import GameData
+from .production import CraftParams, PriceBook, craft_table
 from .items import ItemCatalog, enchant_of, tier_of
 from .locations import DEFAULT_CITIES, MARKETS, market_info, normalize_location
 
@@ -345,6 +346,38 @@ class App:
             rows = [r for r in rows if r["margin"] is not None and r["margin"] >= _float(min_margin, 0)]
         return {"now": now, "count": len(rows), "rows": self._named(rows, q)}
 
+    def _no_gamedata(self) -> dict:
+        return {"now": int(time.time()), "count": 0, "rows": [], "no_gamedata": True}
+
+    def api_craft(self, q) -> dict:
+        if not self.gamedata:
+            return self._no_gamedata()
+        now = int(time.time())
+        buy = q.get("buy_market") or "martlock"
+        sell = q.get("sell_market") or buy
+        params = CraftParams(
+            kind=q.get("kind") if q.get("kind") in ("refine", "transmute") else "craft",
+            buy_market=buy, sell_market=sell, craft_city=q.get("craft_city") or buy,
+            buy_mode="order" if q.get("buy_mode") == "order" else "instant",
+            sell_mode="order" if q.get("sell_mode") == "order" else "instant",
+            focus=q.get("focus") == "1", tax=self._tax(q),
+            station_fee=_float(q.get("station_fee"), 0), category=q.get("category") or "",
+            include_incomplete=q.get("incomplete") == "1")
+        with self.conn() as conn:
+            orders = db.load_orders(conn, now - int(_float(q.get("max_age"), 24) * 3600),
+                                    sorted({buy, sell}), now)
+            volumes = db.load_daily_volumes(conn, self.catalog.index, now)
+        rows = craft_table(self.gamedata, PriceBook(orders), params, self._item_filter(q), volumes)
+        min_margin = q.get("min_margin")
+        if min_margin not in (None, ""):
+            rows = [r for r in rows if r["margin"] is not None and r["margin"] >= _float(min_margin, 0)]
+        rows = self._named(rows, q, 400)
+        for r in rows:
+            for m in r["materials"]:
+                m["name"] = self.catalog.name(m["item_id"])
+            r["missing_names"] = [self.catalog.name(i) for i in r["missing"]]
+        return {"now": now, "count": len(rows), "rows": rows}
+
     def api_history(self, q) -> dict:
         item_id = (q.get("item") or "").strip()
         now = int(time.time())
@@ -423,6 +456,7 @@ def make_handler(app: App):
         "/api/history": app.api_history,
         "/api/underpriced": app.api_underpriced,
         "/api/bm-demand": app.api_bm_demand,
+        "/api/craft": app.api_craft,
         "/api/alerts": app.api_alerts,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,

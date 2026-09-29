@@ -101,3 +101,16 @@ class GameDataTest(unittest.TestCase):
 
     def test_empty(self):
         self.assertFalse(GameData())
+
+
+class RecipeKindTest(unittest.TestCase):
+    def test_transmute_detection(self):
+        from albion_trader.gamedata import recipe_kind
+        self.assertEqual(recipe_kind({"sub": "resources"}, {"res": [["T4_ORE", 1, False]], "focus": 0}), "transmute")
+        self.assertEqual(recipe_kind({"sub": "fragments"}, {"res": [["T4_RUNE", 1, False]], "focus": 0}), "transmute")
+        self.assertEqual(recipe_kind({"sub": "refinedresources"}, {"res": [], "focus": 54}), "refine")
+        self.assertEqual(recipe_kind({"sub": "bow"}, {"res": [["T4_PLANKS", 32, True]], "focus": 1715}), "craft")
+        # Старый файл без разметки: GameData размечает сам при загрузке.
+        g = GameData({"items": {"T5_ORE": {"sub": "resources"}},
+                      "recipes": {"T5_ORE": {"res": [["T4_ORE", 1, False]], "n": 1, "focus": 0, "kind": "craft"}}})
+        self.assertEqual(g.recipes["T5_ORE"]["kind"], "transmute")
