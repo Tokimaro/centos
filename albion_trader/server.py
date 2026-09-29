@@ -22,7 +22,7 @@ from .alerts import AlertEngine
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from .gamedata import GameData
-from .production import CraftParams, PriceBook, craft_table, enchant_table
+from .production import CraftParams, PriceBook, craft_table, enchant_table, journal_table
 from .items import ItemCatalog, enchant_of, tier_of
 from .locations import DEFAULT_CITIES, MARKETS, market_info, normalize_location
 
@@ -399,6 +399,18 @@ class App:
                 m["name"] = self.catalog.name(m["item_id"])
         return {"now": now, "count": len(rows), "rows": rows}
 
+    def api_journals(self, q) -> dict:
+        if not self.gamedata:
+            return self._no_gamedata()
+        now = int(time.time())
+        buy = q.get("buy_market") or "martlock"
+        sell = q.get("sell_market") or buy
+        with self.conn() as conn:
+            orders = db.load_orders(conn, now - int(_float(q.get("max_age"), 24) * 3600), sorted({buy, sell}), now)
+        rows = journal_table(self.gamedata, PriceBook(orders), buy, sell, self._tax(q),
+                             _float(q.get("happiness"), 100) / 100, self._item_filter(q))
+        return {"now": now, "count": len(rows), "rows": self._named(rows, q, 400)}
+
     def api_history(self, q) -> dict:
         item_id = (q.get("item") or "").strip()
         now = int(time.time())
@@ -479,6 +491,7 @@ def make_handler(app: App):
         "/api/bm-demand": app.api_bm_demand,
         "/api/craft": app.api_craft,
         "/api/enchant": app.api_enchant,
+        "/api/journals": app.api_journals,
         "/api/alerts": app.api_alerts,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,

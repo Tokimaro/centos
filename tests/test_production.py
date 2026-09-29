@@ -111,3 +111,21 @@ class EnchantTest(unittest.TestCase):
         self.assertNotIn((0, 3, 1), rows)
         # Качество 2: .1 куплен за 900, продать .2 качества 2 негде — строк нет.
         self.assertNotIn((1, 2, 2), rows)
+
+
+class JournalTest(unittest.TestCase):
+    def test_fill_profit_and_laborer_value(self):
+        from albion_trader.production import journal_table
+        gd = GameData({"items": {}, "recipes": {}, "journals": {"T4_JOURNAL_WOOD": {
+            "t": 4, "type": "WOOD", "fame": 1800, "base": 48, "empty": "T4_JOURNAL_WOOD_EMPTY",
+            "full": "T4_JOURNAL_WOOD_FULL",
+            "loot": [["T4_WOOD", 90, 1], ["T4_WOOD_LEVEL1@1", 10, 1], ["T4_WOOD_LEVEL2@2", 1, 1]]}}})
+        book = PriceBook([o("T4_JOURNAL_WOOD_EMPTY", "m", "offer", 2000),
+                          o("T4_JOURNAL_WOOD_FULL", "m", "request", 9000),
+                          o("T4_WOOD", "m", "request", 100), o("T4_WOOD_LEVEL1@1", "m", "request", 400)])
+        r = journal_table(gd, book, "m", "m", 0.04, happiness=1.5)[0]
+        self.assertAlmostEqual(r["fill_profit"], 9000 * 0.96 - 2000)
+        per = (90 * 96 + 10 * 384) / 100
+        self.assertAlmostEqual(r["laborer_value"], round(per * 48 * 1.5, 2))
+        self.assertAlmostEqual(r["coverage"], round(100 / 101 * 100, 1))
+        self.assertAlmostEqual(r["laborer_vs_sell"], round(per * 48 * 1.5 - 9000 * 0.96, 2))

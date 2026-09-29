@@ -120,3 +120,43 @@ standardTab({
     return { rows: data.rows, summary: `Вариантов: ${data.count}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
   },
 });
+
+// ---------- дневники ----------
+standardTab({
+  id: "journals", group: "prod", title: "Дневники",
+  intro: "Выгода заполнения дневника (продать полный − купить пустой) и ожидаемая добыча работника: базовый объём × "
+    + "средняя выручка за единицу по весам таблицы добычи × счастье работника. «Покрытие» — доля таблицы добычи, для "
+    + "которой известны цены. «Работник выгоднее на» — добыча работника минус выручка за полный дневник.",
+  spec: [
+    { legend: "Рынки", fields: [
+      { type: "market", name: "buy_market", label: "Покупать пустые в", buyable: true, value: "martlock" },
+      { type: "market", name: "sell_market", label: "Продавать полные и добычу в", value: "martlock" },
+    ] },
+    { legend: "Параметры", fields: [
+      { type: "number", name: "happiness", label: "Счастье работника, %", value: 100, min: 50, step: 1 },
+      { type: "check", name: "premium", label: "Премиум", value: true },
+      { type: "number", name: "max_age", label: "Цены не старше, ч", value: 24, min: 0.1 },
+      { type: "search", name: "q", label: "Поиск", placeholder: "например, WOOD или Лесоруб" },
+      { type: "tiers" },
+    ] },
+  ],
+  columns: [
+    { key: "name", title: "Дневник", html: itemCell, sort: (r) => r.name },
+    { key: "empty_price", title: "Пустой", num: true, html: (r) => fmt(r.empty_price) },
+    { key: "full_price", title: "Полный", num: true, html: (r) => fmt(r.full_price) },
+    profitCol("fill_profit", "Выгода заполнения"),
+    { key: "fame", title: "Слава", num: true, html: (r) => fmt(r.fame) },
+    { key: "laborer_value", title: "Добыча работника", num: true, html: (r) => fmt(r.laborer_value) },
+    { key: "coverage", title: "Покрытие", num: true, html: (r) => pct(r.coverage) },
+    profitCol("laborer_vs_sell", "Работник выгоднее на"),
+    ageCol(),
+  ],
+  sort: "fill_profit",
+  empty: "Нет цен дневников. Откройте в игре рынок с дневниками (категория «Прочее → Работники»).",
+  async load(f) {
+    const data = await api("/api/journals", { ...f, limit: 400 });
+    if (data.no_gamedata) return { rows: [], summary: NO_GAMEDATA };
+    data.rows.forEach((r) => { r._now = data.now; });
+    return { rows: data.rows, summary: `Дневников: ${data.count}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
+  },
+});

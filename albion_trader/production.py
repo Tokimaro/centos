@@ -169,3 +169,43 @@ def enchant_table(gd: GameData, book: PriceBook, buy_market: str, sell_market: s
                     })
     rows.sort(key=lambda r: r["profit"], reverse=True)
     return rows
+
+
+def journal_table(gd: GameData, book: PriceBook, buy_market: str, sell_market: str, tax: float,
+                  happiness: float = 1.0, item_ok=lambda i: True) -> list[dict]:
+    """Дневники работников: выгода заполнения (полный − пустой) и ожидаемая добыча работника.
+
+    Добыча = базовый объём × средняя выручка за единицу по весам таблицы лута × счастье.
+    Цены ресурсов — мгновенная продажа на рынке продажи; если по части таблицы цен нет,
+    среднее считается по известной части, а покрытие показывается отдельно.
+    """
+    rows = []
+    for uid, j in gd.journals.items():
+        if not (item_ok(j["empty"]) or item_ok(j["full"])):
+            continue
+        empty = book.buy_price(j["empty"], buy_market, "instant")
+        full_book, full_rev = book.sell_price(j["full"], sell_market, "instant", tax)
+        weights = total = covered = 0.0
+        for item, weight, amount in j["loot"]:
+            weights += weight
+            _, rev = book.sell_price(item, sell_market, "instant", tax)
+            if rev is None:
+                continue
+            covered += weight
+            total += weight * rev * amount
+        per_item = total / covered if covered else None
+        laborer = per_item * j["base"] * happiness if per_item is not None else None
+        if empty is None and full_rev is None and laborer is None:
+            continue
+        rows.append({
+            "item_id": j["full"], "journal": uid, "tier": j["t"], "type": j["type"], "fame": j["fame"],
+            "empty_price": round(empty, 2) if empty is not None else None,
+            "full_price": full_book, "full_revenue": round(full_rev, 2) if full_rev is not None else None,
+            "fill_profit": round(full_rev - empty, 2) if empty is not None and full_rev is not None else None,
+            "laborer_value": round(laborer, 2) if laborer is not None else None,
+            "coverage": round(covered / weights * 100, 1) if weights else 0,
+            "laborer_vs_sell": round(laborer - full_rev, 2) if laborer is not None and full_rev is not None else None,
+            "seen_at": book.seen(j["full"], sell_market),
+        })
+    rows.sort(key=lambda r: (r["fill_profit"] if r["fill_profit"] is not None else -10**12), reverse=True)
+    return rows
