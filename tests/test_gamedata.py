@@ -114,3 +114,13 @@ class RecipeKindTest(unittest.TestCase):
         g = GameData({"items": {"T5_ORE": {"sub": "resources"}},
                       "recipes": {"T5_ORE": {"res": [["T4_ORE", 1, False]], "n": 1, "focus": 0, "kind": "craft"}}})
         self.assertEqual(g.recipes["T5_ORE"]["kind"], "transmute")
+
+
+class WorldTest(unittest.TestCase):
+    def test_parse_world(self):
+        from albion_trader.gamedata import parse_world
+        z = parse_world("3003: Caerleon          \n0007: Thetford Market\nbad line\n@ISLAND@x: Island")
+        self.assertEqual(z["3003"], "Caerleon")
+        self.assertEqual(z["0007"], "Thetford Market")
+        self.assertEqual(len(z), 3)
+        self.assertEqual(GameData(build(RAW_ITEMS, None, None, "1234: Somewhere")).zones, {"1234": "Somewhere"})

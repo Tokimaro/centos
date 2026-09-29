@@ -77,7 +77,18 @@ def recipe_kind(info: dict, rec: dict) -> str:
     return "craft"
 
 
-def build(raw_items: dict, raw_loot: dict | None = None, raw_modifiers: dict | None = None) -> dict:
+def parse_world(text: str) -> dict:
+    """Названия зон из formatted/world.txt: строки вида «3003: Caerleon»."""
+    zones = {}
+    for line in (text or "").splitlines():
+        key, sep, name = line.partition(":")
+        if sep and key.strip() and name.strip():
+            zones[key.strip()] = name.strip()
+    return zones
+
+
+def build(raw_items: dict, raw_loot: dict | None = None, raw_modifiers: dict | None = None,
+          world_text: str | None = None) -> dict:
     items_root = raw_items.get("items", raw_items)
     meta: dict[str, dict] = {}
     recipes: dict[str, dict] = {}
@@ -213,7 +224,8 @@ def build(raw_items: dict, raw_loot: dict | None = None, raw_modifiers: dict | N
         value(mid)
 
     return {"version": 1, "items": meta, "recipes": recipes, "upgrades": upgrades,
-            "journals": journals, "plants": plants, "animals": animals, "cities": city}
+            "journals": journals, "plants": plants, "animals": animals, "cities": city,
+            "zones": parse_world(world_text or "")}
 
 
 class GameData:
@@ -228,6 +240,7 @@ class GameData:
         self.plants: list = data.get("plants", [])
         self.animals: list = data.get("animals", [])
         self.cities: dict = data.get("cities", {})
+        self.zones: dict = data.get("zones", {})
 
     @classmethod
     def load(cls, path: str | Path) -> "GameData":
@@ -256,7 +269,9 @@ def download(path: str | Path, base_url: str = DUMPS_URL) -> dict:
     def fetch(name):
         with urllib.request.urlopen(base_url + name, timeout=180) as resp:
             return json.load(resp)
-    data = build(fetch("items.json"), fetch("loot.json"), fetch("craftingmodifiers.json"))
+    with urllib.request.urlopen(base_url + "formatted/world.txt", timeout=180) as resp:
+        world = resp.read().decode("utf-8", errors="replace")
+    data = build(fetch("items.json"), fetch("loot.json"), fetch("craftingmodifiers.json"), world)
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")

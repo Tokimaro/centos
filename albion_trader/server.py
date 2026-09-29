@@ -15,10 +15,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import db
-from .deals import (TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, bm_demand, fast_sell_table, find_deals, flip_table,
-                    price_table, underpriced)
+from .deals import (TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, bm_demand, fast_sell_table, find_deals,
+                    flip_table, median, price_table, underpriced)
 from . import alerts as alerts_mod
+from . import activity as activity_mod
 from . import mytrades as mytrades_mod
+from .activity import Activity
 from .alerts import AlertEngine
 from .mytrades import MyTrades
 from .capture.albion import AlbionState, load_opcodes
@@ -77,6 +79,11 @@ class App:
             self.alerts.ensure_rule(conn, "outbid", "Мой заказ перебили")
         self.mytrades.attach(self.albion)
         self.albion.on("response:gold_market_get_average_info", self._gold_from_capture)
+        with self.conn() as conn:
+            activity_mod.init(conn)
+        self.activity = Activity(self.conn, self.write_lock, index_to_item=self.catalog.index)
+        self.activity.attach(self.albion)
+        self.activity.new_session()
         self.sniffer: Sniffer | None = None
 
     def start_capture(self, open_sockets=None) -> bool:
@@ -201,6 +208,87 @@ class App:
         report = mytrades_mod.summary(rows, self.current_tax())
         self._named(report["items"], q, 10**6)
         return {"now": now, "trades": self._named(rows, q, 2000), **report}
+
+    # --- активность -----------------------------------------------------
+    def value_of_factory(self, conn):
+        """Оценка предмета: медиана лучших цен продажи по городам за 48 ч, иначе средняя цена сделок."""
+        now = int(time.time())
+        cache: dict[str, float | None] = {}
+        refs = None
+
+        def value_of(item_id: str):
+            nonlocal refs
+            if item_id in cache:
+                return cache[item_id]
+            prices = [r[0] for r in conn.execute(
+                "SELECT MIN(price) FROM orders WHERE item_id = ? AND auction_type = 'offer' AND quality = 1 "
+                "AND seen_at >= ? AND location != 'black_market' GROUP BY location", (item_id, now - 48 * 3600))]
+            value = median(prices) if prices else None
+            if value is None:
+                if refs is None:
+                    refs = db.reference_prices(conn, now - 30 * 86400, self.catalog.index)
+                cands = [v[0] for k, v in refs.items() if k[0] == item_id and k[2] == 1]
+                value = median(cands) if cands else None
+            cache[item_id] = value
+            return value
+        return value_of
+
+    def zone_name(self, raw: str | None) -> str:
+        if not raw:
+            return "—"
+        key = normalize_location(raw)
+        if key in MARKETS:
+            return MARKETS[key].name_ru
+        return self.gamedata.zones.get(raw) or raw
+
+    def api_session(self, q) -> dict:
+        now = int(time.time())
+        with self.conn() as conn:
+            sid = int(_float(q.get("id"), 0)) or self.activity.session_id
+            report = activity_mod.session_report(conn, sid, self.albion.character_name,
+                                                 self.value_of_factory(conn), now) if sid else {}
+            sessions = [dict(r) for r in conn.execute(
+                "SELECT id, started, ended, character FROM sessions ORDER BY id DESC LIMIT 30")]
+        for it in report.get("items", []):
+            it["name"] = self.catalog.name(it["item_id"])
+        for z in report.get("zones", []):
+            z["name"] = self.zone_name(z["location"])
+        return {"now": now, "current": self.activity.session_id, "report": report, "sessions": sessions}
+
+    def api_session_new(self, _q, _body) -> dict:
+        return {"id": self.activity.new_session()}
+
+    def api_loot(self, q) -> dict:
+        now = int(time.time())
+        with self.conn() as conn:
+            rows = activity_mod.loot_log(conn, now - int(_float(q.get("days"), 7) * 86400),
+                                         int(_float(q.get("session"), 0)) or None)
+            value_of = self.value_of_factory(conn)
+            players: dict[str, dict] = {}
+            for r in rows:
+                silver = json.loads(r["data"] or "{}").get("silver")
+                unit = None if silver or not r["item_id"] or r["item_id"].startswith("#") else value_of(r["item_id"])
+                r["value"] = (r["amount"] or 0) if silver else (unit * (r["amount"] or 0) if unit is not None else None)
+                r["silver"] = bool(silver)
+                r["name"] = "серебро" if silver else self.catalog.name(r["item_id"] or "?")
+                p = players.setdefault(r["actor"] or "?", {"player": r["actor"] or "?", "items": 0, "silver": 0.0,
+                                                           "value": 0.0})
+                if silver:
+                    p["silver"] += r["amount"] or 0
+                else:
+                    p["items"] += r["amount"] or 0
+                    p["value"] += r["value"] or 0
+        q2 = dict(q)
+        q2["limit"] = q.get("limit") or 2000
+        return {"now": now, "rows": rows[:int(_float(q2["limit"], 2000))],
+                "players": sorted(players.values(), key=lambda p: p["value"] + p["silver"], reverse=True),
+                "character": self.albion.character_name}
+
+    def api_character(self, q) -> dict:
+        now = int(time.time())
+        with self.conn() as conn:
+            report = activity_mod.character_report(conn, now - int(_float(q.get("days"), 30) * 86400))
+        return {"now": now, "character": self.albion.character_name, **report}
 
     # --- оповещения -----------------------------------------------------
     def api_alerts(self, q) -> dict:
@@ -593,6 +681,9 @@ def make_handler(app: App):
         "/api/alerts": app.api_alerts,
         "/api/my/orders": app.api_my_orders,
         "/api/gold": app.api_gold,
+        "/api/session": app.api_session,
+        "/api/loot": app.api_loot,
+        "/api/character": app.api_character,
         "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,
@@ -601,6 +692,7 @@ def make_handler(app: App):
     post_api = {
         "/api/settings": app.api_settings_post,
         "/api/alerts/seen": app.api_alerts_seen,
+        "/api/session/new": app.api_session_new,
         "/api/alert-rules": app.api_alert_rules_post,
     }
 

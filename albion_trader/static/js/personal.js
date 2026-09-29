@@ -83,3 +83,69 @@ function orderStatus(r) {
   if (!r.outbid) return '<span class="pill good">лучший</span>';
   return `<span class="pill bad">перебит</span> <span class="muted">лучший ${fmt(r.best_price)} → ставьте ${fmt(r.suggested_price)}</span>`;
 }
+
+// ---------- сессия ----------
+function duration(hours) {
+  const m = Math.round(hours * 60);
+  return m < 60 ? `${m} мин` : `${Math.floor(m / 60)} ч ${m % 60} мин`;
+}
+
+App.tab({
+  id: "session", group: "my", title: "Сессия",
+  init(el) {
+    el.innerHTML = `
+      <p class="muted intro">Серебро, слава и лут за игровую сессию. Сессия начинается при запуске приложения или по кнопке.
+        Лут оценивается по медиане лучших цен продажи в городах за 48 часов (иначе — по средней цене сделок); учитывается
+        только то, что подобрал ваш персонаж. Данные идут из событий игры — ничего нажимать не нужно.</p>
+      <div class="buttons">
+        <label class="rule-kind">Сессия <select id="session-select"></select></label>
+        <button type="button" class="secondary" id="session-new">Начать новую сессию</button>
+      </div>
+      <div class="cards" id="session-cards"></div>
+      <h2>Лут</h2><div id="session-items"></div>
+      <h2>По зонам</h2><div id="session-zones"></div>`;
+    this.items = makeTable($("#session-items"), [
+      { key: "name", title: "Предмет", html: itemCell, sort: (r) => r.name },
+      { key: "amount", title: "Шт.", num: true, html: (r) => fmt(r.amount) },
+      { key: "unit_value", title: "Цена", num: true, html: (r) => fmt(r.unit_value) },
+      { key: "value", title: "Стоимость", num: true, html: (r) => `<b>${fmt(r.value)}</b>` },
+    ], { sort: "value", empty: "Лута пока нет." });
+    this.zones = makeTable($("#session-zones"), [
+      { key: "location", title: "Зона", html: (r) => esc(r.name || r.location), sort: (r) => r.name || r.location },
+      { key: "first", title: "С", html: (r) => dateTime(r.first) },
+      { key: "last", title: "По", html: (r) => dateTime(r.last) },
+      { key: "fame", title: "Слава", num: true, html: (r) => fmt(r.fame) },
+      { key: "silver", title: "Серебро", num: true, html: (r) => fmt(r.silver) },
+    ], { empty: "—" });
+    $("#session-new").addEventListener("click", async () => {
+      await apiPost("/api/session/new", {});
+      $("#session-select").value = "";
+      this.reload();
+    });
+    $("#session-select").addEventListener("change", () => this.reload());
+    this.reload = async () => {
+      const sel = $("#session-select");
+      const data = await api("/api/session", { id: sel.value });
+      const keep = sel.value;
+      sel.innerHTML = `<option value="">текущая</option>` + data.sessions.map((s) =>
+        `<option value="${s.id}">${dateTime(s.started)}${s.ended ? ` — ${dateTime(s.ended)}` : " (идёт)"}</option>`).join("");
+      sel.value = keep;
+      const r = data.report;
+      if (!r || !r.session) { $("#session-cards").innerHTML = ""; return; }
+      const card = (v, l) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+      $("#session-cards").innerHTML = [
+        card(duration(r.hours), `длительность${r.character ? ` · ${esc(r.character)}` : ""}`),
+        card(fmt(r.fame_per_hour), `славы в час (всего ${fmt(r.fame)})`),
+        card(fmt(r.silver_per_hour), `серебра в час (всего ${fmt(r.silver)})`),
+        card(fmt(r.loot_value_per_hour), `лута в час, по рынку (всего ${fmt(r.loot_value)})`),
+        card(r.balance_change === null ? "—" : fmt(r.balance_change), "изменение баланса серебра"),
+        card(`${r.kills} / ${r.deaths}`, "убийств / смертей"),
+      ].join("");
+      this.items.set(r.items);
+      this.zones.set(r.zones);
+    };
+    this.reload();
+    this.timer = setInterval(() => { if (App.current === App.byId("session") && !$("#session-select").value) this.reload(); }, 15000);
+  },
+  show() { if (this.reload) this.reload(); },
+});
