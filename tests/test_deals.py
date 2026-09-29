@@ -187,3 +187,27 @@ class UnderpricedTest(unittest.TestCase):
         self.assertEqual((r["price"], r["discount"], r["ref_source"]), (600, 40.0, "median"))
         self.assertAlmostEqual(r["profit"], 1000 * (1 - 0.04 - 0.025) - 600)
         self.assertAlmostEqual(r["total_profit"], round(r["profit"] * 2, 2))
+
+
+class BmDemandTest(unittest.TestCase):
+    def test_aggregates_and_margin(self):
+        from albion_trader.deals import bm_demand
+        day = 86400
+        snaps = [{"item_id": "X", "quality": 2, "ts": NOW - 2 * day, "buy_max": 1000, "buy_amount": 3},
+                 {"item_id": "X", "quality": 2, "ts": NOW - day, "buy_max": 1400, "buy_amount": 1},
+                 {"item_id": "X", "quality": 2, "ts": NOW - day + 60, "buy_max": 1200, "buy_amount": 1}]
+        offers = [o("X", "thetford", "offer", 700, quality=1),   # качество ниже — не подходит
+                  o("X", "martlock", "offer", 800, quality=3)]
+        rows = bm_demand(snaps, {("X", 2): (14, 1100.0)}, offers, tax=0.04, period_days=7)
+        r = rows[0]
+        self.assertEqual((r["days_seen"], r["snapshots"], r["max_price"], r["last_price"]), (2, 3, 1400, 1200))
+        self.assertAlmostEqual(r["avg_price"], 1200)
+        self.assertEqual((r["city"], r["city_price"]), ("martlock", 800))
+        self.assertAlmostEqual(r["margin"], 1200 * 0.96 - 800)
+        self.assertEqual(r["daily_sold"], 2)
+        self.assertAlmostEqual(r["score"], 1200 * 2)
+
+    def test_sales_only_item(self):
+        from albion_trader.deals import bm_demand
+        rows = bm_demand([], {("Y", 1): (7, 500.0)}, [], tax=0.04, period_days=7)
+        self.assertEqual((rows[0]["avg_price"], rows[0]["daily_sold"], rows[0]["last_price"]), (500.0, 1, None))

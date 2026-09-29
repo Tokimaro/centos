@@ -342,3 +342,49 @@ def underpriced(offers: list[dict], refs: dict, tax: float, fee: float = SETUP_F
         })
     rows.sort(key=lambda r: r["total_profit"], reverse=True)
     return rows
+
+
+def bm_demand(snapshots: list[dict], sales: dict, city_offers: list[dict], tax: float,
+              period_days: float) -> list[dict]:
+    """Спрос Чёрного рынка по снимкам его заказов на покупку и истории продаж.
+
+    ``snapshots``: строки price_snapshots рынка black_market (item_id, quality, ts, buy_max, buy_amount);
+    ``sales``: {(item, quality): (продано шт., средняя цена)} за период;
+    ``city_offers``: свежие предложения городов — для оценки маржи (качество ≥ запрошенного).
+    """
+    groups: dict[tuple, list] = defaultdict(list)
+    for s in snapshots:
+        if s["buy_max"]:
+            groups[(s["item_id"], s["quality"])].append(s)
+    cheapest: dict[str, list] = defaultdict(list)
+    for o in city_offers:
+        cheapest[o["item_id"]].append(o)
+    keys = set(groups) | set(sales)
+    rows = []
+    for item_id, q in keys:
+        snaps = sorted(groups.get((item_id, q), []), key=lambda s: s["ts"])
+        sold, avg_sale = sales.get((item_id, q), (0, None))
+        prices = [s["buy_max"] for s in snaps]
+        last = snaps[-1] if snaps else None
+        buy_price = last["buy_max"] if last else avg_sale
+        supply = [o for o in cheapest.get(item_id, []) if o["quality"] >= q]
+        best_city = min(supply, key=lambda o: o["price"]) if supply else None
+        margin = None
+        if best_city and buy_price:
+            margin = round(buy_price * (1 - tax) - best_city["price"], 2)
+        daily = round(sold / period_days, 2) if sold else None
+        avg_price = round(sum(prices) / len(prices), 2) if prices else avg_sale
+        rows.append({
+            "item_id": item_id, "quality": q,
+            "days_seen": len({int(s["ts"] // 86400) for s in snaps}),
+            "snapshots": len(snaps),
+            "avg_price": avg_price, "max_price": max(prices) if prices else None,
+            "last_price": last["buy_max"] if last else None, "last_seen": last["ts"] if last else None,
+            "daily_sold": daily, "avg_sale": round(avg_sale, 2) if avg_sale else None,
+            "city_price": best_city["price"] if best_city else None,
+            "city": best_city["location"] if best_city else None,
+            "margin": margin,
+            "score": round((avg_price or 0) * (daily or len(snaps) or 0), 2),
+        })
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    return rows

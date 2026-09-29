@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import db
-from .deals import (TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, fast_sell_table, find_deals, flip_table,
+from .deals import (TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, bm_demand, fast_sell_table, find_deals, flip_table,
                     price_table, underpriced)
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
@@ -255,6 +255,32 @@ class App:
         rows = [r for r in rows if r["discount"] >= min_discount and r["profit"] >= min_profit]
         return {"now": now, "count": len(rows), "rows": self._named(rows, q)}
 
+    def api_bm_demand(self, q) -> dict:
+        now = int(time.time())
+        days = max(_float(q.get("days"), 7), 0.1)
+        since = now - int(days * 86400)
+        with self.conn() as conn:
+            snaps = [dict(r) for r in conn.execute(
+                "SELECT item_id, quality, ts, buy_max, buy_amount FROM price_snapshots "
+                "WHERE location = 'black_market' AND ts >= ?", (since,))]
+            sales = {}
+            for r in conn.execute(
+                    """SELECT albion_id, quality, SUM(item_amount), SUM(silver_amount) FROM history
+                       WHERE location = 'black_market' AND timescale = 1 AND ts >= ? AND item_amount > 0
+                       GROUP BY albion_id, quality""", (since,)):
+                item_id = self.catalog.index.get(str(r[0]))
+                if item_id and r[2]:
+                    sales[(item_id, r[1])] = (r[2], r[3] / r[2] / db.PRICE_SCALE)
+            offers = [o for o in db.load_orders(conn, now - int(_float(q.get("max_age"), 24) * 3600),
+                                                DEFAULT_CITIES, now) if o["auction_type"] == "offer"]
+        ok = self._item_filter(q)
+        rows = bm_demand([s for s in snaps if ok(s["item_id"])],
+                         {k: v for k, v in sales.items() if ok(k[0])}, offers, self._tax(q), days)
+        min_margin = q.get("min_margin")
+        if min_margin not in (None, ""):
+            rows = [r for r in rows if r["margin"] is not None and r["margin"] >= _float(min_margin, 0)]
+        return {"now": now, "count": len(rows), "rows": self._named(rows, q)}
+
     def api_history(self, q) -> dict:
         item_id = (q.get("item") or "").strip()
         now = int(time.time())
@@ -332,6 +358,7 @@ def make_handler(app: App):
         "/api/flips": app.api_flips,
         "/api/history": app.api_history,
         "/api/underpriced": app.api_underpriced,
+        "/api/bm-demand": app.api_bm_demand,
         "/api/items": app.api_items,
     }
 

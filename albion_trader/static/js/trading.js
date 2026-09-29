@@ -386,3 +386,44 @@ standardTab({
     return { rows: data.rows, summary: `Лотов: ${data.count}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
   },
 });
+
+// ---------- спрос Чёрного рынка ----------
+standardTab({
+  id: "bmdemand", group: "trade", title: "Спрос ЧР",
+  intro: "Что Чёрный рынок покупает чаще и дороже — по всем вашим просмотрам ЧР за период и истории его продаж. "
+    + "«Маржа» — последняя цена ЧР после налога минус самое дешёвое предложение в городах (качество не ниже). "
+    + "Рейтинг = средняя цена × продажи в сутки (или число наблюдений, если истории нет).",
+  spec: [
+    { legend: "Период", fields: [
+      { type: "select", name: "days", label: "За", value: "7",
+        options: [["1", "сутки"], ["3", "3 дня"], ["7", "неделю"], ["30", "месяц"]] },
+      { type: "check", name: "premium", label: "Премиум (налог 4%, без — 8%)", value: true },
+      { type: "number", name: "max_age", label: "Цены городов не старше, ч", value: 24, min: 0.1 },
+      { type: "number", name: "min_margin", label: "Мин. маржа (пусто — все)", min: 0 },
+    ] },
+    { legend: "Предметы", fields: [
+      { type: "search", name: "q", label: "Поиск", placeholder: "название или ID" },
+      { type: "tiers" }, { type: "enchants" },
+    ] },
+  ],
+  columns: [
+    { key: "name", title: "Предмет", html: itemCell, sort: (r) => r.name },
+    { key: "quality", title: "Кач.", html: (r) => `<span title="${QUALITY[r.quality] || ""}">${r.quality}</span>` },
+    { key: "last_price", title: "Цена ЧР", num: true, html: (r) => fmt(r.last_price), hint: "Последний лучший заказ ЧР" },
+    { key: "avg_price", title: "Средняя", num: true, html: (r) => fmt(r.avg_price) },
+    { key: "max_price", title: "Макс.", num: true, html: (r) => fmt(r.max_price) },
+    { key: "days_seen", title: "Дней с заказом", num: true, html: (r) => `${r.days_seen} <span class="muted">(${r.snapshots})</span>`, hint: "В скольких днях периода был заказ ЧР (в скобках — число снимков)" },
+    { key: "daily_sold", title: "Продаж/сут", num: true, html: (r) => fmt(r.daily_sold) },
+    { key: "city_price", title: "Дешевле всего в городе", num: true, html: (r) => r.city ? `${fmt(r.city_price)} <span class="muted">${esc(App.locName(r.city))}</span>` : "—" },
+    { key: "margin", title: "Маржа", num: true, html: (r) => r.margin === null ? "—" : `<b>${fmt(r.margin)}</b>`, cls: (r) => r.margin > 0 ? "good" : r.margin < 0 ? "bad" : "" },
+    { key: "score", title: "Рейтинг", num: true, html: (r) => fmt(r.score) },
+    { key: "last_seen", title: "Последний раз", num: true, html: (r) => `<span class="${ageClass(r.last_seen, r._now)}">${age(r.last_seen, r._now)}</span>`, sort: (r) => r.last_seen || 0 },
+  ],
+  sort: "score",
+  empty: "Данных нет. Спрос копится, когда вы открываете Чёрный рынок в Карлеоне (и график цен предметов на нём).",
+  async load(f) {
+    const data = await api("/api/bm-demand", { ...f, limit: 500 });
+    data.rows.forEach((r) => { r._now = data.now; });
+    return { rows: data.rows, summary: `Предметов: ${data.count}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
+  },
+});
