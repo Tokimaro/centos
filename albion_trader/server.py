@@ -76,6 +76,7 @@ class App:
         with self.conn() as conn:
             self.alerts.ensure_rule(conn, "outbid", "Мой заказ перебили")
         self.mytrades.attach(self.albion)
+        self.albion.on("response:gold_market_get_average_info", self._gold_from_capture)
         self.sniffer: Sniffer | None = None
 
     def start_capture(self, open_sockets=None) -> bool:
@@ -121,6 +122,23 @@ class App:
                 except Exception:  # pragma: no cover - ошибка правила не мешает сбору
                     log.exception("Ошибка проверки оповещений")
             return saved
+
+    def _gold_from_capture(self, params: dict) -> None:
+        prices, stamps = params.get(0), params.get(1)
+        if isinstance(prices, list) and isinstance(stamps, list) and prices:
+            self.ingest("goldprices.ingest", {"Prices": prices, "Timestamps": stamps})
+
+    def api_gold(self, q) -> dict:
+        now = int(time.time())
+        since = now - int(_float(q.get("days"), 30) * 86400)
+        with self.conn() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT ts, price FROM gold_prices WHERE ts >= ? ORDER BY ts", (since,))]
+            last = conn.execute("SELECT ts, price FROM gold_prices ORDER BY ts DESC LIMIT 1").fetchone()
+            sold = conn.execute("SELECT COALESCE(SUM(total), 0) FROM my_trades WHERE kind = 'sell' AND ts >= ?",
+                                (now - 30 * 86400,)).fetchone()[0]
+        return {"now": now, "prices": rows, "current": dict(last) if last else None,
+                "sold_30d": round(sold or 0, 2)}
 
     def _after_my_orders(self) -> None:
         with self.write_lock, self.conn() as conn:
@@ -574,6 +592,7 @@ def make_handler(app: App):
         "/api/farming": app.api_farming,
         "/api/alerts": app.api_alerts,
         "/api/my/orders": app.api_my_orders,
+        "/api/gold": app.api_gold,
         "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,

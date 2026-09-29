@@ -400,3 +400,17 @@ class DispatcherTest(unittest.TestCase):
         state = AlbionState(Collector(), codes)
         self.assertEqual(state.ev["update_fame"], 83)
         self.assertEqual(state.op["auction_get_offers"], 90)
+
+
+class GoldCaptureTest(unittest.TestCase):
+    def test_gold_response_stored(self):
+        from albion_trader.server import App, AppConfig
+        with tempfile.TemporaryDirectory() as d:
+            app = App(AppConfig(db_path=Path(d) / "m.db", items_path=Path(d) / "i.json", capture=False))
+            parser = photon.PhotonParser(app.albion.on_request, app.albion.on_response, app.albion.on_event)
+            ticks = lambda ts: ts * 10_000_000 + 621_355_968_000_000_000
+            now = int(time.time())
+            parser.receive_packet(pb.packet(pb.response(250, {0: [4800, 4900], 1: [ticks(now - 3600), ticks(now)]})))
+            data = app.api_gold({"days": "1"})
+            self.assertEqual([p["price"] for p in data["prices"]], [4800, 4900])
+            self.assertEqual(data["current"]["price"], 4900)

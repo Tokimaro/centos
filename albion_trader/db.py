@@ -338,7 +338,10 @@ def ingest_gold_prices(conn: sqlite3.Connection, payload: dict, now: int | None 
             # Клиент может прислать тики .NET вместо unix-времени.
             if ts > 10**14:
                 ts = dotnet_ticks_to_unix(ts)
-            rows.append((ts, int(price)))
+            price = int(price)
+            if price > 10**6:  # на случай, если игра пришлёт цену в формате × 10 000
+                price //= PRICE_SCALE
+            rows.append((ts, price))
         except (TypeError, ValueError):
             continue
     conn.executemany("INSERT OR REPLACE INTO gold_prices(ts, price) VALUES (?, ?)", rows)
