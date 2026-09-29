@@ -74,3 +74,49 @@ standardTab({
     return { rows: data.rows, summary: `Рецептов: ${data.count}${data.rows.length < data.count ? ` (показано ${data.rows.length})` : ""}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
   },
 });
+
+// ---------- зачарование ----------
+standardTab({
+  id: "enchant", group: "prod", title: "Зачарование",
+  intro: "Выгодно ли улучшать самому: предмет .a + руны (→ .1), души (→ .2), реликвии (→ .3) — или для еды и зелий соусы "
+    + "и экстракты — против продажи готового .b. Качество при зачаровании сохраняется. «Экономия» — насколько дешевле "
+    + "зачаровать, чем купить готовый предмет на рынке покупки.",
+  spec: [
+    { legend: "Рынки", fields: [
+      { type: "market", name: "buy_market", label: "Покупать предмет и материалы в", buyable: true, value: "martlock" },
+      { type: "select", name: "buy_mode", label: "Как покупать", value: "instant", options: [["instant", "мгновенно"], ["order", "заказом"]] },
+      { type: "market", name: "sell_market", label: "Продавать в", value: "martlock" },
+      { type: "select", name: "sell_mode", label: "Как продавать", value: "instant", options: [["instant", "мгновенно"], ["order", "предложением"]] },
+    ] },
+    { legend: "Фильтры", fields: [
+      { type: "check", name: "premium", label: "Премиум", value: true },
+      { type: "number", name: "max_age", label: "Цены не старше, ч", value: 24, min: 0.1 },
+      { type: "number", name: "min_profit", label: "Мин. прибыль (пусто — все)" },
+      { type: "qualities" },
+      { type: "search", name: "q", label: "Поиск", placeholder: "название или ID" },
+      { type: "tiers" },
+    ] },
+  ],
+  columns: [
+    { key: "name", title: "Предмет", html: itemCell, sort: (r) => r.name },
+    { key: "to_level", title: "Улучшение", html: (r) => `.${r.from_level} → .${r.to_level}`, sort: (r) => r.from_level * 10 + r.to_level },
+    { key: "quality", title: "Кач.", html: (r) => `<span title="${QUALITY[r.quality] || ""}">${r.quality}</span>` },
+    { key: "start_price", title: "Цена .a", num: true, html: (r) => fmt(r.start_price) },
+    { key: "cost", title: "Итого затраты", num: true,
+      html: (r) => `<span class="hint" title="${esc(r.materials.map((m) => `${m.name}: ${m.count} × ${fmt(m.price)}`).join("\n"))}">${fmt(r.cost)}</span>` },
+    { key: "sell_price", title: "Цена .b", num: true, html: (r) => fmt(r.sell_price) },
+    { key: "revenue", title: "На руки", num: true, html: (r) => fmt(r.revenue) },
+    profitCol(),
+    { key: "margin", title: "Маржа", num: true, html: (r) => pct(r.margin) },
+    { key: "saving", title: "Экономия", num: true, html: (r) => fmt(r.saving), hint: "Готовый .b на рынке покупки минус затраты на зачарование" },
+    ageCol(),
+  ],
+  sort: "profit",
+  empty: "Нет вариантов: нужны цены базового предмета, материалов (руны/души/реликвии) и зачарованного предмета.",
+  async load(f) {
+    const data = await api("/api/enchant", { ...f, limit: 400 });
+    if (data.no_gamedata) return { rows: [], summary: NO_GAMEDATA };
+    data.rows.forEach((r) => { r._now = data.now; });
+    return { rows: data.rows, summary: `Вариантов: ${data.count}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
+  },
+});

@@ -86,3 +86,28 @@ class CraftTest(unittest.TestCase):
     def test_category_filter(self):
         self.assertEqual(set(self.rows(category="artefacts")), set())
         self.assertEqual(set(self.rows(category="weapons")), {"T4_2H_BOW", "T4_ART_BOW"})
+
+
+class EnchantTest(unittest.TestCase):
+    def test_chain_costs_and_profit(self):
+        from albion_trader.production import enchant_table
+        gd = GameData({"items": {}, "recipes": {},
+                       "upgrades": {"T4_BOW": [[1, "T4_RUNE", 10], [2, "T4_SOUL", 10], [3, "T4_RELIC", 10]]}})
+        book = PriceBook([o("T4_BOW", "m", "offer", 1000), o("T4_RUNE", "m", "offer", 50),
+                          o("T4_SOUL", "m", "offer", 200),
+                          o("T4_BOW@1", "m", "request", 2000), o("T4_BOW@1", "m", "offer", 2500),
+                          o("T4_BOW@2", "m", "request", 3000),
+                          o("T4_BOW@1", "m", "offer", 900, quality=2)])
+        rows = {(r["from_level"], r["to_level"], r["quality"]): r
+                for r in enchant_table(gd, book, "m", "m", "instant", "instant", 0.04)}
+        r01 = rows[(0, 1, 1)]
+        self.assertAlmostEqual(r01["cost"], 1000 + 500)
+        self.assertAlmostEqual(r01["profit"], 2000 * 0.96 - 1500)
+        self.assertAlmostEqual(r01["saving"], 2500 - 1500)
+        r02 = rows[(0, 2, 1)]
+        self.assertAlmostEqual(r02["cost"], 1000 + 500 + 2000)
+        self.assertEqual([m["item_id"] for m in r02["materials"]], ["T4_RUNE", "T4_SOUL"])
+        # Цепочка до .3 обрывается: нет цены реликвии.
+        self.assertNotIn((0, 3, 1), rows)
+        # Качество 2: .1 куплен за 900, продать .2 качества 2 негде — строк нет.
+        self.assertNotIn((1, 2, 2), rows)

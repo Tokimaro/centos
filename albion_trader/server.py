@@ -22,7 +22,7 @@ from .alerts import AlertEngine
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from .gamedata import GameData
-from .production import CraftParams, PriceBook, craft_table
+from .production import CraftParams, PriceBook, craft_table, enchant_table
 from .items import ItemCatalog, enchant_of, tier_of
 from .locations import DEFAULT_CITIES, MARKETS, market_info, normalize_location
 
@@ -378,6 +378,27 @@ class App:
             r["missing_names"] = [self.catalog.name(i) for i in r["missing"]]
         return {"now": now, "count": len(rows), "rows": rows}
 
+    def api_enchant(self, q) -> dict:
+        if not self.gamedata:
+            return self._no_gamedata()
+        now = int(time.time())
+        buy = q.get("buy_market") or "martlock"
+        sell = q.get("sell_market") or buy
+        with self.conn() as conn:
+            orders = db.load_orders(conn, now - int(_float(q.get("max_age"), 24) * 3600), sorted({buy, sell}), now)
+        ok = self._item_filter({k: v for k, v in q.items() if k != "enchants"})
+        qualities = [int(x) for x in _split(q.get("qualities")) if x.isdigit()] or [1, 2, 3, 4, 5]
+        rows = enchant_table(self.gamedata, PriceBook(orders), buy, sell,
+                             "order" if q.get("buy_mode") == "order" else "instant",
+                             "order" if q.get("sell_mode") == "order" else "instant",
+                             self._tax(q), ok, qualities)
+        rows = [r for r in rows if r["profit"] >= _float(q.get("min_profit"), -10**12)]
+        rows = self._named(rows, q, 400)
+        for r in rows:
+            for m in r["materials"]:
+                m["name"] = self.catalog.name(m["item_id"])
+        return {"now": now, "count": len(rows), "rows": rows}
+
     def api_history(self, q) -> dict:
         item_id = (q.get("item") or "").strip()
         now = int(time.time())
@@ -457,6 +478,7 @@ def make_handler(app: App):
         "/api/underpriced": app.api_underpriced,
         "/api/bm-demand": app.api_bm_demand,
         "/api/craft": app.api_craft,
+        "/api/enchant": app.api_enchant,
         "/api/alerts": app.api_alerts,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,

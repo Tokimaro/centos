@@ -121,3 +121,51 @@ def craft_table(gd: GameData, book: PriceBook, p: CraftParams, item_ok=lambda i:
         })
     rows.sort(key=lambda r: (r["profit"] is not None, r["profit"] or 0), reverse=True)
     return rows
+
+
+def enchant_table(gd: GameData, book: PriceBook, buy_market: str, sell_market: str, buy_mode: str,
+                  sell_mode: str, tax: float, item_ok=lambda i: True, qualities=(1, 2, 3, 4, 5)) -> list[dict]:
+    """Зачарование X.a → X.b рунами/душами/реликвиями против покупки готового X.b.
+    Качество при зачаровании сохраняется."""
+    rows = []
+    for base, steps in gd.upgrades.items():
+        by_level = {lvl: (mat, cnt) for lvl, mat, cnt in steps}
+        levels = sorted(by_level)
+        if not levels:
+            continue
+        top = max(levels)
+        for q in qualities:
+            for a in range(0, top):
+                start_id = base if a == 0 else f"{base}@{a}"
+                if not item_ok(start_id):
+                    continue
+                start_price = book.buy_price(start_id, buy_market, buy_mode, q)
+                if start_price is None:
+                    continue
+                cost, used = start_price, []
+                for b in range(a + 1, top + 1):
+                    if b not in by_level:
+                        break
+                    mat, cnt = by_level[b]
+                    mat_price = book.buy_price(mat, buy_market, buy_mode)
+                    if mat_price is None:
+                        break
+                    cost += mat_price * cnt
+                    used.append({"item_id": mat, "count": cnt, "price": round(mat_price, 2)})
+                    target = f"{base}@{b}"
+                    sell_book, revenue = book.sell_price(target, sell_market, sell_mode, tax, q)
+                    if revenue is None:
+                        continue
+                    buy_ready = book.buy_price(target, buy_market, "instant", q)
+                    profit = revenue - cost
+                    rows.append({
+                        "item_id": base, "from_id": start_id, "to_id": target, "from_level": a, "to_level": b,
+                        "quality": q, "start_price": round(start_price, 2), "materials": list(used),
+                        "cost": round(cost, 2), "sell_price": sell_book, "revenue": round(revenue, 2),
+                        "profit": round(profit, 2), "margin": round(profit / cost * 100, 2) if cost else None,
+                        "ready_price": buy_ready,
+                        "saving": round(buy_ready - cost, 2) if buy_ready else None,
+                        "seen_at": book.seen(target, sell_market, q),
+                    })
+    rows.sort(key=lambda r: r["profit"], reverse=True)
+    return rows
