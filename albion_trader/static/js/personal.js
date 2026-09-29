@@ -152,7 +152,7 @@ App.tab({
 
 // ---------- журнал лута ----------
 App.tab({
-  id: "loot", group: "my", title: "Лут группы",
+  id: "loot", group: "my", title: "Лут и бои",
   init(el) {
     el.innerHTML = `
       <p class="muted intro">Кто что подобрал рядом с вами — полезно для честного дележа в группе. Стоимость предметов —
@@ -164,7 +164,12 @@ App.tab({
         <label>Игрок <input type="search" name="player" placeholder="имя"></label>
       </form>
       <h2>Итоги по игрокам</h2><div id="loot-players"></div>
-      <h2>Журнал</h2><div id="loot-rows"></div>`;
+      <h2>Журнал</h2><div id="loot-rows"></div>
+      <h2>Убийства и смерти</h2>
+      <p class="muted">Смерти, которые игра показала рядом с вами, и ваши убийства. Фильтр «Игрок» работает и здесь.</p>
+      <div class="cards" id="kill-cards"></div>
+      <div id="kill-top"></div>
+      <div id="kill-rows"></div>`;
     this.players = makeTable($("#loot-players"), [
       { key: "player", title: "Игрок", html: (r) => `${esc(r.player)}${r.player === this.me ? ' <span class="pill good">вы</span>' : ""}` },
       { key: "items", title: "Предметов", num: true, html: (r) => fmt(r.items) },
@@ -180,17 +185,35 @@ App.tab({
       { key: "value", title: "Стоимость", num: true, html: (r) => fmt(r.value) },
       { key: "target", title: "У кого", html: (r) => esc(r.target || "") },
     ], { sort: "ts", empty: "—" });
+    this.killTop = makeTable($("#kill-top"), [
+      { key: "player", title: "Кто убивал вас чаще всего" },
+      { key: "count", title: "Раз", num: true },
+    ], { sort: "count", empty: "Вас не убивали — отлично." });
+    this.kills = makeTable($("#kill-rows"), [
+      { key: "ts", title: "Когда", html: (r) => dateTime(r.ts) },
+      { key: "zone", title: "Где", html: (r) => esc(r.zone) },
+      { key: "killer", title: "Убийца", html: (r) => `${esc(r.killer || "—")}${r.killer_guild ? ` <span class="muted">[${esc(r.killer_guild)}]</span>` : ""}` },
+      { key: "victim", title: "Погибший", html: (r) => `${esc(r.victim || "—")}${r.victim_guild ? ` <span class="muted">[${esc(r.victim_guild)}]</span>` : ""}` },
+      { key: "mine", title: "", sort: (r) => (r.my_death ? 2 : r.my_kill ? 1 : 0),
+        html: (r) => (r.my_death ? '<span class="pill bad">вы погибли</span>' : r.my_kill ? '<span class="pill good">ваше убийство</span>' : "") },
+    ], { sort: "ts", empty: "Смертей за период не было." });
     $("#loot-form").addEventListener("input", debounce(() => this.reload(), 250));
     this.reload = async () => {
       const f = $("#loot-form");
       const params = f.period.value === "session"
         ? { session: (await api("/api/session")).current, days: 3650 } : { days: f.period.value };
-      const data = await api("/api/loot", params);
+      const [data, kills] = await Promise.all([api("/api/loot", params), api("/api/kills", params)]);
       this.me = data.character;
       const who = f.player.value.trim().toLowerCase();
       const match = (name) => !who || (name || "").toLowerCase().includes(who);
       this.players.set(data.players.filter((p) => match(p.player)));
       this.rows.set(data.rows.filter((r) => match(r.actor)));
+      const card = (v, l) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+      $("#kill-cards").innerHTML = card(fmt(kills.my_kills), "ваших убийств") + card(fmt(kills.my_deaths), "ваших смертей")
+        + card(kills.my_deaths ? (kills.my_kills / kills.my_deaths).toFixed(2) : (kills.my_kills ? "∞" : "—"), "убийств на смерть")
+        + card(fmt(kills.seen), "смертей рядом с вами");
+      this.killTop.set(kills.top_killers);
+      this.kills.set(kills.rows.filter((r) => match(r.killer) || match(r.victim)));
     };
     this.reload();
   },
@@ -241,4 +264,42 @@ App.tab({
     this.reload();
   },
   show() { if (this.reload) this.reload(); },
+});
+
+// ---------- сводка по зонам ----------
+standardTab({
+  id: "zones", group: "my", title: "Зоны",
+  intro: "Где выгоднее фармить: всё, что вы получили в каждой зоне за период. Доход = серебро с мобов + поднятое серебро + "
+    + "стоимость вашего лута по рынку. Время — сумма промежутков между событиями в зоне; паузы длиннее 10 минут "
+    + "считаются отходом от игры и учитываются как 10 минут. Данные копятся сессиями из событий игры.",
+  spec: [
+    { legend: "Период", fields: [
+      { type: "select", name: "days", label: "За", value: "30",
+        options: [["1", "сутки"], ["7", "неделю"], ["30", "месяц"], ["90", "3 месяца"], ["3650", "всё время"]] },
+      { type: "number", name: "min_minutes", label: "Мин. время в зоне, мин", value: 5, min: 0, step: 1 },
+    ] },
+  ],
+  columns: [
+    { key: "name", title: "Зона", html: (r) => esc(r.name), sort: (r) => r.name },
+    { key: "visits", title: "Визитов", num: true, html: (r) => fmt(r.visits) },
+    { key: "hours", title: "Время", num: true, html: (r) => duration(r.hours) },
+    { key: "fame_per_hour", title: "Славы/ч", num: true, html: (r) => fmt(r.fame_per_hour) },
+    { key: "income_per_hour", title: "Доход/ч", num: true, html: (r) => `<b>${fmt(r.income_per_hour)}</b>`, cls: () => "good" },
+    { key: "fame", title: "Слава", num: true, html: (r) => fmt(r.fame) },
+    { key: "silver", title: "Серебро с мобов", num: true, html: (r) => fmt(r.silver) },
+    { key: "loot_value", title: "Лут по рынку", num: true,
+      html: (r) => `${fmt(r.loot_value)}${r.unpriced_items ? ` <span class="muted" title="без цены: ${r.unpriced_items} предм.">*</span>` : ""}` },
+    { key: "loot_silver", title: "Поднято серебра", num: true, html: (r) => fmt(r.loot_silver) },
+    { key: "income", title: "Доход всего", num: true, html: (r) => fmt(r.income) },
+    { key: "deaths", title: "Смертей", num: true, html: (r) => fmt(r.deaths), cls: (r) => (r.deaths ? "bad" : "") },
+    { key: "last", title: "Последний раз", num: true, html: (r) => dateTime(r.last) },
+  ],
+  sort: "income_per_hour",
+  empty: "Пока нет данных: сводка появится после игры с запущенным приложением.",
+  async load(f) {
+    const data = await api("/api/zones", { days: f.days });
+    const minH = (Number(f.min_minutes) || 0) / 60;
+    const rows = data.rows.filter((r) => r.hours >= minH || r.deaths);
+    return { rows, summary: `Зон: ${rows.length}. * — часть лута без рыночной цены (не учтена в доходе).` };
+  },
 });

@@ -294,6 +294,7 @@ class AlbionState:
             self.character_name = name
             self.stats["character"] = name
             log.info("Персонаж: %s", name)
+            self._fire("character", name)
 
     def _market_response_arrived(self) -> None:
         if self.pending_market_requests:

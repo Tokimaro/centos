@@ -108,6 +108,7 @@ class App:
             activity_mod.init(conn)
         self.activity = Activity(self.conn, self.write_lock, index_to_item=self.catalog.index)
         self.activity.attach(self.albion)
+        self.albion.on("character", self._remember_character)
         self.activity.new_session()
         with self.conn() as conn:
             world_mod.init(conn)
@@ -230,7 +231,7 @@ class App:
         for r in rows:
             r.update(status.get(r["id"], {}))
         return {"now": int(time.time()), "rows": self._named(rows, q, 1000),
-                "character": self.albion.character_name}
+                "character": self.character()}
 
     def api_my_trades(self, q) -> dict:
         now = int(time.time())
@@ -265,9 +266,21 @@ class App:
             return value
         return value_of
 
+    def _remember_character(self, name: str) -> None:
+        with self.write_lock, self.conn() as conn:
+            db.set_settings(conn, {"last_character": name})
+
+    def character(self) -> str:
+        """Текущий персонаж; до первого входа в зону — последний известный."""
+        if self.albion.character_name:
+            return self.albion.character_name
+        return self.settings().get("last_character") or ""
+
     def zone_name(self, raw: str | None) -> str:
         if not raw:
             return "—"
+        if raw == "3003":
+            return "Карлеон"  # как рынок 3003 — Чёрный рынок, как зона — сам город
         key = normalize_location(raw)
         if key in MARKETS:
             return MARKETS[key].name_ru
@@ -277,7 +290,7 @@ class App:
         now = int(time.time())
         with self.conn() as conn:
             sid = int(_float(q.get("id"), 0)) or self.activity.session_id
-            report = activity_mod.session_report(conn, sid, self.albion.character_name,
+            report = activity_mod.session_report(conn, sid, self.character(),
                                                  self.value_of_factory(conn), now) if sid else {}
             sessions = [dict(r) for r in conn.execute(
                 "SELECT id, started, ended, character FROM sessions ORDER BY id DESC LIMIT 30")]
@@ -314,7 +327,7 @@ class App:
         q2["limit"] = q.get("limit") or 2000
         return {"now": now, "rows": rows[:int(_float(q2["limit"], 2000))],
                 "players": sorted(players.values(), key=lambda p: p["value"] + p["silver"], reverse=True),
-                "character": self.albion.character_name}
+                "character": self.character()}
 
     def reload_reference(self) -> None:
         self.catalog = ItemCatalog.load(self.config.items_path)
@@ -375,11 +388,29 @@ class App:
         with self.conn() as conn:
             return {"now": now, **world_mod.report(conn, now)}
 
+    def api_kills(self, q) -> dict:
+        now = int(time.time())
+        with self.conn() as conn:
+            report = activity_mod.kill_log(conn, now - int(_float(q.get("days"), 7) * 86400),
+                                           self.character(), int(_float(q.get("session"), 0)) or None)
+        for r in report["rows"]:
+            r["zone"] = self.zone_name(r["location"])
+        return {"now": now, "character": self.character(), **report}
+
+    def api_zones(self, q) -> dict:
+        now = int(time.time())
+        with self.conn() as conn:
+            rows = activity_mod.zone_report(conn, now - int(_float(q.get("days"), 30) * 86400),
+                                            self.character(), self.value_of_factory(conn))
+        for r in rows:
+            r["name"] = self.zone_name(r["location"])
+        return {"now": now, "rows": rows}
+
     def api_character(self, q) -> dict:
         now = int(time.time())
         with self.conn() as conn:
             report = activity_mod.character_report(conn, now - int(_float(q.get("days"), 30) * 86400))
-        return {"now": now, "character": self.albion.character_name, **report}
+        return {"now": now, "character": self.character(), **report}
 
     # --- оповещения -----------------------------------------------------
     def api_alerts(self, q) -> dict:
@@ -781,6 +812,8 @@ def make_handler(app: App):
         "/api/session": app.api_session,
         "/api/loot": app.api_loot,
         "/api/character": app.api_character,
+        "/api/kills": app.api_kills,
+        "/api/zones": app.api_zones,
         "/api/world": app.api_world,
         "/api/system": app.api_system,
         "/api/my/trades": app.api_my_trades,

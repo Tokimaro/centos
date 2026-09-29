@@ -143,10 +143,13 @@ class Activity:
                     actor=str(p.get(2) or ""), target=str(p.get(1) or ""), data={"silver": is_silver})
 
     def on_died(self, p: dict) -> None:
-        self.record("death", actor=str(p.get(10) or ""), target=str(p.get(2) or ""))
+        # 2 — погибший, 3 — его гильдия, 10 — убийца, 11 — его гильдия.
+        self.record("death", actor=str(p.get(10) or ""), target=str(p.get(2) or ""),
+                    data={"victim_guild": str(p.get(3) or ""), "killer_guild": str(p.get(11) or "")})
 
     def on_killed(self, p: dict) -> None:
-        self.record("kill", target=str(p.get(2) or ""))
+        me = getattr(self.state, "character_name", "") if self.state else ""
+        self.record("kill", actor=me, target=str(p.get(2) or ""))
 
     def on_respec(self, p: dict) -> None:
         points = p.get(0)
@@ -258,3 +261,104 @@ def character_report(conn, since: int) -> dict:
     return {"fame_days": [{"day": d, "fame": round(v)} for d, v in sorted(fame_days.items(), reverse=True)],
             "fame_total": fame_total, "balance": balance, "respec": respec, "deaths": deaths,
             "kills": kills, "stats": stats}
+
+
+def kill_log(conn, since: int, character: str, session_id: int | None = None) -> dict:
+    """Журнал смертей рядом с вами (Died) и ваших убийств (KilledPlayer).
+
+    Одна и та же смерть может прийти обоими событиями — убийство из KilledPlayer
+    не дублируется, если в ту же секунду есть Died с той же жертвой.
+    """
+    sql = "SELECT * FROM activity_events WHERE kind IN ('death', 'kill') AND ts >= ?"
+    args: list = [since]
+    if session_id:
+        sql += " AND session_id = ?"
+        args.append(session_id)
+    rows = [dict(r) for r in conn.execute(sql + " ORDER BY ts DESC", args)]
+    deaths = {(r["ts"], r["target"]) for r in rows if r["kind"] == "death"}
+    out = []
+    for r in rows:
+        if r["kind"] == "kill" and ((r["ts"], r["target"]) in deaths or (r["ts"] - 1, r["target"]) in deaths):
+            continue
+        data = json.loads(r["data"] or "{}")
+        killer = r["actor"] or (character if r["kind"] == "kill" else "")
+        out.append({"ts": r["ts"], "location": r["location"], "victim": r["target"], "killer": killer,
+                    "victim_guild": data.get("victim_guild", ""), "killer_guild": data.get("killer_guild", ""),
+                    "mine": bool(character) and character in (killer, r["target"]),
+                    "my_death": bool(character) and r["target"] == character,
+                    "my_kill": bool(character) and killer == character})
+    killers_of_me: dict[str, int] = defaultdict(int)
+    for r in out:
+        if r["my_death"] and r["killer"]:
+            killers_of_me[r["killer"]] += 1
+    return {"rows": out,
+            "my_kills": sum(1 for r in out if r["my_kill"]),
+            "my_deaths": sum(1 for r in out if r["my_death"]),
+            "seen": len(out),
+            "top_killers": sorted(({"player": k, "count": v} for k, v in killers_of_me.items()),
+                                  key=lambda x: x["count"], reverse=True)[:10]}
+
+
+# Если в зоне долго нет событий, считаем, что вы отошли от игры: время
+# между событиями учитывается не больше этого.
+IDLE_GAP = 10 * 60
+
+
+def zone_report(conn, since: int, character: str, value_of: Callable[[str], float | None]) -> list[dict]:
+    """Сводка по зонам за период: время, визиты, слава, серебро, лут (ваш), смерти, в час."""
+    zones: dict[str, dict] = {}
+
+    def zone(key):
+        return zones.setdefault(key, {"location": key, "seconds": 0, "visits": 0, "fame": 0.0, "silver": 0.0,
+                                      "loot_items": defaultdict(float), "loot_silver": 0.0, "deaths": 0,
+                                      "kills": 0, "last": 0})
+    prev = None           # (сессия, зона, время) предыдущего события
+    for e in conn.execute("SELECT * FROM activity_events WHERE ts >= ? ORDER BY session_id, ts, id", (since,)):
+        e = dict(e)
+        key = e["target"] if e["kind"] == "zone" else e["location"]
+        if not key:
+            continue
+        z = zone(key)
+        if prev and prev[0] == e["session_id"]:
+            gap = e["ts"] - prev[2]
+            zone(prev[1])["seconds"] += min(max(gap, 0), IDLE_GAP)
+        if e["kind"] == "zone" and (not prev or prev[1] != key or prev[0] != e["session_id"]):
+            z["visits"] += 1
+        z["last"] = max(z["last"], e["ts"])
+        if e["kind"] == "fame":
+            z["fame"] += e["value"] or 0
+        elif e["kind"] == "silver":
+            z["silver"] += e["value"] or 0
+        elif e["kind"] == "loot" and (not character or e["actor"] == character):
+            if json.loads(e["data"] or "{}").get("silver"):
+                z["loot_silver"] += e["amount"] or 0
+            elif e["item_id"]:
+                z["loot_items"][e["item_id"]] += e["amount"] or 0
+        elif e["kind"] == "death" and character and e["target"] == character:
+            z["deaths"] += 1
+        elif e["kind"] == "kill":
+            z["kills"] += 1
+        prev = (e["session_id"], key, e["ts"])
+    out = []
+    for z in zones.values():
+        loot_value = 0.0
+        unpriced = 0
+        for item_id, amount in z.pop("loot_items").items():
+            price = value_of(item_id) if not item_id.startswith("#") else None
+            if price is None:
+                unpriced += 1
+            else:
+                loot_value += price * amount
+        hours = z["seconds"] / 3600
+        income = z["silver"] + z["loot_silver"] + loot_value
+        z.update({
+            "hours": round(hours, 2), "loot_value": round(loot_value), "unpriced_items": unpriced,
+            "fame": round(z["fame"]), "silver": round(z["silver"]), "loot_silver": round(z["loot_silver"]),
+            "income": round(income),
+            "fame_per_hour": round(z["fame"] / hours) if hours >= 1 / 60 else None,
+            "income_per_hour": round(income / hours) if hours >= 1 / 60 else None,
+        })
+        if z["fame"] or z["silver"] or z["loot_value"] or z["loot_silver"] or z["hours"] or z["deaths"] or z["kills"]:
+            out.append(z)
+    out.sort(key=lambda z: z["income_per_hour"] or 0, reverse=True)
+    return out
