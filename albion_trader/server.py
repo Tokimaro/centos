@@ -15,7 +15,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import db
-from .deals import TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, fast_sell_table, find_deals, price_table
+from .deals import (TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, fast_sell_table, find_deals, flip_table,
+                    price_table)
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from .gamedata import GameData
@@ -215,6 +216,32 @@ class App:
         return {"now": now, "count": len(rows), "tax": tax, "locations": locs, "base": base,
                 "rows": rows[:limit]}
 
+    def _tax(self, q) -> float:
+        if q.get("tax"):
+            return _float(q.get("tax"), 0) / 100
+        return TAX_PREMIUM if q.get("premium", "1") != "0" else TAX_NO_PREMIUM
+
+    def _named(self, rows: list[dict], q, limit_default: int = 300) -> list[dict]:
+        lang = q.get("lang", "ru")
+        rows = rows[:int(_float(q.get("limit"), limit_default))]
+        for r in rows:
+            r["name"] = self.catalog.name(r["item_id"], lang)
+        return rows
+
+    def api_flips(self, q) -> dict:
+        now = int(time.time())
+        locs = [l for l in (_split(q.get("locs")) or DEFAULT_CITIES) if l != "black_market"]
+        with self.conn() as conn:
+            orders = db.load_orders(conn, now - int(_float(q.get("max_age"), 6) * 3600), locs, now)
+            volumes = db.load_daily_volumes(conn, self.catalog.index, now)
+        ok = self._item_filter(q)
+        rows = flip_table([o for o in orders if ok(o["item_id"])], self._tax(q), volumes=volumes)
+        min_margin, min_profit = _float(q.get("min_margin"), 0), _float(q.get("min_profit"), 0)
+        min_volume = _float(q.get("min_volume"), 0)
+        rows = [r for r in rows if r["margin"] >= min_margin and r["profit"] >= min_profit
+                and (not min_volume or (r["daily_volume"] or 0) >= min_volume)]
+        return {"now": now, "count": len(rows), "rows": self._named(rows, q)}
+
     def api_prices(self, q) -> dict:
         item_id = (q.get("item") or "").strip()
         now = int(time.time())
@@ -276,6 +303,7 @@ def make_handler(app: App):
         "/api/prices": app.api_prices,
         "/api/fastsell": app.api_fastsell,
         "/api/settings": app.api_settings,
+        "/api/flips": app.api_flips,
         "/api/items": app.api_items,
     }
 

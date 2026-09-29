@@ -273,3 +273,47 @@ App.tab({
   },
   show() { if (!$("#price-form").item.value.trim()) loadRecent(); },
 });
+
+// ---------- флиппинг внутри города ----------
+standardTab({
+  id: "flips", group: "trade", title: "Флиппинг",
+  intro: "Перепродажа внутри одного города без перевозки: ставите заказ на покупку на 1 серебро выше лучшего, "
+    + "купленное выставляете на 1 серебро дешевле лучшего предложения. Учтены налог и две комиссии за размещение. "
+    + "«Потенциал/сут» — прибыль × средние продажи в сутки (нужна история цен).",
+  spec: [
+    { legend: "Рынки", cls: "locs", fields: [{ type: "markets", name: "locs", buyable: true }] },
+    { legend: "Параметры", fields: [
+      { type: "check", name: "premium", label: "Премиум (налог 4%, без — 8%)", value: true },
+      { type: "number", name: "max_age", label: "Свежесть данных, ч", value: 6, min: 0.1 },
+      { type: "number", name: "min_margin", label: "Мин. маржа, %", value: 10, min: 0 },
+      { type: "number", name: "min_profit", label: "Мин. прибыль / шт", value: 500, min: 0 },
+      { type: "number", name: "min_volume", label: "Мин. продаж в сутки", value: 0, min: 0 },
+    ] },
+    { legend: "Предметы", fields: [
+      { type: "search", name: "q", label: "Поиск", placeholder: "название или ID" },
+      { type: "tiers" }, { type: "enchants" },
+    ] },
+  ],
+  columns: [
+    { key: "name", title: "Предмет", html: itemCell, sort: (r) => r.name },
+    { key: "quality", title: "Кач.", html: (r) => `<span title="${QUALITY[r.quality] || ""}">${r.quality}</span>` },
+    { key: "location", title: "Рынок", html: (r) => locCell(r.location), sort: (r) => App.locName(r.location) },
+    { key: "bid", title: "Лучший заказ", num: true, html: (r) => fmt(r.bid), hint: "Лучший заказ на покупку — ставите на 1 выше" },
+    { key: "ask", title: "Лучшее предл.", num: true, html: (r) => fmt(r.ask), hint: "Лучшее предложение — выставляете на 1 ниже" },
+    { key: "profit", title: "Прибыль/шт", num: true, html: (r) => fmt(r.profit), cls: () => "good" },
+    { key: "margin", title: "Маржа", num: true, html: (r) => pct(r.margin) },
+    { key: "spread_pct", title: "Спред", num: true, html: (r) => pct(r.spread_pct) },
+    { key: "daily_volume", title: "Продаж/сут", num: true, html: (r) => fmt(r.daily_volume) },
+    { key: "daily_potential", title: "Потенциал/сут", num: true, html: (r) => r.daily_potential === null ? "—" : `<b>${fmt(r.daily_potential)}</b>`, cls: () => "good" },
+    { key: "instant_profit", title: "Мгновенно", num: true, hint: "Лучшее предложение дешевле заказа на покупку после налога — можно купить и сразу сдать",
+      html: (r) => r.instant_profit ? `<span class="pill good">+${fmt(r.instant_profit)}</span>` : "" },
+    { key: "seen_at", title: "Возраст", num: true, html: (r) => `<span class="${ageClass(r.seen_at, r._now)}">${age(r.seen_at, r._now)}</span>`, sort: (r) => -r.seen_at },
+  ],
+  sort: "daily_potential",
+  empty: "Нет вариантов. Флиппингу нужны и заказы на покупку, и предложения одного рынка — откройте в игре обе вкладки рынка или ослабьте фильтры.",
+  async load(f) {
+    const data = await api("/api/flips", { ...f, premium: f.premium, limit: 500 });
+    data.rows.forEach((r) => { r._now = data.now; });
+    return { rows: data.rows, summary: `Вариантов: ${data.count}${data.rows.length < data.count ? ` (показано ${data.rows.length})` : ""}. Обновлено ${new Date().toLocaleTimeString("ru-RU")}.` };
+  },
+});

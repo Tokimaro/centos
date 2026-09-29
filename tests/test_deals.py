@@ -154,3 +154,22 @@ class FastSellTest(unittest.TestCase):
         self.assertEqual(rows[3]["cells"]["martlock"]["price"], 1200)
         self.assertEqual(rows[3]["cells"]["martlock"]["quality"], 1)
         self.assertEqual(rows[3]["cells"]["thetford"]["price"], 1000)
+
+
+class FlipTest(unittest.TestCase):
+    def test_flip_math_and_arbitrage(self):
+        from albion_trader.deals import flip_table
+        orders = [o("X", "thetford", "request", 1000), o("X", "thetford", "request", 900),
+                  o("X", "thetford", "offer", 1500), o("X", "thetford", "offer", 1600),
+                  o("X", "thetford", "offer", 800, quality=2),     # другое качество — без пары
+                  o("Y", "martlock", "request", 1000), o("Y", "martlock", "offer", 900)]
+        rows = {(r["item_id"], r["location"]): r for r in flip_table(orders, tax=0.04, volumes={("X", "thetford", 1): 10})}
+        x = rows[("X", "thetford")]
+        self.assertEqual((x["bid"], x["ask"]), (1000, 1500))
+        self.assertAlmostEqual(x["cost"], round(1001 * 1.025, 2))
+        self.assertAlmostEqual(x["revenue"], round(1499 * (1 - 0.04 - 0.025), 2))
+        self.assertAlmostEqual(x["daily_potential"], round(x["profit"] * 10, 2))
+        self.assertIsNone(x["instant_profit"])
+        y = rows[("Y", "martlock")]
+        self.assertAlmostEqual(y["instant_profit"], 1000 * 0.96 - 900)
+        self.assertNotIn(("X", "thetford", 2), [(r["item_id"], r["location"], r["quality"]) for r in rows.values()])

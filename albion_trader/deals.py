@@ -272,3 +272,42 @@ def fast_sell_table(orders: list[dict], locations, tax: float, base: str | None 
     key = "gain_vs_base" if base else "spread"
     rows.sort(key=lambda r: (r[key] if r[key] is not None else -1), reverse=True)
     return rows
+
+
+def flip_table(orders: list[dict], tax: float, fee: float = SETUP_FEE, volumes: dict | None = None) -> list[dict]:
+    """Флиппинг внутри одного рынка: свой заказ на покупку чуть выше лучшего,
+    затем своё предложение чуть ниже лучшего. Качество совпадает."""
+    books: dict[tuple, dict] = {}
+    for o in orders:
+        key = (o["item_id"], o["location"], o["quality"])
+        b = books.setdefault(key, {"bid": None, "ask": None})
+        if o["auction_type"] == "request":
+            if b["bid"] is None or o["price"] > b["bid"]["price"]:
+                b["bid"] = o
+        elif b["ask"] is None or o["price"] < b["ask"]["price"]:
+            b["ask"] = o
+    volumes = volumes or {}
+    rows = []
+    for (item_id, loc, q), b in books.items():
+        bid, ask = b["bid"], b["ask"]
+        if not bid or not ask:
+            continue
+        cost = (bid["price"] + 1) * (1 + fee)
+        revenue = (ask["price"] - 1) * (1 - tax - fee)
+        profit = revenue - cost
+        volume = volumes.get((item_id, loc, q))
+        arbitrage = bid["price"] * (1 - tax) - ask["price"]
+        rows.append({
+            "item_id": item_id, "location": loc, "quality": q,
+            "bid": bid["price"], "ask": ask["price"],
+            "bid_amount": bid["amount"], "ask_amount": ask["amount"],
+            "cost": round(cost, 2), "revenue": round(revenue, 2), "profit": round(profit, 2),
+            "margin": round(profit / cost * 100, 2) if cost else 0,
+            "spread_pct": round((ask["price"] - bid["price"]) / bid["price"] * 100, 2),
+            "daily_volume": volume,
+            "daily_potential": round(profit * volume, 2) if volume else None,
+            "instant_profit": round(arbitrage, 2) if arbitrage > 0 else None,
+            "seen_at": min(bid["seen_at"], ask["seen_at"]),
+        })
+    rows.sort(key=lambda r: (r["daily_potential"] or 0, r["profit"]), reverse=True)
+    return rows

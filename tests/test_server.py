@@ -127,3 +127,15 @@ class SettingsApiTest(ServerTest):
             urllib.request.urlopen(req)
         self.assertEqual(cm.exception.code, 415)
         self.assertTrue(self.get("/api/settings")["premium"])
+
+
+class FlipsApiTest(ServerTest):
+    def test_flips_endpoint(self):
+        mk = lambda i, typ, price: {"Id": i, "ItemTypeId": "T4_BAG", "LocationId": "3008", "QualityLevel": 1,
+                                   "UnitPriceSilver": price * 10000, "Amount": 5, "AuctionType": typ,
+                                   "Expires": "2099-01-01T00:00:00"}
+        self.post("/marketorders.ingest", {"Orders": [mk(1, "request", 1000), mk(2, "offer", 2000)]})
+        data = self.get("/api/flips?min_margin=0")
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["rows"][0]["location"], "martlock")
+        self.assertEqual(self.get("/api/flips?min_margin=500")["count"], 0)
