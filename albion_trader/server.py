@@ -18,6 +18,7 @@ from . import db
 from .deals import TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, fast_sell_table, find_deals, price_table
 from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
+from .gamedata import GameData
 from .items import ItemCatalog, enchant_of, tier_of
 from .locations import DEFAULT_CITIES, MARKETS, market_info, normalize_location
 
@@ -45,6 +46,7 @@ class App:
         self.config = config
         db.init_db(config.db_path)
         self.catalog = ItemCatalog.load(config.items_path)
+        self.gamedata = GameData.load(Path(config.items_path).with_name("gamedata.json"))
         self.write_lock = threading.Lock()
         self.albion = AlbionState(self.ingest, load_opcodes(config.opcodes_path))
         self.sniffer: Sniffer | None = None
@@ -110,6 +112,7 @@ class App:
             "now": int(time.time()), "topics": topics, "locations": per_loc,
             "total_orders": total, "history_points": history,
             "items_catalog": len(self.catalog),
+            "gamedata_recipes": len(self.gamedata.recipes),
             "capture": self.capture_status(),
             "ingest_path": f"/{self.config.token}" if self.config.token else "",
         }

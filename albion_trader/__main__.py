@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from . import db
+from .gamedata import download as download_gamedata
 from .items import download_catalog
 from .capture.sniffer import Sniffer, read_pcap
 from .server import App, AppConfig, serve
@@ -41,7 +42,7 @@ def main(argv=None) -> int:
     p_replay = sub.add_parser("replay", help="загрузить данные из записи трафика (.pcap)")
     p_replay.add_argument("pcap", help="файл .pcap (например, из Wireshark)")
 
-    sub.add_parser("update-items", help="скачать названия предметов (RU/EN) из ao-bin-dumps")
+    sub.add_parser("update-items", help="скачать названия предметов (RU/EN) и игровые таблицы из ao-bin-dumps")
 
     p_clean = sub.add_parser("cleanup", help="удалить истёкшие и устаревшие заказы")
     p_clean.add_argument("--retention-hours", type=float, default=72)
@@ -77,6 +78,10 @@ def main(argv=None) -> int:
         print("Скачиваю справочник предметов…")
         n = download_catalog(items_path)
         print(f"Готово: {n} предметов -> {items_path}")
+        print("Скачиваю рецепты и игровые таблицы…")
+        stats = download_gamedata(data_dir / "gamedata.json")
+        print(f"Готово: рецептов {stats['recipes']}, дневников {stats['journals']}, "
+              f"растений {stats['plants']}, животных {stats['animals']}")
         return 0
     if cmd == "replay":
         logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

@@ -31,7 +31,7 @@ StatisticsAnalysisTool (GPLv3 — используются только номе
 * Готово, когда: все существующие вкладки работают как раньше, адрес вкладки
   запоминается (`#group/tab`), тесты и проверка в браузере проходят.
 
-### [ ] 0.2 Игровые справочники (gamedata)
+### [x] 0.2 Игровые справочники (gamedata)
 * `update-items` дополнительно скачивает `items.json` (сырой) и `loot.json`,
   `craftingmodifiers.json` из ao-bin-dumps и строит компактный
   `data/gamedata.json`:

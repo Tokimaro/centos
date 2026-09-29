@@ -47,6 +47,7 @@ async function loadStatus() {
       <div class="card"><div class="v">${fmt(s.total_orders)}</div><div class="l">заказов в базе</div></div>
       <div class="card"><div class="v">${fmt(s.history_points)}</div><div class="l">точек истории продаж</div></div>
       <div class="card"><div class="v">${s.items_catalog ? fmt(s.items_catalog) : "нет"}</div><div class="l">названий предметов${s.items_catalog ? "" : " — выполните update-items"}</div></div>
+      <div class="card"><div class="v">${s.gamedata_recipes ? fmt(s.gamedata_recipes) : "нет"}</div><div class="l">рецептов в справочнике${s.gamedata_recipes ? "" : " — выполните update-items"}</div></div>
     </div>
     <h2>Рынки</h2>
     <div class="table-wrap"><table><thead><tr><th>Рынок</th><th>Тип</th><th class="num">Заказов</th><th class="num">Предметов</th><th class="num">Обновлено</th></tr></thead>
