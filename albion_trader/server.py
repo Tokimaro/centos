@@ -34,6 +34,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 MAX_BODY = 20 * 1024 * 1024
 KNOWN_TOPIC_SUFFIXES = (".ingest", "marketnotifications", "skills")
 
+# Чужие заказы старше этого не считаются при проверке «вас перебили».
+OUTBID_FRESHNESS = 6 * 3600
+
 # Значения настроек по умолчанию; хранятся в таблице settings.
 DEFAULT_SETTINGS = {
     "premium": True,
@@ -69,7 +72,9 @@ class App:
         self.albion = AlbionState(self.ingest, load_opcodes(config.opcodes_path))
         with self.conn() as conn:
             mytrades_mod.init(conn)
-        self.mytrades = MyTrades(self.conn, self.write_lock)
+        self.mytrades = MyTrades(self.conn, self.write_lock, on_orders=self._after_my_orders)
+        with self.conn() as conn:
+            self.alerts.ensure_rule(conn, "outbid", "Мой заказ перебили")
         self.mytrades.attach(self.albion)
         self.sniffer: Sniffer | None = None
 
@@ -112,9 +117,14 @@ class App:
                 touched = {(o.get("ItemTypeId"), normalize_location(o.get("LocationId"))) for o in orders}
                 try:
                     self.alerts.check_market(conn, items, self.current_tax(conn), self._rule_filter, touched)
+                    self.check_outbid(conn, items)
                 except Exception:  # pragma: no cover - ошибка правила не мешает сбору
                     log.exception("Ошибка проверки оповещений")
             return saved
+
+    def _after_my_orders(self) -> None:
+        with self.write_lock, self.conn() as conn:
+            self.check_outbid(conn)
 
     def current_tax(self, conn=None) -> float:
         settings = {**DEFAULT_SETTINGS, **(db.get_settings(conn) if conn else self.settings())}
@@ -132,9 +142,36 @@ class App:
             return res
 
     # --- мои сделки -----------------------------------------------------
+    def _my_order_status(self, conn, rows: list[dict]) -> dict:
+        now = int(time.time())
+        items = {r["item_id"] for r in rows}
+        if not items:
+            return {}
+        market = db.load_orders(conn, now - OUTBID_FRESHNESS, None, now, items=items)
+        return mytrades_mod.outbid_status(rows, market)
+
+    def check_outbid(self, conn, items: set | None = None) -> list:
+        rows = [r for r in mytrades_mod.open_orders(conn) if r["location"] and (items is None or r["item_id"] in items)]
+        fired = []
+        for r in rows:
+            st = self._my_order_status(conn, [r]).get(r["id"])
+            if not st or not st["outbid"]:
+                continue
+            what = "предложение" if r["auction_type"] == "offer" else "заказ на покупку"
+            fired += self.alerts.trigger_kind(
+                conn, "outbid", f"{r['id']}:{st['best_price']}",
+                f"Перебили: {self.catalog.name(r['item_id'])}",
+                f"Ваше {what} за {r['price']:,} в {market_info(r['location'])['name']}: лучший уже "
+                f"{st['best_price']:,}, ставьте {st['suggested_price']:,}".replace(",", " "),
+                {"item_id": r["item_id"], "location": r["location"], "order_id": r["id"]})
+        return fired
+
     def api_my_orders(self, q) -> dict:
         with self.conn() as conn:
             rows = mytrades_mod.open_orders(conn)
+            status = self._my_order_status(conn, rows)
+        for r in rows:
+            r.update(status.get(r["id"], {}))
         return {"now": int(time.time()), "rows": self._named(rows, q, 1000),
                 "character": self.albion.character_name}
 

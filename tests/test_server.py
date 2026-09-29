@@ -146,7 +146,9 @@ class AlertsApiTest(SettingsApiTest):
         res = self.post_json("/api/alert-rules", {"action": "save", "rule": {
             "kind": "price_below", "name": "Дешёвая сумка", "params": {"item": "T5_BAG", "price": 1500}}})
         rid = res["id"]
-        self.assertEqual(res["rules"][0]["name"], "Дешёвая сумка")
+        mine = lambda rules: [r for r in rules if r["id"] == rid]
+        self.assertEqual(mine(res["rules"])[0]["name"], "Дешёвая сумка")
+        self.assertEqual([r["kind"] for r in res["rules"] if r["id"] != rid], ["outbid"])  # правило по умолчанию
         self.assertIn("price_below", res["kinds"])
         self.post("/marketorders.ingest", self.orders())   # предложение T5_BAG за 1000 в Тетфорде
         data = self.get("/api/alerts")
@@ -155,9 +157,9 @@ class AlertsApiTest(SettingsApiTest):
         self.post_json("/api/alerts/seen", {})
         self.assertEqual(self.get("/api/alerts")["unseen"], 0)
         self.post_json("/api/alert-rules", {"action": "toggle", "id": rid, "enabled": False})
-        self.assertFalse(self.get("/api/alert-rules")["rules"][0]["enabled"])
+        self.assertFalse(mine(self.get("/api/alert-rules")["rules"])[0]["enabled"])
         self.post_json("/api/alert-rules", {"action": "delete", "id": rid})
-        self.assertEqual(self.get("/api/alert-rules")["rules"], [])
+        self.assertEqual(mine(self.get("/api/alert-rules")["rules"]), [])
 
     def test_bad_rule_is_400(self):
         with self.assertRaises(urllib.error.HTTPError) as cm:

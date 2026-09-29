@@ -311,3 +311,34 @@ def summary(rows: list[dict], tax: float) -> dict:
                       "stock": it["bought"] - it["sold"] if it["bought"] >= it["sold"] else None})
     days = [{"day": d, **{k: round(v, 2) for k, v in vals.items()}} for d, vals in sorted(per_day.items(), reverse=True)]
     return {"items": items, "days": days}
+
+
+def outbid_status(my_orders: list[dict], market: list[dict]) -> dict[int, dict]:
+    """Для каждого моего активного заказа: лучший чужой заказ того же стакана и рекомендуемая цена.
+
+    Предложение перебито, если кто-то продаёт дешевле; запрос — если кто-то покупает дороже.
+    При равной цене первым исполняется более ранний заказ — это отмечается как «наравне».
+    """
+    mine_ids = {o["id"] for o in my_orders}
+    best: dict[tuple, dict] = {}
+    for o in market:
+        if o.get("id") in mine_ids:
+            continue
+        key = (o["item_id"], o["location"], o["quality"], o["auction_type"])
+        cur = best.get(key)
+        if cur is None or (o["price"] < cur["price"] if o["auction_type"] == "offer" else o["price"] > cur["price"]):
+            best[key] = o
+    out = {}
+    for m in my_orders:
+        other = best.get((m["item_id"], m["location"], m["quality"], m["auction_type"]))
+        if not other:
+            out[m["id"]] = {"outbid": False, "tie": False, "best_price": None, "suggested_price": None}
+            continue
+        if m["auction_type"] == "offer":
+            outbid, suggested = other["price"] < m["price"], other["price"] - 1
+        else:
+            outbid, suggested = other["price"] > m["price"], other["price"] + 1
+        out[m["id"]] = {"outbid": outbid, "tie": other["price"] == m["price"], "best_price": other["price"],
+                        "suggested_price": suggested if outbid or other["price"] == m["price"] else None,
+                        "best_seen_at": other.get("seen_at")}
+    return out

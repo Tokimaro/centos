@@ -392,7 +392,7 @@ def cleanup(conn: sqlite3.Connection, retention_hours: float, now: int | None = 
 def load_orders(conn: sqlite3.Connection, min_seen_at: int, locations=None, now: int | None = None,
                 items=None):
     now = int(now if now is not None else time.time())
-    sql = ("SELECT item_id, location, quality, price, amount, auction_type, seen_at "
+    sql = ("SELECT id, item_id, location, quality, price, amount, auction_type, seen_at "
            "FROM orders WHERE seen_at >= ? AND (expires IS NULL OR expires >= ?)")
     args: list = [min_seen_at, now]
     if locations:

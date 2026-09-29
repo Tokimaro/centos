@@ -130,3 +130,32 @@ class CaptureToMyOrdersTest(unittest.TestCase):
             data = app.api_my_orders({})
             self.assertEqual([r["id"] for r in data["rows"]], [9])
             self.assertEqual(app.api_status({})["total_orders"], 0)   # в рыночный стакан не попал
+
+
+class OutbidTest(unittest.TestCase):
+    def test_status(self):
+        mine = [{"id": 1, "item_id": "X", "location": "m", "quality": 1, "auction_type": "offer", "price": 100},
+                {"id": 2, "item_id": "X", "location": "m", "quality": 1, "auction_type": "request", "price": 50},
+                {"id": 3, "item_id": "Y", "location": "m", "quality": 1, "auction_type": "offer", "price": 10}]
+        market = [{"id": 1, "item_id": "X", "location": "m", "quality": 1, "auction_type": "offer", "price": 100},
+                  {"id": 10, "item_id": "X", "location": "m", "quality": 1, "auction_type": "offer", "price": 90},
+                  {"id": 11, "item_id": "X", "location": "m", "quality": 1, "auction_type": "request", "price": 50},
+                  {"id": 12, "item_id": "X", "location": "m", "quality": 2, "auction_type": "request", "price": 99}]
+        st = mytrades.outbid_status(mine, market)
+        self.assertEqual((st[1]["outbid"], st[1]["best_price"], st[1]["suggested_price"]), (True, 90, 89))
+        self.assertEqual((st[2]["outbid"], st[2]["tie"], st[2]["suggested_price"]), (False, True, 51))
+        self.assertEqual((st[3]["outbid"], st[3]["best_price"]), (False, None))
+
+
+class OutbidAlertTest(unittest.TestCase):
+    def test_alert_on_ingest(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = App(AppConfig(db_path=Path(d) / "m.db", items_path=Path(d) / "i.json", capture=False))
+            app.mytrades.handle_my_orders("offers", [my_order(1, 1000)])
+            self.assertEqual(app.api_alerts({})["alerts"], [])
+            app.ingest("marketorders.ingest", {"Orders": [dict(my_order(2, 950), QualityLevel=2)]})
+            alerts = app.api_alerts({})["alerts"]
+            self.assertEqual(len(alerts), 1)
+            self.assertIn("949", alerts[0]["text"])
+            rows = app.api_my_orders({})["rows"]
+            self.assertEqual((rows[0]["outbid"], rows[0]["suggested_price"]), (True, 949))
