@@ -146,6 +146,30 @@ App.tab({
         <label class="inline"><input type="checkbox" id="alert-sound"> Звук</label>
         <button type="button" class="secondary" id="alerts-seen">Отметить все прочитанными</button>
       </div>
+      <details id="channels"><summary><b>Отправлять оповещения в Telegram или Discord</b></summary>
+        <p class="muted">Сообщения уходят только в ваш собственный бот/канал и только когда вы это включили.
+          Telegram: создайте бота у @BotFather (получите токен), напишите ему любое сообщение и узнайте свой chat id
+          (например, у @userinfobot). Discord: настройки канала → Интеграции → Вебхуки → «Копировать URL».</p>
+        <form class="filters" id="channels-form" autocomplete="off">
+          <fieldset class="opts"><legend>Telegram</legend>
+            <label class="inline"><input type="checkbox" name="telegram_enabled"> Включить</label>
+            <label>Токен бота <input type="password" name="telegram_token" placeholder="123456:ABC…"></label>
+            <label>Chat id <input type="text" name="telegram_chat_id" placeholder="123456789"></label>
+          </fieldset>
+          <fieldset class="opts"><legend>Discord</legend>
+            <label class="inline"><input type="checkbox" name="discord_enabled"> Включить</label>
+            <label>URL вебхука <input type="password" name="discord_webhook" placeholder="https://discord.com/api/webhooks/…"></label>
+          </fieldset>
+          <fieldset class="opts"><legend>Что отправлять (ничего не выбрано — всё)</legend>
+            <div class="checks" id="channel-kinds"></div>
+            <div class="buttons">
+              <button type="submit" class="primary">Сохранить</button>
+              <button type="button" class="secondary" id="channels-test">Проверить</button>
+            </div>
+            <div class="summary" id="channels-result"></div>
+          </fieldset>
+        </form>
+      </details>
       <h2>Новое правило</h2>
       <label class="rule-kind">Тип <select id="rule-kind"></select></label>
       <label class="rule-kind">Название <input type="text" id="rule-name" placeholder="необязательно"></label>
@@ -165,6 +189,34 @@ App.tab({
 
     const data = await api("/api/alert-rules");
     alertKinds = data.kinds;
+    const settings = await api("/api/settings");
+    const cf = $("#channels-form");
+    for (const k of ["telegram_token", "telegram_chat_id", "discord_webhook"]) cf.querySelector(`[name=${k}]`).value = settings[k] || "";
+    for (const k of ["telegram_enabled", "discord_enabled"]) cf.querySelector(`[name=${k}]`).checked = !!settings[k];
+    checkboxList($("#channel-kinds"), "notify_kinds",
+      Object.entries(alertKinds).map(([value, label]) => ({ value, label })), settings.notify_kinds || []);
+    const readChannels = () => ({
+      telegram_enabled: cf.querySelector("[name=telegram_enabled]").checked,
+      telegram_token: cf.querySelector("[name=telegram_token]").value.trim(),
+      telegram_chat_id: cf.querySelector("[name=telegram_chat_id]").value.trim(),
+      discord_enabled: cf.querySelector("[name=discord_enabled]").checked,
+      discord_webhook: cf.querySelector("[name=discord_webhook]").value.trim(),
+      notify_kinds: $$("input[name=notify_kinds]:checked", cf).map((i) => i.value),
+    });
+    cf.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await apiPost("/api/settings", readChannels());
+      $("#channels-result").textContent = "Сохранено.";
+    });
+    $("#channels-test").addEventListener("click", async () => {
+      const out = $("#channels-result");
+      try {
+        await apiPost("/api/settings", readChannels());
+        const r = await apiPost("/api/notify-test", {});
+        out.innerHTML = r.results.map((x) => `${x.channel}: ${x.ok ? '<span class="good">отправлено</span>'
+          : `<span class="bad">ошибка — ${esc(x.error || `HTTP ${x.status}`)}</span>`}`).join("<br>");
+      } catch (e) { out.innerHTML = `<span class="bad">${esc(e.message)}</span>`; }
+    });
     $("#rule-kind").innerHTML = Object.entries(alertKinds).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
     const buildRuleForm = () => {
       const kind = $("#rule-kind").value;

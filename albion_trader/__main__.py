@@ -35,6 +35,8 @@ def main(argv=None) -> int:
                          help="сколько хранить не обновлявшиеся заказы (по умолчанию 72 ч)")
     p_serve.add_argument("--no-capture", action="store_true",
                          help="не запускать встроенный сборщик (данные только по HTTP от внешнего клиента)")
+    p_serve.add_argument("--password", default=os.environ.get("ALBION_TRADER_PASSWORD", ""),
+                         help="пароль для доступа к интерфейсу из сети (обязателен с --host 0.0.0.0)")
     p_serve.add_argument("--record", metavar="FILE.pcap",
                          help="записывать трафик игры в файл для диагностики "
                               "(содержит и ваш чат/ник — не выкладывайте публично)")
@@ -74,7 +76,8 @@ def main(argv=None) -> int:
                            retention_hours=getattr(args, "retention_hours", 72),
                            capture=not getattr(args, "no_capture", False),
                            opcodes_path=opcodes_path,
-                           record_path=getattr(args, "record", None))
+                           record_path=getattr(args, "record", None),
+                           password=getattr(args, "password", ""))
         serve(config, getattr(args, "host", "127.0.0.1"), getattr(args, "port", 8484))
         return 0
     if cmd == "update-items":

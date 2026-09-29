@@ -37,14 +37,18 @@ async function api(path, params = {}) {
     url.searchParams.set(k, Array.isArray(v) ? v.join(",") : (v === true ? 1 : v === false ? 0 : v));
   }
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) throw new Error(await apiError(r));
   return r.json();
+}
+async function apiError(r) {
+  const text = await r.text();
+  try { return JSON.parse(text).error || text; } catch { return `${r.status} ${text}`; }
 }
 async function apiPost(path, body = {}) {
   const r = await fetch(new URL(path, location.origin), {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) throw new Error(await apiError(r));
   return r.json();
 }
 

@@ -1,4 +1,5 @@
 import json
+import time
 import tempfile
 import threading
 import unittest
@@ -165,3 +166,82 @@ class AlertsApiTest(SettingsApiTest):
         with self.assertRaises(urllib.error.HTTPError) as cm:
             self.post_json("/api/alert-rules", {"action": "save", "rule": {"kind": "bogus"}})
         self.assertEqual(cm.exception.code, 400)
+
+
+class PasswordTest(ServerTest):
+    def setUp(self):
+        super().setUp()
+        self.app.config.password = "секрет"
+        self.app.config.auth_local = True
+
+    def open(self, path, password=None):
+        import base64
+        req = urllib.request.Request(self.base + path)
+        if password is not None:
+            req.add_header("Authorization", "Basic " + base64.b64encode(f"u:{password}".encode()).decode())
+        return urllib.request.urlopen(req)
+
+    def test_basic_auth(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.open("/api/status")
+        self.assertEqual(cm.exception.code, 401)
+        with self.assertRaises(urllib.error.HTTPError):
+            self.open("/api/status", "wrong")
+        with self.open("/api/status", "секрет") as r:
+            self.assertEqual(r.status, 200)
+        # Приём данных от внешнего клиента пароль не требует (для него есть токен).
+        status, _ = self.post("/marketorders.ingest", self.orders())
+        self.assertEqual(status, 200)
+
+    def test_local_requests_exempt_by_default(self):
+        self.app.config.auth_local = False
+        with self.open("/api/status") as r:
+            self.assertEqual(r.status, 200)
+
+
+class NotifierTest(unittest.TestCase):
+    def test_channels_format_and_send(self):
+        from albion_trader.notify import Notifier
+        sent = []
+        settings = {"telegram_enabled": True, "telegram_token": "T", "telegram_chat_id": "42",
+                    "discord_enabled": True, "discord_webhook": "https://discord.com/api/webhooks/x",
+                    "notify_kinds": []}
+        n = Notifier(lambda: settings, opener=lambda url, payload: sent.append((url, payload)) or 200)
+        self.assertEqual([c[0] for c in n.channels()], ["telegram", "discord"])
+        res = n.send_now("привет")
+        self.assertTrue(all(r["ok"] for r in res))
+        self.assertEqual(sent[0], ("https://api.telegram.org/botT/sendMessage", {"chat_id": "42", "text": "привет"}))
+        self.assertEqual(sent[1][1], {"content": "привет"})
+        # Фильтр типов и выключенные каналы.
+        settings["notify_kinds"] = ["deal"]
+        n.enqueue({"kind": "outbid", "title": "t", "text": "x"})
+        self.assertTrue(n.queue.empty())
+        settings["notify_kinds"] = []
+        settings["telegram_enabled"] = settings["discord_enabled"] = False
+        n.enqueue({"kind": "outbid", "title": "t", "text": "x"})
+        self.assertTrue(n.queue.empty())
+        self.assertEqual(n.send_now("x"), [])
+
+    def test_background_loop_rate_limited(self):
+        from albion_trader.notify import MIN_INTERVAL, Notifier
+        sent, sleeps = [], []
+        settings = {"discord_enabled": True, "discord_webhook": "https://d/x"}
+        clock = [100.0]
+        n = Notifier(lambda: settings, opener=lambda u, p: sent.append(p["content"]) or 204,
+                     clock=lambda: clock[0], sleep=lambda s: sleeps.append(s))
+        n.start()
+        n.enqueue({"kind": "deal", "title": "A", "text": "1"})
+        n.enqueue({"kind": "deal", "title": "B", "text": "2"})
+        deadline = time.time() + 5
+        while len(sent) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(sent, ["A\n1", "B\n2"])
+        self.assertEqual(sleeps, [MIN_INTERVAL])   # второе сообщение ждало интервал
+        self.assertEqual(n.stats["sent"], 2)
+
+    def test_network_error_reported(self):
+        from albion_trader.notify import Notifier
+        def boom(url, payload):
+            raise OSError("нет сети")
+        n = Notifier(lambda: {"discord_enabled": True, "discord_webhook": "https://d/x"}, opener=boom)
+        self.assertEqual(n.send_now("x")[0]["error"], "нет сети")

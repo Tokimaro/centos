@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hmac
 import json
 import logging
 import mimetypes
@@ -24,6 +26,7 @@ from . import world as world_mod
 from .activity import Activity
 from .world import World
 from .alerts import AlertEngine
+from .notify import Notifier
 from .mytrades import MyTrades
 from .capture import opcodes as opcodes_mod
 from .capture.albion import AlbionState, load_opcodes
@@ -47,6 +50,12 @@ DEFAULT_SETTINGS = {
     "premium": True,
     "station_fee": 400,          # серебро за 100 питания на станции
     "use_focus": False,
+    "telegram_enabled": False,
+    "telegram_token": "",
+    "telegram_chat_id": "",
+    "discord_enabled": False,
+    "discord_webhook": "",
+    "notify_kinds": [],          # пусто — все типы оповещений
 }
 
 
@@ -60,6 +69,8 @@ class AppConfig:
     capture: bool = True
     opcodes_path: Path | None = None
     record_path: str | None = None
+    password: str = ""           # пароль для доступа к интерфейсу из сети (HTTP Basic)
+    auth_local: bool = False     # требовать пароль и с этого же компьютера
 
 
 class App:
@@ -74,6 +85,8 @@ class App:
         self.alerts = AlertEngine(self.conn, name_of=self.catalog.name,
                                   loc_name=lambda l: market_info(l)["name"])
         self.alerts.index = self.catalog.index
+        self.notifier = Notifier(self.settings)
+        self.alerts.listeners.append(self.notifier.enqueue)
         self.albion = AlbionState(self.ingest, load_opcodes(config.opcodes_path))
         with self.conn() as conn:
             mytrades_mod.init(conn)
@@ -327,6 +340,12 @@ class App:
         with self.write_lock, self.conn() as conn:
             self.alerts.mark_seen(conn, body.get("ids") if isinstance(body, dict) else None)
         return {"ok": True}
+
+    def api_notify_test(self, _q, _body) -> dict:
+        results = self.notifier.send_now("Albion Trader: проверка оповещений ✅")
+        if not results:
+            raise ApiError("нет включённых каналов: укажите токен и chat id Telegram или вебхук Discord и сохраните")
+        return {"results": results}
 
     def api_alert_rules(self, _q) -> dict:
         with self.conn() as conn:
@@ -719,6 +738,7 @@ def make_handler(app: App):
     post_api = {
         "/api/settings": app.api_settings_post,
         "/api/alerts/seen": app.api_alerts_seen,
+        "/api/notify-test": app.api_notify_test,
         "/api/session/new": app.api_session_new,
         "/api/update-opcodes": app.api_update_opcodes,
         "/api/alert-rules": app.api_alert_rules_post,
@@ -741,7 +761,32 @@ def make_handler(app: App):
         def _json(self, status: int, obj):
             self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
+        def _authorized(self) -> bool:
+            pwd = app.config.password
+            if not pwd:
+                return True
+            if not app.config.auth_local and self.client_address[0] in ("127.0.0.1", "::1"):
+                return True
+            header = self.headers.get("Authorization") or ""
+            if header.startswith("Basic "):
+                try:
+                    _, _, given = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+                except (ValueError, UnicodeDecodeError):
+                    given = ""
+                if hmac.compare_digest(given.encode(), pwd.encode()):
+                    return True
+            body = "Нужен пароль".encode("utf-8")
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="Albion Trader", charset="UTF-8"')
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+
         def do_GET(self):  # noqa: N802
+            if not self._authorized():
+                return
             url = urlparse(self.path)
             if url.path in api:
                 q = {k: v[-1] for k, v in parse_qs(url.query).items()}
@@ -793,7 +838,8 @@ def make_handler(app: App):
         def do_POST(self):  # noqa: N802
             path = urlparse(self.path).path
             if path in post_api:
-                self._api_post(path)
+                if self._authorized():
+                    self._api_post(path)
                 return
             # albiondata-client шлёт POST <базовый URL>/<топик>, например
             # http://127.0.0.1:8484/marketorders.ingest или, с токеном,
@@ -838,10 +884,15 @@ def _cleanup_loop(app: App, stop: threading.Event):
 
 
 def serve(config: AppConfig, host: str, port: int) -> None:
+    if host not in ("127.0.0.1", "localhost", "::1") and not config.password:
+        log.error("Доступ из сети (--host %s) разрешён только с паролем: добавьте --password или "
+                  "переменную ALBION_TRADER_PASSWORD.", host)
+        raise SystemExit(2)
     app = App(config)
     app.cleanup()
     if config.capture:
         app.start_capture()
+    app.notifier.start()
     httpd = ThreadingHTTPServer((host, port), make_handler(app))
     stop = threading.Event()
     threading.Thread(target=_cleanup_loop, args=(app, stop), daemon=True).start()
