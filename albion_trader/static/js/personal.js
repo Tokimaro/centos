@@ -196,3 +196,49 @@ App.tab({
   },
   show() { if (this.reload) this.reload(); },
 });
+
+// ---------- персонаж ----------
+App.tab({
+  id: "character", group: "my", title: "Персонаж",
+  init(el) {
+    el.innerHTML = `
+      <p class="muted intro">То, что игра надёжно сообщает о персонаже: общая слава и её прирост по дням, баланс серебра,
+        очки переспециализации, убийства и смерти. Разбивку славы по веткам специализаций протокол надёжно не отдаёт
+        (у официального клиента этот обработчик отключён), поэтому данные характеристик, если придут, показаны как есть.</p>
+      <form class="chart-controls" id="char-form"><label>Период <select name="days">
+        <option value="7">неделя</option><option value="30" selected>месяц</option><option value="90">3 месяца</option>
+        <option value="365">год</option></select></label></form>
+      <div class="cards" id="char-cards"></div>
+      <h2>Общая слава</h2><div id="char-fame"></div>
+      <h2>Баланс серебра</h2><div id="char-balance"></div>
+      <h2>Слава по дням</h2><div id="char-days"></div>
+      <div id="char-stats"></div>`;
+    this.days = makeTable($("#char-days"), [
+      { key: "day", title: "День" },
+      { key: "fame", title: "Получено славы", num: true, html: (r) => fmt(r.fame) },
+    ], { sort: "day", empty: "Славы за период не получено." });
+    $("#char-form").addEventListener("change", () => this.reload());
+    this.reload = async () => {
+      const d = await api("/api/character", { days: $("#char-form").days.value });
+      const total = d.fame_total.length ? d.fame_total[d.fame_total.length - 1][1] : null;
+      const card = (v, l) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+      $("#char-cards").innerHTML = [
+        card(esc(d.character || "—"), "персонаж"),
+        card(fmt(total), "всего славы"),
+        card(fmt(d.fame_days.reduce((a, r) => a + r.fame, 0)), "славы за период"),
+        card(d.balance.length ? fmt(d.balance[d.balance.length - 1][1]) : "—", "баланс серебра"),
+        card(d.respec ? fmt(d.respec.points) : "—", "очков переспециализации"),
+        card(`${d.kills} / ${d.deaths}`, "убийств / смертей за период"),
+      ].join("");
+      lineChart($("#char-fame"), [{ name: "Общая слава", slot: 1, points: d.fame_total }],
+        { empty: "Нет данных: слава появится после первого получения славы в игре." });
+      lineChart($("#char-balance"), [{ name: "Серебро на руках", slot: 2, points: d.balance }],
+        { empty: "Нет данных: баланс приходит при изменении серебра в игре." });
+      this.days.set(d.fame_days);
+      $("#char-stats").innerHTML = d.stats
+        ? `<h2>Данные характеристик (${dateTime(d.stats.ts)})</h2><pre>${esc(JSON.stringify(d.stats.data, null, 1))}</pre>` : "";
+    };
+    this.reload();
+  },
+  show() { if (this.reload) this.reload(); },
+});
