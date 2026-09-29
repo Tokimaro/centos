@@ -20,7 +20,9 @@ from .deals import (TAX_NO_PREMIUM, TAX_PREMIUM, DealParams, bm_demand, fast_sel
 from . import alerts as alerts_mod
 from . import activity as activity_mod
 from . import mytrades as mytrades_mod
+from . import world as world_mod
 from .activity import Activity
+from .world import World
 from .alerts import AlertEngine
 from .mytrades import MyTrades
 from .capture.albion import AlbionState, load_opcodes
@@ -84,6 +86,13 @@ class App:
         self.activity = Activity(self.conn, self.write_lock, index_to_item=self.catalog.index)
         self.activity.attach(self.albion)
         self.activity.new_session()
+        with self.conn() as conn:
+            world_mod.init(conn)
+            self.alerts.ensure_rule(conn, "world_event", "События мира")
+        self.world = World(self.conn, self.write_lock,
+                           alert=lambda conn, key, title, text, payload:
+                           self.alerts.trigger_kind(conn, "world_event", key, title, text, payload))
+        self.world.attach(self.albion)
         self.sniffer: Sniffer | None = None
 
     def start_capture(self, open_sockets=None) -> bool:
@@ -283,6 +292,11 @@ class App:
         return {"now": now, "rows": rows[:int(_float(q2["limit"], 2000))],
                 "players": sorted(players.values(), key=lambda p: p["value"] + p["silver"], reverse=True),
                 "character": self.albion.character_name}
+
+    def api_world(self, _q) -> dict:
+        now = int(time.time())
+        with self.conn() as conn:
+            return {"now": now, **world_mod.report(conn, now)}
 
     def api_character(self, q) -> dict:
         now = int(time.time())
@@ -684,6 +698,7 @@ def make_handler(app: App):
         "/api/session": app.api_session,
         "/api/loot": app.api_loot,
         "/api/character": app.api_character,
+        "/api/world": app.api_world,
         "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,

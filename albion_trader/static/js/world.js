@@ -1,5 +1,53 @@
 "use strict";
-// Мир: цена золота и премиум, события мира.
+// Мир: события мира, цена золота и премиум.
+
+function countdown(ts, now) {
+  const s = Math.round(ts - now);
+  if (s <= 0) return "завершено";
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (d) return `${d} д ${h} ч`;
+  return h ? `${h} ч ${m} мин` : `${m} мин ${String(sec).padStart(2, "0")} с`;
+}
+
+App.tab({
+  id: "events", group: "world", title: "События",
+  init(el) {
+    el.innerHTML = `
+      <p class="muted intro">Нападения бандитов и фестивали. Данные приходят, когда вы открываете карту мира в игре
+        (иногда и сами). Правило оповещений «События мира» включено по умолчанию — его можно выключить во вкладке
+        «Оповещения».</p>
+      <div class="cards" id="world-cards"></div>
+      <h2>Фестивали</h2><div id="world-fests"></div>`;
+    this.fests = makeTable($("#world-fests"), [
+      { key: "name", title: "Событие" },
+      { key: "category", title: "Категория", html: (r) => esc(r.data.category || "—"), sort: (r) => r.data.category || "" },
+      { key: "start_ts", title: "Начало", html: (r) => dateTime(r.start_ts) },
+      { key: "end_ts", title: "Конец", html: (r) => dateTime(r.end_ts) },
+      { key: "status", title: "Статус", sort: (r) => r.start_ts,
+        html: (r) => (r.end_ts <= this.now ? '<span class="muted">завершено</span>'
+          : r.start_ts > this.now ? `<span class="pill warn">через ${countdown(r.start_ts, this.now)}</span>`
+            : `<span class="pill good">идёт, ещё ${countdown(r.end_ts, this.now)}</span>`) },
+    ], { sort: "start_ts", asc: true, empty: "Фестивалей не видно. Откройте карту мира в игре." });
+    const render = () => {
+      const b = this.data && this.data.bandit;
+      const now = Date.now() / 1000;
+      $("#world-cards").innerHTML = b
+        ? `<div class="card"><div class="v">${b.end_ts > now ? countdown(b.end_ts, now) : "завершено"}</div>
+             <div class="l">нападение бандитов: фаза ${b.phase ?? "?"} (${esc(b.phase_name)}) до конца фазы${b.data.provinces && b.data.provinces.length ? ` · провинции: ${esc(b.data.provinces.join(", "))}` : ""}</div></div>
+           <div class="card"><div class="v">${dateTime(b.end_ts)}</div><div class="l">окончание фазы · обновлено ${age(b.updated, now)} назад</div></div>`
+        : `<div class="card"><div class="v">—</div><div class="l">нападение бандитов: данных нет (откройте карту мира)</div></div>`;
+    };
+    this.reload = async () => {
+      this.data = await api("/api/world");
+      this.now = this.data.now;
+      this.fests.set(this.data.festivals);
+      render();
+    };
+    setInterval(() => { if (App.current === App.byId("events")) render(); }, 1000);
+    this.reload();
+  },
+  show() { if (this.reload) this.reload(); },
+});
 
 App.tab({
   id: "gold", group: "world", title: "Золото и премиум",
