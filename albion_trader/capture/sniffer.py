@@ -140,8 +140,9 @@ class Sniffer:
         self.open_sockets = open_sockets
         self.record_path = record_path
         self._record = None
-        # События игры (движение, бой и т. п.) не нужны — не разбираем их вовсе.
-        self.parser = PhotonParser(state.on_request, state.on_response, None, state.on_encrypted)
+        # Движение (самое частое событие) не разбираем вовсе.
+        self.parser = PhotonParser(state.on_request, state.on_response, state.on_event,
+                                   state.on_encrypted, event_filter=state.wants_event)
         self.parser_lock = threading.Lock()
         self.queue: queue.Queue = queue.Queue(maxsize=QUEUE_LIMIT)
         self.stop_event = threading.Event()

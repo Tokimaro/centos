@@ -28,8 +28,32 @@ DEFAULT_OPCODES = {
     "auction_get_offers": 81,
     "auction_get_requests": 82,
     "auction_buy_offer": 83,
+    "auction_sell_request": 88,
+    "auction_get_finished": 89,
+    "auction_get_my_offers": 92,
+    "auction_get_my_requests": 93,
+    "auction_get_my_auctions": 94,
     "auction_get_item_average_stats": 95,
+    "get_mail_infos": 174,
+    "read_mail": 176,
+    "gold_market_get_average_info": 250,
 }
+
+# Номера событий из client/events.go (сверены со StatisticsAnalysisTool).
+DEFAULT_EVENTS = {
+    "take_silver": 62,
+    "update_money": 81,
+    "update_fame": 82,
+    "update_respec_points": 84,
+    "new_loot": 98,
+    "character_stats": 143,
+    "killed_player": 164,
+    "died": 165,
+    "other_grabbed_loot": 279,
+    "redzone_world_map_event": 480,
+    "festivities_update": 519,
+}
+EVENT_MOVE = 3  # самое частое событие (движение) — не разбираем
 
 HISTORY_CACHE_SIZE = 1024
 ENCRYPTION_WINDOW = 3.0
@@ -40,14 +64,18 @@ _RE_NUMERIC = re.compile(r"^[0-9]{3,6}$")
 
 
 def load_opcodes(path: str | Path | None) -> dict:
+    """Коды операций и событий (``{"events": {...}}``) с переопределениями из файла."""
     codes = dict(DEFAULT_OPCODES)
+    events = dict(DEFAULT_EVENTS)
     if path and Path(path).exists():
         try:
             override = json.loads(Path(path).read_text(encoding="utf-8"))
             codes.update({k: int(v) for k, v in override.items() if k in codes})
+            events.update({k: int(v) for k, v in (override.get("events") or {}).items() if k in events})
             log.info("Коды операций переопределены из %s", path)
-        except (ValueError, TypeError, OSError) as e:
+        except (ValueError, TypeError, OSError, AttributeError) as e:
             log.warning("Не удалось прочитать %s: %s", path, e)
+    codes["events"] = events
     return codes
 
 
@@ -75,6 +103,16 @@ def is_market_location(loc: str) -> bool:
                           or loc.endswith(("-HellDen", "-Auction2")))
 
 
+def _loads(s):
+    if isinstance(s, dict):
+        return s
+    try:
+        v = json.loads(s)
+    except (TypeError, ValueError):
+        return None
+    return v if isinstance(v, dict) else None
+
+
 def _as_int(v) -> int | None:
     if isinstance(v, bool):
         return int(v)
@@ -94,8 +132,14 @@ class AlbionState:
     def __init__(self, sink: Callable[[str, dict], object], opcodes: dict | None = None,
                  clock: Callable[[], float] = time.time):
         self.sink = sink
-        self.op = dict(opcodes or DEFAULT_OPCODES)
+        opcodes = dict(opcodes or DEFAULT_OPCODES)
+        self.ev = dict(opcodes.pop("events", None) or DEFAULT_EVENTS)
+        self.op = {**DEFAULT_OPCODES, **opcodes}
         self._interesting = set(self.op.values())
+        self._event_names = {v: k for k, v in self.ev.items()}
+        self._op_names = {v: k for k, v in self.op.items()}
+        self._listeners: dict[str, list[Callable]] = {}
+        self.character_name = ""
         self.clock = clock
         self.lock = threading.Lock()
         self.location = ""
@@ -109,6 +153,7 @@ class AlbionState:
             "location": "", "orders": 0, "order_batches": 0, "history_batches": 0,
             "last_data_at": None, "encrypted_at": None, "no_location_drops": 0,
             "market_requests": 0, "market_responses_lost": 0,
+            "character": "", "events": 0,
         }
 
     # --- коды -----------------------------------------------------------
@@ -127,9 +172,30 @@ class AlbionState:
         v = _as_int(params.get(253))
         return self._normalize(fallback if v is None else v)
 
+    # --- подписчики ---------------------------------------------------
+    def on(self, name: str, fn: Callable) -> None:
+        """Подписка: ``request:<операция>``, ``response:<операция>``, ``event:<событие>``,
+        ``my_orders`` (kind, orders), ``location`` (raw)."""
+        self._listeners.setdefault(name, []).append(fn)
+
+    def _fire(self, name: str, *args) -> None:
+        for fn in self._listeners.get(name, ()):
+            try:
+                fn(*args)
+            except Exception:  # pragma: no cover - ошибка подписчика не роняет захват
+                log.exception("Ошибка обработчика %s", name)
+
+    @staticmethod
+    def wants_event(code: int) -> bool:
+        return code != EVENT_MOVE
+
     # --- колбэки парсера -----------------------------------------------
     def on_request(self, op_code: int, params: dict) -> None:
         code = self._code(params, op_code)
+        name = self._op_names.get(code)
+        if name:
+            with self.lock:
+                self._fire("request:" + name, params)
         with self.lock:
             if code == self.op["get_game_server_by_cluster"]:
                 self._set_location(params.get(0), "GetGameServerByCluster")
@@ -149,11 +215,15 @@ class AlbionState:
         with self.lock:
             if code in (self.op["auction_get_offers"], self.op["auction_get_requests"]) and not is_orders:
                 self._market_response_arrived()
-            if is_orders and (code in (self.op["auction_get_offers"], self.op["auction_get_requests"],
-                                       self.op["auction_buy_offer"]) or set(params) == {0}):
+            own_kind = self._own_orders_kind(code, params, orders if is_orders else None)
+            if own_kind:
+                self._my_orders(own_kind, orders)
+            elif is_orders and (code in (self.op["auction_get_offers"], self.op["auction_get_requests"],
+                                         self.op["auction_buy_offer"]) or set(params) == {0}):
                 self._market_orders(orders)
             elif code == self.op["join"]:
                 self._set_location(params.get(8), "Join")
+                self._set_character(params.get(2))
             elif code == self.op["get_game_server_by_cluster"]:
                 self._set_location(params.get(0), "GetGameServerByCluster")
             elif code == self.op["auction_get_item_average_stats"]:
@@ -161,9 +231,49 @@ class AlbionState:
             elif code not in self._interesting and normalize_location_id(params.get(8)):
                 # После обновлений игры код Join может сместиться — узнаём его по форме.
                 self._set_location(params.get(8), "Join?")
+                self._set_character(params.get(2))
+            name = self._op_names.get(code)
+            if name:
+                self._fire("response:" + name, params)
 
-    def on_event(self, _code: int, _params: dict) -> None:
-        pass
+    def on_event(self, code: int, params: dict) -> None:
+        v = _as_int(params.get(252))
+        code = code if v is None else v
+        name = self._event_names.get(code)
+        if not name:
+            return
+        with self.lock:
+            self.stats["events"] += 1
+            self._fire("event:" + name, params)
+
+    # --- мои заказы -----------------------------------------------------
+    def _own_orders_kind(self, code: int, params: dict, orders) -> str | None:
+        own_codes = {
+            self.op["auction_get_my_offers"]: "offers",
+            self.op["auction_get_my_requests"]: "requests",
+            self.op["auction_get_my_auctions"]: "auctions",
+            self.op["auction_get_finished"]: "finished",
+        }
+        if code in own_codes:
+            return own_codes[code] if isinstance(params.get(0), list) else None
+        if orders is None or code in (self.op["auction_get_offers"], self.op["auction_get_requests"]):
+            return None
+        # Коды могли сместиться после патча: список, где все заказы — ваши, это «мои заказы».
+        if self.character_name and orders:
+            parsed = [_loads(o) for o in orders]
+            if all(p and self.character_name in (p.get("SellerName"), p.get("BuyerName")) for p in parsed):
+                return "mine"
+        return None
+
+    def _my_orders(self, kind: str, raw: list) -> None:
+        orders = [o for o in (_loads(x) for x in raw) if o]
+        self._fire("my_orders", kind, orders)
+
+    def _set_character(self, name) -> None:
+        if isinstance(name, str) and name and name != self.character_name:
+            self.character_name = name
+            self.stats["character"] = name
+            log.info("Персонаж: %s", name)
 
     def _market_response_arrived(self) -> None:
         if self.pending_market_requests:
@@ -198,6 +308,7 @@ class AlbionState:
             log.info("Текущая локация: %s (%s)", loc, source)
             self.location = loc
             self.stats["location"] = loc
+            self._fire("location", loc)
 
     def _market_orders(self, raw_orders: list[str]) -> None:
         self._market_response_arrived()

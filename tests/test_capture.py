@@ -1,3 +1,4 @@
+import json
 import struct
 import tempfile
 import time
@@ -327,3 +328,75 @@ class DuplicateTest(unittest.TestCase):
         for k in [0, 0, 0] + list(range(1, n)):
             p.receive_packet(frag(k))
         self.assertEqual(seen, ["y" * 3000])
+
+
+class DispatcherTest(unittest.TestCase):
+    def test_character_name_from_join(self):
+        sink, state, parser = make_state()
+        parser.receive_packet(pb.packet(pb.response(JOIN, {2: "Hero", 8: "3005"})))
+        self.assertEqual(state.character_name, "Hero")
+        self.assertEqual(state.stats["character"], "Hero")
+
+    def test_my_orders_not_stored_as_market(self):
+        sink, state, parser = make_state()
+        got = []
+        state.on("my_orders", lambda kind, orders: got.append((kind, len(orders))))
+        state.location = "3005"
+        mine = order(1, 10)
+        # Ответ «мои предложения» (код 92) — строковый массив на месте debug-сообщения.
+        body = bytes([92]) + struct.pack("<h", 0) + pb.value([json.dumps(mine)]) + pb.params({})
+        parser.receive_packet(pb.packet(pb.command(3, body)))
+        self.assertEqual(sink.items, [])
+        self.assertEqual(got, [("offers", 1)])
+
+    def test_unknown_code_all_mine_classified_by_content(self):
+        sink, state, parser = make_state()
+        got = []
+        state.on("my_orders", lambda kind, orders: got.append(kind))
+        state.location = "3005"
+        state.character_name = "Hero"
+        mine = dict(order(1, 10), SellerName="Hero")
+        body = bytes([200]) + struct.pack("<h", 0) + pb.value([json.dumps(mine)]) + pb.params({})
+        parser.receive_packet(pb.packet(pb.command(3, body)))
+        self.assertEqual((sink.items, got), ([], ["mine"]))
+        # Обычный просмотр рынка, где встречается и ваш заказ, остаётся рынком.
+        other = dict(order(2, 12), SellerName="Someone")
+        parser.receive_packet(pb.packet(pb.orders_response([mine, other])))
+        self.assertEqual(len(sink.items), 1)
+
+    def test_events_dispatched_by_name(self):
+        sink, state, parser = make_state()
+        got = []
+        state.on("event:update_fame", lambda p: got.append(p[2]))
+        ev = pb.command(4, bytes([1]) + pb.params({2: 1234, 252: 82}))
+        parser.receive_packet(pb.packet(ev))
+        self.assertEqual(got, [1234])
+        self.assertEqual(state.stats["events"], 1)
+
+    def test_move_events_filtered_before_parsing(self):
+        seen = []
+        p = photon.PhotonParser(on_event=lambda c, prm: seen.append(c), event_filter=AlbionState.wants_event)
+        p.receive_packet(pb.packet(pb.command(4, bytes([3]) + pb.params({1: 5}))))
+        p.receive_packet(pb.packet(pb.command(4, bytes([1]) + pb.params({252: 82}))))
+        self.assertEqual(seen, [1])
+
+    def test_request_and_response_listeners(self):
+        sink, state, parser = make_state()
+        got = []
+        state.on("request:gold_market_get_average_info", lambda p: got.append("req"))
+        state.on("response:gold_market_get_average_info", lambda p: got.append(p[0]))
+        parser.receive_packet(pb.packet(pb.request(250, {})))
+        parser.receive_packet(pb.packet(pb.response(250, {0: [5000, 5100]})))
+        self.assertEqual(got, ["req", [5000, 5100]])
+
+    def test_opcodes_override_file(self):
+        from albion_trader.capture.albion import load_opcodes
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "opcodes.json"
+            path.write_text(json.dumps({"auction_get_offers": 90, "events": {"update_fame": 83}}))
+            codes = load_opcodes(path)
+        self.assertEqual(codes["auction_get_offers"], 90)
+        self.assertEqual(codes["events"]["update_fame"], 83)
+        state = AlbionState(Collector(), codes)
+        self.assertEqual(state.ev["update_fame"], 83)
+        self.assertEqual(state.op["auction_get_offers"], 90)

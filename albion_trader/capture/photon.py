@@ -277,11 +277,13 @@ class PhotonParser:
                  on_request: Callable[[int, dict], None] | None = None,
                  on_response: Callable[[int, int, str, dict], None] | None = None,
                  on_event: Callable[[int, dict], None] | None = None,
-                 on_encrypted: Callable[[], None] | None = None):
+                 on_encrypted: Callable[[], None] | None = None,
+                 event_filter: Callable[[int], bool] | None = None):
         self.on_request = on_request
         self.on_response = on_response
         self.on_event = on_event
         self.on_encrypted = on_encrypted
+        self.event_filter = event_filter
         self.pending: dict[int, dict] = {}
         self.evicted_segments = 0  # недособранные сообщения (потерян кусок)
 
@@ -379,7 +381,7 @@ class PhotonParser:
         elif msg_type in (MSG_RESPONSE, MSG_RESPONSE_ALT):
             self._dispatch_response(body)
         elif msg_type == MSG_EVENT:
-            if self.on_event:
+            if self.on_event and (self.event_filter is None or self.event_filter(body[0])):
                 self.on_event(body[0], read_parameter_table(Reader(body, 1)))
 
     def _dispatch_response(self, body: bytes) -> None:
