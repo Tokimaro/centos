@@ -36,9 +36,11 @@ class ItemCatalog:
 
     def name(self, item_id: str, lang: str = "ru") -> str:
         entry = self.names.get(item_id)
-        if entry:
-            return entry.get(lang) or entry.get("en") or item_id
-        return item_id
+        if not entry:
+            return item_id
+        name = entry.get(lang) or entry.get("en") or item_id
+        level = enchant_of(item_id)
+        return f"{name} .{level}" if level else name
 
     def search_text(self, item_id: str) -> str:
         entry = self.names.get(item_id) or {}

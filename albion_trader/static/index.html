@@ -10,18 +10,14 @@
 <body>
 <header>
   <h1>Albion Trader</h1>
-  <nav>
-    <button class="tab active" data-tab="deals">Сделки</button>
-    <button class="tab" data-tab="fastsell">Быстрая продажа</button>
-    <button class="tab" data-tab="prices">Цены предмета</button>
-    <button class="tab" data-tab="status">Статус</button>
-  </nav>
+  <nav id="groups"></nav>
   <span id="conn" class="conn" title="Состояние встроенного сборщика">—</span>
 </header>
+<nav id="subnav" class="subnav" hidden></nav>
 
 <main>
   <!-- Сделки -->
-  <section id="tab-deals" class="panel active">
+  <section id="tab-deals" class="panel">
     <form id="filters" class="filters" autocomplete="off">
       <fieldset class="locs">
         <legend>Покупать в</legend>
@@ -169,6 +165,9 @@
   </section>
 </main>
 
-<script src="app.js"></script>
+<script src="js/core.js"></script>
+<script src="js/trading.js"></script>
+<script src="js/status.js"></script>
+<script src="js/main.js"></script>
 </body>
 </html>
