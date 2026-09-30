@@ -117,13 +117,13 @@ const App = {
   defaultCities: [],
 
   tab(def) { this.tabs.push(def); },
-  // Живое обновление открытой вкладки (у вкладки есть refresh) — для окна-компаньона
+  // Живое обновление открытой вкладки (live + refresh) — для окна-компаньона
   // и вкладок инструментов; скрытая страница не опрашивает сервер.
   startAutoRefresh(ms = 20000) {
     clearInterval(this._timer);
     this._timer = setInterval(() => {
       const t = this.current;
-      if (t && t.ready && t.refresh && !document.hidden) {
+      if (t && t.ready && t.live && t.refresh && !document.hidden) {
         try { t.refresh(t.el); } catch (e) { console.error(e); }
       }
     }, ms);

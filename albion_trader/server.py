@@ -38,6 +38,7 @@ from . import __version__
 from . import tray as tray_mod
 from . import window as window_mod
 from .window import CompanionWindow
+from .chain import ChainParams, build_chain, items_in_chain
 from .gamedata import GAMEDATA_VERSION, GameData
 from .gamedata import download as download_gamedata
 from .items import download_catalog
@@ -703,6 +704,44 @@ class App:
             r["missing_names"] = [self.catalog.name(i) for i in r["missing"]]
         return {"now": now, "count": len(rows), "rows": rows}
 
+    def api_chain(self, q) -> dict:
+        if not self.gamedata:
+            return self._no_gamedata()
+        item = (q.get("item") or "").strip()
+        if not item:
+            raise ApiError("не указан предмет")
+        now = int(time.time())
+        buy_markets = [m for m in _split(q.get("buy_markets")) if m in MARKETS and m != "black_market"] \
+            or [q.get("craft_city") or "martlock"]
+        craft_city = q.get("craft_city") or buy_markets[0]
+        sell = q.get("sell_market") or craft_city
+        params = ChainParams(
+            buy_markets=buy_markets, buy_mode="order" if q.get("buy_mode") == "order" else "instant",
+            craft_city=craft_city, refine_city=q.get("refine_city") or craft_city,
+            focus=q.get("focus") == "1", sell_market=sell,
+            sell_mode="order" if q.get("sell_mode") == "order" else "instant",
+            quality=min(max(int(_float(q.get("quality"), 1)), 1), 5), tax=self._tax(q),
+            station_fee=max(_float(q.get("station_fee"), 0), 0))
+        items = items_in_chain(self.gamedata, item)
+        with self.conn() as conn:
+            orders = db.load_orders(conn, now - int(_float(q.get("max_age"), 24) * 3600),
+                                    sorted(set(buy_markets) | {sell}), now, items=sorted(items))
+        res = build_chain(self.gamedata, PriceBook(orders), item, min(max(_float(q.get("qty"), 1), 1), 100000),
+                          params)
+
+        def name(node):
+            node["name"] = self.catalog.name(node["item_id"])
+            for c in node["children"]:
+                name(c)
+        name(res["tree"])
+        for s_ in res["shopping"]:
+            s_["name"] = self.catalog.name(s_["item_id"])
+        res["missing_names"] = [self.catalog.name(i) for i in res["missing"]]
+        res.update(now=now, name=self.catalog.name(item), params={
+            "buy_markets": buy_markets, "craft_city": params.craft_city, "refine_city": params.refine_city,
+            "sell_market": sell})
+        return res
+
     def api_enchant(self, q) -> dict:
         if not self.gamedata:
             return self._no_gamedata()
@@ -791,6 +830,28 @@ class App:
         ok = self._item_filter(q)
         lang = q.get("lang", "ru")
         limit = _limit(q, 50)
+        if q.get("catalog"):
+            # Поиск по всему справочнику (не только по тому, что видели на рынке):
+            # для цепочки производства и конструктора билдов.
+            slots = set(_split(q.get("slot")))
+            craftable = q.get("craftable") == "1"
+            pool = self.gamedata.items or {k: {} for k in self.catalog.names}
+            found = []
+            for item_id, meta in pool.items():
+                if slots and meta.get("slot") not in slots:
+                    continue
+                if craftable and (self.gamedata.recipes.get(item_id) or {}).get("kind") not in ("craft", "refine"):
+                    continue
+                if ok(item_id):
+                    found.append(item_id)
+                    if len(found) >= 5000:
+                        break
+            found.sort(key=lambda i: (self.catalog.name(i, lang), i))
+            return {"items": [{"item_id": i, "name": self.catalog.name(i, lang),
+                               "tier": (self.gamedata.items.get(i) or {}).get("t"),
+                               "ip": (self.gamedata.items.get(i) or {}).get("ip"),
+                               "slot": (self.gamedata.items.get(i) or {}).get("slot")}
+                              for i in found[:limit]]}
         if q.get("recent"):
             with self.conn() as conn:
                 rows = conn.execute(
@@ -868,6 +929,7 @@ def make_handler(app: App):
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,
         "/api/window": app.api_window,
+        "/api/chain": app.api_chain,
     }
 
     post_api = {
