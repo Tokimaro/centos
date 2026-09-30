@@ -182,3 +182,19 @@ summary { cursor: pointer; color: var(--muted); }
   #groups .tab { padding: 4px 8px; }
   .conn { margin-left: 0; }
 }
+
+/* ---------- окно-компаньон ---------- */
+.window-btn { margin-top: 0; padding: 4px 10px; font-size: 13px; }
+.small-hint { font-size: 12px; }
+.pin { font-size: 13px; }
+body.companion header { gap: 8px 12px; padding: 6px 10px; }
+body.companion h1 { font-size: 15px; }
+body.companion .conn { margin-left: 0; width: 100%; font-size: 11px; }
+body.companion main { padding: 10px; }
+body.companion .subnav { padding: 4px 8px; position: sticky; top: 0; z-index: 2; }
+body.companion .subtab { padding: 3px 7px; font-size: 13px; }
+body.companion .filters { grid-template-columns: 1fr; gap: 8px; }
+body.companion .cards { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+body.companion .card { padding: 8px; }
+body.companion .card .v { font-size: 16px; }
+body.companion th, body.companion td { padding: 4px 6px; font-size: 13px; }

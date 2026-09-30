@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Albion Trader — инструменты</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%227%22 fill=%22%23d9a441%22/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Albion Trader</h1>
+  <label class="inline pin" title="Держать окно поверх игры (Windows)"><input type="checkbox" id="pin"> Поверх игры</label>
+  <span id="pin-hint" class="muted small-hint"></span>
+  <a href="/" target="_blank" class="small-hint" title="Полный интерфейс в браузере">весь интерфейс ↗</a>
+  <span id="conn" class="conn" title="Состояние встроенного сборщика">—</span>
+</header>
+<nav id="groups" hidden></nav>
+<nav id="subnav" class="subnav" hidden></nav>
+<main></main>
+<div id="toasts"></div>
+<script src="js/core.js"></script>
+<script src="js/tools.js"></script>
+<script src="js/companion.js"></script>
+</body>
+</html>

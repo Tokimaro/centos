@@ -36,6 +36,8 @@ from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from . import __version__
 from . import tray as tray_mod
+from . import window as window_mod
+from .window import CompanionWindow
 from .gamedata import GAMEDATA_VERSION, GameData
 from .gamedata import download as download_gamedata
 from .items import download_catalog
@@ -81,6 +83,7 @@ class AppConfig:
     fetch_reference: bool = False  # при первом запуске скачать справочники (для .exe)
     password: str = ""           # пароль для доступа к интерфейсу из сети (HTTP Basic)
     auth_local: bool = False     # требовать пароль и с этого же компьютера
+    open_window: bool = False    # открыть окно-компаньон после запуска
 
 
 class App:
@@ -119,6 +122,21 @@ class App:
                            self.alerts.trigger_kind(conn, "world_event", key, title, text, payload))
         self.world.attach(self.albion)
         self.sniffer: Sniffer | None = None
+        self.window = CompanionWindow("http://127.0.0.1:8484", Path(config.db_path).parent / "companion-profile")
+
+    # --- окно-компаньон -------------------------------------------------
+    def api_window(self, _q) -> dict:
+        return {"topmost": self.window.topmost, "running": self.window.running(),
+                "windows": window_mod.IS_WINDOWS}
+
+    def api_window_post(self, _q, body) -> dict:
+        body = body if isinstance(body, dict) else {}
+        out = {}
+        if body.get("action") == "open":
+            out.update(self.window.open())
+        if "topmost" in body:
+            out.update(self.window.set_topmost(bool(body["topmost"])))
+        return {**self.api_window(None), **out}
 
     def start_capture(self, open_sockets=None) -> bool:
         kwargs = {"open_sockets": open_sockets} if open_sockets else {}
@@ -132,6 +150,7 @@ class App:
         else:
             st.update(enabled=True, **self.sniffer.status)
             st["incomplete_messages"] = self.sniffer.parser.evicted_segments
+        st["zone_name"] = self.zone_name(st.get("zone")) if st.get("zone") else None
         loc = st.get("location")
         if loc == "3003":
             # В зоне 3003 (город Карлеон) работает Чёрный рынок; обычный рынок — в зоне 3005.
@@ -289,7 +308,7 @@ class App:
         key = normalize_location(raw)
         if key in MARKETS:
             return MARKETS[key].name_ru
-        return self.gamedata.zones.get(raw) or raw
+        return self.gamedata.zones.get(raw) or self.gamedata.cluster_name(raw)
 
     def api_session(self, q) -> dict:
         now = int(time.time())
@@ -848,6 +867,7 @@ def make_handler(app: App):
         "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,
         "/api/items": app.api_items,
+        "/api/window": app.api_window,
     }
 
     post_api = {
@@ -858,7 +878,10 @@ def make_handler(app: App):
         "/api/update-opcodes": app.api_update_opcodes,
         "/api/system": app.api_system_post,
         "/api/alert-rules": app.api_alert_rules_post,
+        "/api/window": app.api_window_post,
     }
+    # Запускают программы на этом компьютере — только для запросов с него же.
+    local_only = {"/api/window", "/api/system", "/api/update-opcodes"}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AlbionTrader"
@@ -971,8 +994,12 @@ def make_handler(app: App):
         def do_POST(self):  # noqa: N802
             path = urlparse(self.path).path
             if path in post_api:
-                if self._authorized():
-                    self._api_post(path)
+                if not self._authorized():
+                    return
+                if path in local_only and self.client_address[0] not in ("127.0.0.1", "::1"):
+                    self._json(403, {"error": "доступно только с компьютера, где запущена программа"})
+                    return
+                self._api_post(path)
                 return
             # albiondata-client шлёт POST <базовый URL>/<топик>, например
             # http://127.0.0.1:8484/marketorders.ingest или, с токеном,
@@ -1042,13 +1069,18 @@ def serve(config: AppConfig, host: str, port: int) -> None:
     if app.sniffer and app.sniffer.status["running"]:
         log.info("Встроенный сборщик работает — откройте рынок в игре.")
     log.info("Внешний клиент (необязательно): albiondata-client -i %s", ingest_url)
+    local_base = f"http://127.0.0.1:{port}"
+    app.window = CompanionWindow(local_base, Path(config.db_path).parent / "companion-profile")
     if config.tray:
-        tray = tray_mod.Tray(base, on_exit=httpd.shutdown, icon_path=str(STATIC_DIR / "icon.ico"))
+        tray = tray_mod.Tray(base, on_exit=httpd.shutdown, icon_path=str(STATIC_DIR / "icon.ico"),
+                             on_window=app.window.open)
         if tray.start():
             app.alerts.listeners.append(lambda a: tray.notify(a["title"], a["text"]))
             log.info("Значок в трее: двойной щелчок открывает интерфейс, «Выход» — в меню.")
     if config.open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(base)).start()
+    if config.open_window:
+        threading.Timer(1.0, app.window.open).start()
     if not len(app.catalog):
         log.info("Названия предметов не загружены: python -m albion_trader update-items")
     try:

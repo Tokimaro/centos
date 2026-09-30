@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
                               "(содержит и ваш чат/ник — не выкладывайте публично)")
     p_serve.add_argument("--tray", action="store_true", help="значок в трее Windows")
     p_serve.add_argument("--open-browser", action="store_true", help="открыть интерфейс в браузере")
+    p_serve.add_argument("--window", action="store_true",
+                         help="открыть окно-компаньон с инструментами (отдельное окно без вкладок)")
     p_serve.add_argument("--fetch-reference", action="store_true",
                          help="скачать справочники, если их нет (первый запуск)")
     p_serve.add_argument("--log-file", action="store_true", help="писать лог в data/albion_trader.log")
@@ -96,6 +98,7 @@ def main(argv=None) -> int:
                            password=getattr(args, "password", ""),
                            tray=getattr(args, "tray", False),
                            open_browser=getattr(args, "open_browser", False),
+                           open_window=getattr(args, "window", False),
                            fetch_reference=getattr(args, "fetch_reference", False))
         serve(config, getattr(args, "host", "127.0.0.1"), getattr(args, "port", 8484))
         return 0

@@ -2,27 +2,6 @@
 // Статус сборщика и строка состояния в шапке.
 
 // ---------- статус ----------
-async function refreshConn() {
-  try {
-    const s = await api("/api/status");
-    const c = s.capture;
-    const el = $("#conn");
-    const t = s.topics.find((x) => x.topic === "marketorders.ingest");
-    const last = t ? `, данные ${age(t.last_at, s.now)} назад` : "";
-    if (c.enabled && c.error) {
-      el.textContent = `сборщик: ошибка — ${c.error}`; el.className = "conn bad";
-    } else if (c.enabled && c.running) {
-      const enc = c.encrypted_at && s.now - c.encrypted_at < 600;
-      const loc = c.location_name ? ` · ${c.location_name}` : " · локация не определена — смените зону в игре, иначе цены не сохраняются";
-      el.textContent = `сборщик работает${loc}${last}${enc ? " · данные рынка зашифрованы игрой" : ""}`;
-      el.className = "conn " + (enc || !c.location_name ? "bad" : t && s.now - t.last_at < 600 ? "ok" : "old");
-    } else {
-      el.textContent = t ? `сборщик выключен${last}` : "сборщик выключен, данных нет";
-      el.className = "conn old";
-    }
-  } catch { /* сервер недоступен */ }
-}
-
 async function loadStatus() {
   const s = await api("/api/status");
   $("#client-cmd").textContent = `albiondata-client.exe -i ${location.origin}${s.ingest_path}`;

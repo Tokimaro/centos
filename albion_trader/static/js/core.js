@@ -77,6 +77,28 @@ function checkboxList(container, name, items, checked) {
   container.appendChild(all);
 }
 
+// ---------- индикатор сборщика в шапке ----------
+async function refreshConn() {
+  try {
+    const s = await api("/api/status");
+    const c = s.capture;
+    const el = $("#conn");
+    const t = s.topics.find((x) => x.topic === "marketorders.ingest");
+    const last = t ? `, данные ${age(t.last_at, s.now)} назад` : "";
+    if (c.enabled && c.error) {
+      el.textContent = `сборщик: ошибка — ${c.error}`; el.className = "conn bad";
+    } else if (c.enabled && c.running) {
+      const enc = c.encrypted_at && s.now - c.encrypted_at < 600;
+      const loc = c.location_name ? ` · ${c.location_name}` : " · локация не определена — смените зону в игре, иначе цены не сохраняются";
+      el.textContent = `сборщик работает${loc}${last}${enc ? " · данные рынка зашифрованы игрой" : ""}`;
+      el.className = "conn " + (enc || !c.location_name ? "bad" : t && s.now - t.last_at < 600 ? "ok" : "old");
+    } else {
+      el.textContent = t ? `сборщик выключен${last}` : "сборщик выключен, данных нет";
+      el.className = "conn old";
+    }
+  } catch { /* сервер недоступен */ }
+}
+
 // ---------- приложение и навигация ----------
 const App = {
   groups: [
@@ -84,6 +106,7 @@ const App = {
     { id: "prod", title: "Производство" },
     { id: "my", title: "Мои данные" },
     { id: "world", title: "Мир" },
+    { id: "tools", title: "Инструменты" },
     { id: "alerts", title: "Оповещения" },
     { id: "status", title: "Статус" },
   ],
@@ -94,6 +117,17 @@ const App = {
   defaultCities: [],
 
   tab(def) { this.tabs.push(def); },
+  // Живое обновление открытой вкладки (у вкладки есть refresh) — для окна-компаньона
+  // и вкладок инструментов; скрытая страница не опрашивает сервер.
+  startAutoRefresh(ms = 20000) {
+    clearInterval(this._timer);
+    this._timer = setInterval(() => {
+      const t = this.current;
+      if (t && t.ready && t.refresh && !document.hidden) {
+        try { t.refresh(t.el); } catch (e) { console.error(e); }
+      }
+    }, ms);
+  },
   byId(id) { return this.tabs.find((t) => t.id === id); },
   locName(key) { return this.locNames[key] || key; },
   locClass(key) { return key === "black_market" ? "bm" : ""; },

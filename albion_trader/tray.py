@@ -1,7 +1,7 @@
 """Значок в трее Windows и автозапуск — только стандартная библиотека (ctypes).
 
 * Значок: двойной щелчок — открыть интерфейс; правая кнопка — меню «Открыть»,
-  «Запускать вместе с Windows», «Выход». Оповещения дублируются всплывающими
+  «Окно-компаньон», «Запускать вместе с Windows», «Выход». Оповещения дублируются всплывающими
   уведомлениями Windows, даже если браузер закрыт.
 * Автозапуск — задача Планировщика с наивысшими правами (запуск при входе в
   систему без запроса UAC; обычный ключ реестра Run программы с правами
@@ -66,11 +66,13 @@ def set_autostart(enable: bool, run=subprocess.run) -> bool:
 class Tray:
     """Значок в области уведомлений. ``start()`` запускает цикл сообщений в отдельном потоке."""
 
-    ID_OPEN, ID_AUTOSTART, ID_EXIT = 1001, 1002, 1003
+    ID_OPEN, ID_AUTOSTART, ID_EXIT, ID_WINDOW = 1001, 1002, 1003, 1004
 
-    def __init__(self, url: str, on_exit: Callable[[], None], icon_path: str | None = None):
+    def __init__(self, url: str, on_exit: Callable[[], None], icon_path: str | None = None,
+                 on_window: Callable[[], object] | None = None):
         self.url = url
         self.on_exit = on_exit
+        self.on_window = on_window
         self.icon_path = icon_path
         self.hwnd = None
         self._ready = threading.Event()
@@ -136,6 +138,8 @@ class Tray:
         def menu():
             hmenu = user32.CreatePopupMenu()
             user32.AppendMenuW(hmenu, 0, self.ID_OPEN, "Открыть Albion Trader")
+            if self.on_window:
+                user32.AppendMenuW(hmenu, 0, self.ID_WINDOW, "Окно-компаньон (инструменты)")
             try:
                 checked = autostart_enabled()
             except OSError:
@@ -150,6 +154,8 @@ class Tray:
             user32.DestroyMenu(hmenu)
             if cmd == self.ID_OPEN:
                 self.open()
+            elif cmd == self.ID_WINDOW and self.on_window:
+                threading.Thread(target=self.on_window, daemon=True).start()
             elif cmd == self.ID_AUTOSTART:
                 try:
                     set_autostart(not checked)
