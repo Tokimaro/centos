@@ -1,8 +1,6 @@
 """Регрессионные тесты на ошибки, найденные при ревью и фаззинге."""
 import http.client
-import json
 import struct
-import threading
 import unittest
 import urllib.error
 import urllib.parse
@@ -22,9 +20,11 @@ GET_ENDPOINTS = ["/api/deals", "/api/prices", "/api/fastsell", "/api/flips", "/a
                  "/api/underpriced", "/api/bm-demand", "/api/craft", "/api/enchant", "/api/journals",
                  "/api/farming", "/api/alerts", "/api/my/orders", "/api/gold", "/api/session",
                  "/api/loot", "/api/character", "/api/kills", "/api/zones", "/api/world",
-                 "/api/my/trades", "/api/items"]
+                 "/api/my/trades", "/api/items", "/api/chain", "/api/builds", "/api/killboard", "/api/destiny",
+                 "/api/avalon", "/api/dungeons", "/api/economy", "/api/window"]
 PARAMS = ["max_age", "min_profit", "min_margin", "limit", "hours", "days", "budget", "tax",
-          "price", "since", "quantity", "item", "items", "cities", "q"]
+          "price", "since", "quantity", "item", "items", "cities", "q", "qty", "quality", "min_ip", "period",
+          "session", "station_fee", "from", "to"]
 
 
 class ParamHelpersTest(unittest.TestCase):
@@ -132,3 +132,34 @@ class FragmentBoundsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NonFiniteEventTest(unittest.TestCase):
+    def test_inf_and_nan_in_events_ignored(self):
+        import math
+        import tempfile
+        from pathlib import Path
+        from albion_trader import activity
+        from albion_trader.server import App, AppConfig
+        self.assertIsNone(activity._fix(float("inf")))
+        self.assertIsNone(activity._fix(float("nan")))
+        self.assertIsNone(activity._fix(10 ** 30))
+        self.assertIsNone(activity._int(float("inf")))
+        self.assertIsNone(activity._int(True))
+        self.assertEqual(activity._int("12"), 12)
+        from albion_trader import world
+        self.assertIsNone(world._ts(float("inf")))
+        self.assertIsNone(world._ts(-5))
+        with tempfile.TemporaryDirectory() as d:
+            app = App(AppConfig(db_path=Path(d) / "m.db", items_path=Path(d) / "i.json", capture=False))
+            p = photon.PhotonParser(app.albion.on_request, app.albion.on_response, app.albion.on_event)
+            inf = float("inf")
+            for code, prm in ((62, {0: inf, 3: inf, 4: inf}), (82, {2: inf, 10: inf, 17: inf}),
+                              (393, {0: inf, 3: "C", 21: inf}), (395, {0: inf}), (279, {2: "x", 3: True, 5: inf}),
+                              (61, {0: inf}), (480, {0: inf, 1: inf, 2: inf, 3: inf, 4: inf})):
+                p.receive_packet(pb.packet(pb.event(code, prm)))
+            with app.conn() as c:
+                values = [r[0] for r in c.execute("SELECT value FROM activity_events WHERE value IS NOT NULL")]
+            self.assertTrue(all(math.isfinite(v) for v in values))
+            app.api_zones({})
+            app.api_economy({"period": "7"})

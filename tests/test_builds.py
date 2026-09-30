@@ -7,7 +7,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from albion_trader import builds, db
+from albion_trader import builds
 from albion_trader.destiny import node_title
 from albion_trader.gamedata import GameData
 

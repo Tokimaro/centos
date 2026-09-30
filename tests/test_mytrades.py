@@ -8,7 +8,6 @@ from pathlib import Path
 
 from albion_trader import db, mytrades
 from albion_trader.capture import photon
-from albion_trader.capture.albion import AlbionState
 from albion_trader.server import App, AppConfig
 
 try:

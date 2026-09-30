@@ -38,11 +38,14 @@ def init(conn: sqlite3.Connection) -> None:
 
 
 def _ts(v) -> int | None:
+    if isinstance(v, bool):
+        return None
     try:
         v = int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # в том числе бесконечность и NaN
         return None
-    return dotnet_ticks_to_unix(v) if v > 10**14 else v
+    ts = dotnet_ticks_to_unix(v) if v > 10**14 else v
+    return ts if 0 <= ts < 2 ** 33 else None
 
 
 class World:

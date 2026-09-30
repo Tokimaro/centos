@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import time
 from collections import defaultdict
@@ -64,20 +65,31 @@ def init(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
 
 
+# Значения больше этого — мусор (у настоящих сумм и id порядок заметно меньше).
+VALUE_LIMIT = 10 ** 15
+
+
 def _fix(v) -> float | None:
+    """Число с фиксированной точкой (÷10 000); None для мусора, NaN и бесконечности."""
     if isinstance(v, bool) or v is None:
         return None
     try:
-        return float(v) / FIXPOINT
-    except (TypeError, ValueError):
+        f = float(v) / FIXPOINT
+    except (TypeError, ValueError, OverflowError):
         return None
+    return f if math.isfinite(f) and abs(f) < VALUE_LIMIT else None
 
 
 def _int(v):
-    try:
-        return int(v)
-    except (TypeError, ValueError):
+    if isinstance(v, bool):
         return None
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    try:
+        i = int(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return i if abs(i) < VALUE_LIMIT * FIXPOINT else None
 
 
 class Activity:

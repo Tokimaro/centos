@@ -1,6 +1,5 @@
 import json
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -38,7 +37,6 @@ class ActivityTest(unittest.TestCase):
         self.parser.receive_packet(pkt)
 
     def test_session_totals_and_loot_value(self):
-        now = int(time.time())
         self.app.ingest("marketorders.ingest", {"Orders": [
             {"Id": 1, "ItemTypeId": "T4_BAG", "LocationId": "0007", "QualityLevel": 1, "UnitPriceSilver": 3000 * FP,
              "Amount": 1, "AuctionType": "offer", "Expires": "2099-01-01T00:00:00"}]})

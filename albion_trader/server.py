@@ -14,7 +14,6 @@ import time
 import webbrowser
 from contextlib import contextmanager
 from dataclasses import dataclass
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
