@@ -124,3 +124,98 @@ class WorldTest(unittest.TestCase):
         self.assertEqual(z["0007"], "Thetford Market")
         self.assertEqual(len(z), 3)
         self.assertEqual(GameData(build(RAW_ITEMS, None, None, "1234: Somewhere")).zones, {"1234": "Somewhere"})
+
+
+RAW_ACH = {"AO-Achievements": {
+    "template": [
+        {"@name": "COMBAT_BASE", "baselevels": {"@structure": "Fame;LP", "#text": "\n 100;1\n 200;1\n 300;2\n "}},
+        {"@name": "CRAFT_SPEC", "baselevels": {"@structure": "Fame;LP", "#text": "10;1\n20;1"}},
+        {"@name": "EMPTY", "baselevels": {"#text": ""}}],
+    "templateachievement": [
+        {"@id": "COMBAT_BOWS", "@usetemplate": "COMBAT_BASE", "@category": "fighting",
+         "@missiontype": "killmobfame", "@famemultiplier": "1", "@itemforsprite": "T8_2H_BOW",
+         "parentachievements": {"achievement": [{"@id": "COMBAT_HUNTER"}, {"@id": "COMBAT_BOWS_BOW"}]}},
+        {"@id": "CRAFT_BOWS_LONG", "@usetemplate": "CRAFT_SPEC", "@category": "crafting",
+         "@famemultiplier": "2", "parentachievements": {"achievement": {"@id": "CRAFT_BOWS"}}},
+        {"@id": "BROKEN", "@usetemplate": "MISSING"}]}}
+RAW_WORLD = {"?xml": {}, "world": {"clusters": {"cluster": [
+    {"@id": "4206", "@displayname": "Tharcal Fissure", "@type": "OPENPVP_YELLOW",
+     "exits": {"exit": [{"@targetid": "uuid-a@4208"}, {"@targetid": "uuid-b@DNG-KPR-02"},
+                        {"@targetid": "uuid-c@4208"}]}},
+    {"@id": "TNL-001", "@displayname": "Ouyos-Aoeuam", "@type": "TUNNEL_ROYAL", "exits": None},
+    {"@id": "ISLAND-PLAYER-0001a", "@type": "PLAYERISLAND"}]}}}
+
+
+class GameDataV2Test(unittest.TestCase):
+    def setUp(self):
+        items = {"items": {"weapon": [{
+            "@uniquename": "T6_2H_NATURESTAFF", "@tier": "6", "@slottype": "mainhand", "@itempower": "900",
+            "@twohanded": "true", "@combatspecachievement": "COMBAT_NATURESTAFFS_GREAT",
+            "enchantments": {"enchantment": [{"@enchantmentlevel": "2", "@itempower": "1100"}]}}],
+            "consumableitem": [{"@uniquename": "T8_POTION_GATHER", "@tier": "8", "@slottype": "potion",
+                                "@dummyitempower": "1100"}]}}
+        self.data = build(items, raw_achievements=RAW_ACH, raw_world=RAW_WORLD)
+        self.g = GameData(self.data)
+
+    def test_item_slots_and_power(self):
+        staff = self.g.items["T6_2H_NATURESTAFF"]
+        self.assertEqual((staff["slot"], staff["ip"], staff["2h"], staff["spec"]),
+                         ("mainhand", 900, 1, "COMBAT_NATURESTAFFS_GREAT"))
+        self.assertEqual(self.g.items["T6_2H_NATURESTAFF@2"]["ip"], 1100)
+        self.assertEqual(self.g.items["T8_POTION_GATHER"]["ip"], 1100)
+
+    def test_destiny(self):
+        d = self.g.destiny
+        self.assertEqual(d["templates"]["COMBAT_BASE"], [100, 200, 300])
+        self.assertNotIn("EMPTY", d["templates"])
+        bows = d["nodes"]["COMBAT_BOWS"]
+        self.assertEqual((bows["base"], bows["mult"], bows["item"], bows["parents"]),
+                         (True, 1, "T8_2H_BOW", ["COMBAT_HUNTER", "COMBAT_BOWS_BOW"]))
+        self.assertEqual(d["nodes"]["CRAFT_BOWS_LONG"]["parents"], ["CRAFT_BOWS"])
+        self.assertNotIn("BROKEN", d["nodes"])
+
+    def test_clusters(self):
+        self.assertEqual(self.g.cluster("4206"), ["Tharcal Fissure", "OPENPVP_YELLOW", ["4208", "DNG-KPR-02"]])
+        self.assertEqual(self.g.cluster_type("TNL-001"), "TUNNEL_ROYAL")
+        self.assertIsNone(self.g.cluster("ISLAND-PLAYER-0001a"))
+        self.assertEqual(self.g.cluster_name("nope"), "nope")
+
+    def test_old_file_without_new_sections(self):
+        g = GameData({"items": {}, "recipes": {}})
+        self.assertEqual((g.destiny["nodes"], g.clusters), ({}, {}))
+
+
+class DownloadTest(unittest.TestCase):
+    def fake_urlopen(self, missing=()):
+        import io
+        import json as _json
+        files = {"items.json": {"items": {}}, "loot.json": {}, "craftingmodifiers.json": {},
+                 "achievements.json": RAW_ACH, "cluster/world.json": RAW_WORLD}
+
+        def urlopen(url, timeout=None):
+            name = url.split("/master/", 1)[1]
+            if name == "formatted/world.txt":
+                return io.BytesIO("4206: Tharcal Fissure\n".encode())
+            if name in missing:
+                raise OSError("404")
+            return io.BytesIO(_json.dumps(files[name]).encode())
+        return urlopen
+
+    def test_download_all_and_optional_missing(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from albion_trader import gamedata
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "gamedata.json"
+            with mock.patch.object(gamedata.urllib.request, "urlopen", self.fake_urlopen()):
+                res = gamedata.download(path)
+            self.assertEqual((res["destiny_nodes"], res["clusters"]), (2, 2))
+            self.assertEqual(GameData.load(path).zones, {"4206": "Tharcal Fissure"})
+            with mock.patch.object(gamedata.urllib.request, "urlopen",
+                                   self.fake_urlopen(("achievements.json", "cluster/world.json"))):
+                res = gamedata.download(path)
+            self.assertEqual((res["destiny_nodes"], res["clusters"]), (0, 0))
+            with mock.patch.object(gamedata.urllib.request, "urlopen", self.fake_urlopen(("items.json",))):
+                with self.assertRaises(OSError):
+                    gamedata.download(path)

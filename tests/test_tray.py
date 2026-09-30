@@ -170,3 +170,29 @@ class FetchReferenceTest(unittest.TestCase):
                 _time.sleep(0.02)
             self.assertEqual(app.catalog.name("T4_BAG"), "Сумка")
             self.assertTrue(app.gamedata)
+
+    def test_outdated_gamedata_refreshed(self):
+        import json
+        import time as _time
+        from albion_trader import server
+        from albion_trader.gamedata import GAMEDATA_VERSION
+        from albion_trader.server import App, AppConfig
+        calls = []
+
+        def fake_gamedata(path):
+            calls.append(path)
+            Path(path).write_text(json.dumps({"version": GAMEDATA_VERSION, "items": {},
+                                              "recipes": {"T4_BAG": {"res": [], "n": 1}}}))
+            return {}
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(server, "download_gamedata", fake_gamedata):
+            (Path(d) / "items.json").write_text(json.dumps({"names": {}, "index": {}}))
+            (Path(d) / "gamedata.json").write_text(json.dumps({"items": {}, "recipes": {"X": {"res": [], "n": 1}}}))
+            app = App(AppConfig(db_path=Path(d) / "m.db", items_path=Path(d) / "items.json", capture=False))
+            self.assertEqual(app.gamedata.version, 1)
+            app.fetch_reference_async()
+            deadline = _time.time() + 5
+            while app.gamedata.version < GAMEDATA_VERSION and _time.time() < deadline:
+                _time.sleep(0.02)
+            self.assertEqual((len(calls), app.gamedata.version), (1, GAMEDATA_VERSION))
+            app.fetch_reference_async()          # актуальный файл повторно не качается
+            self.assertEqual(len(calls), 1)

@@ -36,7 +36,7 @@ from .capture.albion import AlbionState, load_opcodes
 from .capture.sniffer import Sniffer
 from . import __version__
 from . import tray as tray_mod
-from .gamedata import GameData
+from .gamedata import GAMEDATA_VERSION, GameData
 from .gamedata import download as download_gamedata
 from .items import download_catalog
 from .production import CraftParams, PriceBook, craft_table, enchant_table, farming_table, journal_table
@@ -345,7 +345,8 @@ class App:
         """Скачать справочники в фоне, если их ещё нет (первый запуск .exe)."""
         items = Path(self.config.items_path)
         game = items.with_name("gamedata.json")
-        if items.exists() and game.exists():
+        stale = game.exists() and self.gamedata.version < GAMEDATA_VERSION
+        if items.exists() and game.exists() and not stale:
             return
 
         def work():
@@ -353,8 +354,8 @@ class App:
                 log.info("Скачиваю справочники предметов и рецептов (первый запуск)…")
                 if not items.exists():
                     download_catalog(items)
-                if not game.exists():
-                    download_gamedata(game)
+                if not game.exists() or stale:
+                    download_gamedata(game)   # старый файл без Доски судьбы и карты — обновляем
                 self.reload_reference()
                 log.info("Справочники загружены.")
             except (OSError, ValueError) as e:
