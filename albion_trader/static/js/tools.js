@@ -625,3 +625,54 @@ App.tab({
     } catch (e) { $("#dg-runs", el).insertAdjacentHTML("afterbegin", `<p class="bad">${esc(e.message)}</p>`); }
   },
 });
+
+// ---------- Точный учёт славы и серебра ----------
+App.tab({
+  id: "economy", group: "tools", title: "Учёт", live: true,
+  init(el) {
+    el.innerHTML = `<p class="muted intro">Слава — по полной формуле игры (премиум, сумка прозрения, бонусы) и по источникам. Серебро — только ваше: с мобов после налогов, из лута, рынок; «прочее» — разница с изменением баланса (ремонт, телепорты, комиссии…).</p>
+      <div class="buttons"><label>Период <select id="ec-period"><option value="session">текущая сессия</option><option value="today">сегодня</option><option value="7">7 дней</option><option value="30">30 дней</option></select></label></div>
+      <div class="cards" id="ec-cards"></div>
+      <div class="ec-grid"><div><h2>Слава</h2><div class="table-wrap"><table id="ec-fame"></table></div></div>
+        <div><h2>Серебро</h2><div class="table-wrap"><table id="ec-silver"></table></div></div></div>
+      <h2 class="ec-per">Серебро по часам</h2><div id="ec-chart-silver"></div>
+      <h2 class="ec-per">Слава по часам</h2><div id="ec-chart-fame"></div>
+      <h2>По дням</h2><div id="ec-days"></div>`;
+    this.days = makeTable($("#ec-days", el), [
+      { key: "day", title: "День" }, { key: "fame", title: "Слава", num: true, html: (r) => fmt(r.fame) },
+      { key: "silver", title: "Серебро (мобы + лут)", num: true, html: (r) => fmt(r.silver) },
+    ], { sort: "day", empty: "—" });
+    $("#ec-period", el).addEventListener("change", () => this.refresh(el));
+    this.refresh(el);
+  },
+  async refresh(el) {
+    try {
+      const r = await api("/api/economy", { period: $("#ec-period", el).value });
+      const f = r.fame, s = r.silver, b = r.balance;
+      $("#ec-cards", el).innerHTML = [
+        card(fmt(r.fame_per_hour), "слава в час"), card(fmt(r.income_per_hour), "доход в час"),
+        card(fmt(f.total), "слава всего"), card(fmt(r.income), "доход всего"),
+        card(b ? fmt(b.change) : "—", "изменение баланса", b ? (b.change >= 0 ? "good" : "bad") : ""),
+        card(`${fmt1(r.hours)} ч`, "в игре"),
+      ].join("");
+      const row = (label, v, cls = "") => `<tr><td>${label}</td><td class="num ${v ? cls : ""}">${fmt(v || 0)}</td></tr>`;
+      $("#ec-fame", el).innerHTML = `<tbody>${Object.entries(f.by_source).map(([k, v]) => row(esc(r.sources[k]), v)).join("")}
+        <tr><td colspan="2" class="muted">из чего сложилась</td></tr>
+        ${row("база (с множителем зоны)", f.base)}${row("премиум", f.premium)}${row("сумка прозрения", f.satchel)}${row("бонусы", f.bonus)}
+        ${row("<b>итого</b>", f.total)}</tbody>`;
+      $("#ec-silver", el).innerHTML = `<tbody>${row("с мобов (до налогов)", s.mobs_gross)}${row("налог кластера", -s.cluster_tax, "bad")}
+        ${row("налог гильдии", -s.guild_tax, "bad")}${s.alliance_penalty ? row("штраф альянса", -s.alliance_penalty, "bad") : ""}
+        ${row("<b>с мобов чистыми</b>", s.mobs_net)}${row("из лута", s.loot)}
+        ${row("продажи на рынке (после налога)", r.market.sales_net)}${row("покупки на рынке", -r.market.purchases, "bad")}
+        ${b ? `${row("изменение баланса", b.change)}${row("учтено выше", b.explained)}${row("<b>прочее</b> (ремонт, телепорты…)", b.other, b.other < 0 ? "bad" : "good")}`
+          : `<tr><td colspan="2" class="muted">баланс пока не виден — смените зону в игре</td></tr>`}</tbody>`;
+      const per = r.series_bucket === 86400 ? "по дням" : "по часам";
+      $$(".ec-per", el).forEach((h, i) => { h.textContent = `${i ? "Слава" : "Серебро"} ${per}`; });
+      lineChart($("#ec-chart-silver", el), [{ name: "серебро (мобы + лут)", slot: 1, points: r.hourly.map((h) => [h.ts, h.silver]) }],
+        { height: 180, empty: "Пока нет данных" });
+      lineChart($("#ec-chart-fame", el), [{ name: "слава", slot: 3, points: r.hourly.map((h) => [h.ts, h.fame]) }],
+        { height: 180, empty: "Пока нет данных" });
+      this.days.set(r.daily);
+    } catch (e) { $("#ec-cards", el).innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
+  },
+});

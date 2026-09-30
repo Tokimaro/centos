@@ -45,6 +45,7 @@ from . import killboard as killboard_mod
 from .killboard import KillboardFetcher
 from . import avalon as avalon_mod
 from . import dungeons as dungeons_mod
+from . import economy as economy_mod
 from .gamedata import GAMEDATA_VERSION, GameData
 from .gamedata import download as download_gamedata
 from .items import download_catalog
@@ -804,6 +805,23 @@ class App:
             m["name"] = market_info(m["market"])["name"]
         return {"now": now, "build": build, **res}
 
+    # --- учёт славы и серебра --------------------------------------------
+    def api_economy(self, q) -> dict:
+        now = int(time.time())
+        period = q.get("period") or "session"
+        session_id = None
+        if period == "session":
+            session_id = int(_float(q.get("session"), 0)) or self.activity.session_id
+            since = 0
+        elif period == "today":
+            lt = time.localtime(now)
+            since = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+        else:
+            since = now - int(min(max(_float(period, 7), 0.01), 365) * 86400)
+        with self.conn() as conn:
+            rep = economy_mod.report(conn, since, now, self.character(), self.current_tax(conn), session_id)
+        return {"now": now, "period": period, "session_id": session_id, "sources": activity_mod.FAME_SOURCES, **rep}
+
     # --- данжи -----------------------------------------------------------
     def api_dungeons(self, q) -> dict:
         now = int(time.time())
@@ -1148,6 +1166,7 @@ def make_handler(app: App):
         "/api/destiny": app.api_destiny,
         "/api/avalon": app.api_avalon,
         "/api/dungeons": app.api_dungeons,
+        "/api/economy": app.api_economy,
     }
 
     post_api = {

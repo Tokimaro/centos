@@ -9,7 +9,9 @@
   (дробное число, не фиксированная точка). Получено = (2 + премиум + 10) × (1 + 17);
 * источник славы — событие завершения рядом по времени: HarvestFinished (сбор),
   CraftItemFinished (крафт), FishingFinished (рыбалка), иначе бой;
-* TakeSilver: 3 — серебро до налогов, 4 — налог кластера, 5 — налог гильдии;
+* TakeSilver: 0 — чей объект (своё — совпадает с Join[0]), 3 — серебро до налогов,
+  4 — налог кластера, 5 — налог гильдии, 6 — штраф альянса, 7 — премиум;
+* Join (ответ): 0 — id объекта персонажа, 33 — баланс серебра;
 * UpdateMoney: 1 — баланс серебра;
 * OtherGrabbedLoot: 1 — у кого, 2 — кто подобрал, 3 — это серебро, 4 — индекс
   предмета, 5 — количество;
@@ -104,6 +106,7 @@ class Activity:
         state.on("event:update_fame", self.on_fame)
         state.on("event:take_silver", self.on_silver)
         state.on("event:update_money", self.on_money)
+        state.on("response:join", self.on_join)
         state.on("event:other_grabbed_loot", self.on_loot)
         state.on("event:died", self.on_died)
         state.on("event:killed_player", self.on_killed)
@@ -178,12 +181,21 @@ class Activity:
         if not self.is_mine(p):        # TakeSilver приходит и за участников группы
             return
         gross = _fix(p.get(3)) or 0
-        net = gross - (_fix(p.get(4)) or 0) - (_fix(p.get(5)) or 0)
-        self.record("silver", value=round(net, 2), amount=gross)
+        cluster_tax, guild_tax, penalty = (_fix(p.get(k)) or 0 for k in (4, 5, 6))
+        net = gross - cluster_tax - guild_tax - penalty
+        self.record("silver", value=round(net, 2), amount=gross,
+                    data={"cluster_tax": round(cluster_tax, 2), "guild_tax": round(guild_tax, 2),
+                          "alliance_penalty": round(penalty, 2), "premium": p.get(7) is True})
 
     def on_money(self, p: dict) -> None:
         balance = _fix(p.get(1))
         if balance is not None:
+            self.record("balance", value=balance)
+
+    def on_join(self, p: dict) -> None:
+        """Join[33] — баланс серебра при входе в зону: опорная точка для учёта «прочих» расходов."""
+        balance = _fix(p.get(33))
+        if balance is not None and balance >= 0:
             self.record("balance", value=balance)
 
     def on_loot(self, p: dict) -> None:

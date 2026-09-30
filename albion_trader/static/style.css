@@ -226,3 +226,5 @@ body.companion th, body.companion td { padding: 4px 6px; font-size: 13px; }
 .chest.r1 { color: var(--good); }
 .chest.r2 { color: var(--series-1); }
 .chest.r3 { color: var(--accent); }
+.ec-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+body.companion .ec-grid { grid-template-columns: 1fr; }
