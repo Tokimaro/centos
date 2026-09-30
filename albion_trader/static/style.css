@@ -208,3 +208,8 @@ body.companion th, body.companion td { padding: 4px 6px; font-size: 13px; }
 .build-slot { display: grid; grid-template-columns: minmax(0, 1fr) 110px 64px; gap: 4px; align-items: center; }
 .build-slot .field-label { grid-column: 1 / -1; margin: 0; }
 .build-slot input[type=number] { width: 64px; }
+.kb-bar select { width: auto; }
+.kb-bar button, .kb-import { margin-top: 0; }
+.kb-import { padding: 2px 8px; font-size: 12px; }
+.kb-popular { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.kb-popular ol { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }

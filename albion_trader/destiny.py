@@ -12,6 +12,11 @@ _TIER_SUFFIX = re.compile(r"\s*\((?:[^()]*)\)\s*$")
 _TIER_PREFIX_EN = re.compile(r"^(?:Beginner|Novice|Journeyman|Adept|Expert|Master|Grandmaster|Elder)'s\s+")
 
 
+def strip_tier(name: str) -> str:
+    """«Морозный посох (старейшина)» → «Морозный посох»; «Elder's Frost Staff» → «Frost Staff»."""
+    return _TIER_PREFIX_EN.sub("", _TIER_SUFFIX.sub("", name or ""))
+
+
 def node_title(gd: GameData, name_of, node_id: str) -> str:
     """Название узла: предмет-иконка без пометки тира; у общих веток — «(ветка)»."""
     node = gd.destiny.get("nodes", {}).get(node_id)
@@ -21,7 +26,7 @@ def node_title(gd: GameData, name_of, node_id: str) -> str:
     name = name_of(item) if item else ""
     if not name or name == item:
         name = node_id.split("_", 1)[-1].replace("_", " ").title()
-    name = _TIER_PREFIX_EN.sub("", _TIER_SUFFIX.sub("", name))
+    name = strip_tier(name)
     if node.get("base"):
         name += " (ветка)"
     return f"{CATEGORY_NAMES.get(node.get('cat'), node.get('cat') or '')}: {name}".strip(": ")

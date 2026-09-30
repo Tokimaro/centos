@@ -305,3 +305,73 @@ App.tab({
     this.id = null; this.saved = r.builds; this.renderList(el); this.saveDraft(el);
   },
 });
+
+// ---------- Мета по киллборду ----------
+App.tab({
+  id: "meta", group: "tools", title: "Мета", live: true,
+  init(el) {
+    el.innerHTML = `<p class="muted intro">Популярные билды и предметы по свежим убийствам из официального киллборда игры. Загрузка идёт с серверов Albion Online, только если вы её включили; хранится 7 дней.</p>
+      <div class="buttons kb-bar">
+        <select id="kb-region" title="Сервер игры"></select>
+        <label class="inline"><input type="checkbox" id="kb-enabled"> Загружать киллборд (раз в 5 минут)</label>
+        <button type="button" class="secondary" id="kb-fetch">Обновить сейчас</button>
+      </div>
+      <div class="summary" id="kb-status"></div>`;
+    this.form = toolForm(el, "albion-trader-meta", [{ legend: "Фильтры", fields: [
+      { type: "select", name: "hours", label: "Период", value: "24",
+        options: [["3", "3 часа"], ["6", "6 часов"], ["24", "сутки"], ["72", "3 дня"], ["168", "неделя"]] },
+      { type: "number", name: "min_ip", label: "Мин. средняя сила", value: 0, min: 0, step: 50 },
+      { type: "select", name: "mode", label: "Бои", options: [["all", "все"], ["solo", "соло (1 участник)"], ["group", "группой"]] },
+    ] }], { submitText: "Показать", onSubmit: () => this.refresh(el) });
+    el.insertAdjacentHTML("beforeend", `<h2>Популярные билды</h2><div id="kb-builds"></div>
+      <h2>Популярные предметы</h2><div id="kb-popular" class="kb-popular"></div>
+      <h2>Спрос на замену</h2><p class="muted intro">Что чаще всего теряют в боях — эти предметы постоянно покупают заново. Оборот = потеряно × текущая цена.</p><div id="kb-demand"></div>`);
+    const names = (r) => ["mainhand", "offhand"].map((s) => r.names[s]).filter(Boolean).join(" + ");
+    this.builds = makeTable($("#kb-builds", el), [
+      { key: "weapon", title: "Билд", sort: (r) => names(r),
+        html: (r) => `<b>${esc(names(r))}</b><span class="sub">${["armor", "head", "shoes"].map((x) => esc(r.names[x] || "—")).join(" · ")}</span>` },
+      { key: "total", title: "Боёв", num: true, hint: "убийств + смертей этим билдом" },
+      { key: "win_rate", title: "Побед", num: true, html: (r) => `<span class="${r.win_rate >= 50 ? "good" : "bad"}">${pct(r.win_rate)}</span>` },
+      { key: "avg_ip", title: "Ср. сила", num: true, html: (r) => fmt(r.avg_ip) },
+      { key: "act", title: "", html: (r, i) => `<button type="button" class="secondary kb-import" data-i="${r._i}" title="Открыть этот билд в конструкторе с ценами">⇢ билд</button>` },
+    ], { sort: "total", empty: "Нет данных — включите загрузку киллборда" });
+    this.demand = makeTable($("#kb-demand", el), [
+      { key: "name", title: "Предмет", html: (r) => itemCell(r) },
+      { key: "lost", title: "Потеряно", num: true },
+      { key: "price", title: "Цена", num: true, html: (r) => fmt(r.price) },
+      { key: "turnover", title: "Оборот", num: true, html: (r) => fmt(r.turnover) },
+    ], { sort: "turnover", empty: "—" });
+    $("#kb-builds", el).addEventListener("click", (e) => {
+      const b = e.target.closest(".kb-import");
+      if (!b) return;
+      const row = this.last.builds[Number(b.dataset.i)];
+      saveSettings({ name: names(row), slots: row.example }, BUILD_IMPORT);
+      App.go("build");
+    });
+    $("#kb-enabled", el).addEventListener("change", async (e) => { await apiPost("/api/killboard", { enabled: e.target.checked }); setTimeout(() => this.refresh(el), 1500); });
+    $("#kb-region", el).addEventListener("change", async (e) => { await apiPost("/api/killboard", { region: e.target.value }); this.refresh(el); });
+    $("#kb-fetch", el).addEventListener("click", async () => { await apiPost("/api/killboard", { action: "fetch" }); setTimeout(() => this.refresh(el), 2000); });
+    this.refresh(el);
+  },
+  async refresh(el) {
+    try {
+      const r = await api("/api/killboard", this.form.read());
+      this.last = r;
+      r.builds.forEach((b, i) => { b._i = i; });
+      const sel = $("#kb-region", el);
+      if (!sel.options.length) sel.innerHTML = r.regions.map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("");
+      sel.value = r.region;
+      $("#kb-enabled", el).checked = r.enabled;
+      const st = r.status;
+      $("#kb-status", el).innerHTML = `Сохранено событий: ${fmt(r.stored)}${r.latest ? `, последнее ${age(r.latest, r.now)} назад` : ""}`
+        + (st.last_fetch_at ? ` · загрузка ${age(st.last_fetch_at, r.now)} назад (+${fmt(st.last_new)})` : "")
+        + (st.running ? " · загружаю…" : "") + (st.error ? ` · <span class="bad">ошибка: ${esc(st.error)}</span>` : "")
+        + ` · в выборке боёв: ${fmt(r.events)}`;
+      this.builds.set(r.builds);
+      this.demand.set(r.demand);
+      const slotNames = { mainhand: "Оружие", armor: "Броня", head: "Голова", shoes: "Обувь", offhand: "Вторая рука", cape: "Плащ" };
+      $("#kb-popular", el).innerHTML = Object.entries(slotNames).filter(([s]) => r.popular[s]).map(([s, t]) =>
+        `<div class="card"><div class="l">${esc(t)}</div><ol>${r.popular[s].slice(0, 5).map((i) => `<li>${esc(i.name)} <span class="muted">× ${fmt(i.count)}</span></li>`).join("")}</ol></div>`).join("");
+    } catch (e) { summaryLine($("#kb-status", el), "", e.message); }
+  },
+});

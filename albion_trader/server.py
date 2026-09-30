@@ -41,6 +41,8 @@ from .window import CompanionWindow
 from .chain import ChainParams, build_chain, items_in_chain
 from . import builds as builds_mod
 from . import destiny as destiny_mod
+from . import killboard as killboard_mod
+from .killboard import KillboardFetcher
 from .gamedata import GAMEDATA_VERSION, GameData
 from .gamedata import download as download_gamedata
 from .items import download_catalog
@@ -68,6 +70,8 @@ DEFAULT_SETTINGS = {
     "discord_enabled": False,
     "discord_webhook": "",
     "notify_kinds": [],          # пусто — все типы оповещений
+    "killboard_enabled": False,  # загрузка киллборда из официального API (внешний запрос)
+    "killboard_region": "europe",
 }
 
 
@@ -114,6 +118,7 @@ class App:
         with self.conn() as conn:
             activity_mod.init(conn)
             builds_mod.init(conn)
+            killboard_mod.init(conn)
         self.activity = Activity(self.conn, self.write_lock, index_to_item=self.catalog.index)
         self.activity.attach(self.albion)
         self.albion.on("character", self._remember_character)
@@ -127,6 +132,7 @@ class App:
         self.world.attach(self.albion)
         self.sniffer: Sniffer | None = None
         self.window = CompanionWindow("http://127.0.0.1:8484", Path(config.db_path).parent / "companion-profile")
+        self.killboard = KillboardFetcher(self.conn, self.write_lock, self.settings)
 
     # --- окно-компаньон -------------------------------------------------
     def api_window(self, _q) -> dict:
@@ -792,6 +798,56 @@ class App:
             m["name"] = market_info(m["market"])["name"]
         return {"now": now, "build": build, **res}
 
+    # --- киллборд ---------------------------------------------------------
+    def base_name(self, base: str) -> str:
+        for t in (4, 5, 6, 7, 8, 3, 2, 1):
+            item = f"T{t}_{base}"
+            name = self.catalog.name(item)
+            if name != item:
+                return destiny_mod.strip_tier(name)
+        name = self.catalog.name(base)
+        return destiny_mod.strip_tier(name) if name != base else base
+
+    def api_killboard(self, q) -> dict:
+        s = self.settings()
+        region = q.get("region") or s.get("killboard_region") or "europe"
+        if region not in killboard_mod.REGIONS:
+            raise ApiError("неизвестный сервер")
+        now = int(time.time())
+        since = now - int(min(max(_float(q.get("hours"), 24), 0.1), 24 * 7) * 3600)
+        mode = q.get("mode") if q.get("mode") in ("solo", "group") else "all"
+        with self.conn() as conn:
+            report = killboard_mod.meta_report(conn, region, since, _float(q.get("min_ip"), 0), mode,
+                                               self.value_of_factory(conn))
+            stored = conn.execute("SELECT COUNT(*), MAX(ts) FROM kb_events WHERE region = ?", (region,)).fetchone()
+        for b in report["builds"]:
+            b["names"] = {slot: self.base_name(base) if base else "" for slot, base in b["signature"].items()}
+        for slot, items in report["popular"].items():
+            for it in items:
+                it["name"] = self.base_name(it["base"])
+        for d in report["demand"]:
+            d["name"] = self.catalog.name(d["item_id"])
+        return {"now": now, "region": region, "enabled": bool(s.get("killboard_enabled")),
+                "regions": [[k, v[0]] for k, v in killboard_mod.REGIONS.items()],
+                "stored": stored[0], "latest": stored[1], "status": dict(self.killboard.status), **report}
+
+    def api_killboard_post(self, _q, body) -> dict:
+        body = body if isinstance(body, dict) else {}
+        changes = {}
+        if "enabled" in body:
+            changes["killboard_enabled"] = bool(body["enabled"])
+        if "region" in body:
+            if body["region"] not in killboard_mod.REGIONS:
+                raise ApiError("неизвестный сервер")
+            changes["killboard_region"] = body["region"]
+        if changes:
+            with self.write_lock, self.conn() as conn:
+                db.set_settings(conn, changes)
+        if body.get("action") == "fetch" or changes.get("killboard_enabled"):
+            self.killboard.fetch_async()
+        return {"enabled": bool(self.settings().get("killboard_enabled")),
+                "region": self.settings().get("killboard_region"), "status": dict(self.killboard.status)}
+
     def api_enchant(self, q) -> dict:
         if not self.gamedata:
             return self._no_gamedata()
@@ -981,6 +1037,7 @@ def make_handler(app: App):
         "/api/window": app.api_window,
         "/api/chain": app.api_chain,
         "/api/builds": app.api_builds,
+        "/api/killboard": app.api_killboard,
     }
 
     post_api = {
@@ -994,6 +1051,7 @@ def make_handler(app: App):
         "/api/window": app.api_window_post,
         "/api/builds": app.api_builds_post,
         "/api/build-price": app.api_build_price,
+        "/api/killboard": app.api_killboard_post,
     }
     # Запускают программы на этом компьютере — только для запросов с него же.
     local_only = {"/api/window", "/api/system", "/api/update-opcodes"}
@@ -1173,6 +1231,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
     if config.capture:
         app.start_capture()
     app.notifier.start()
+    app.killboard.start()
     if config.fetch_reference:
         app.fetch_reference_async()
     httpd = ThreadingHTTPServer((host, port), make_handler(app))
