@@ -38,6 +38,7 @@ DEFAULT_OPCODES = {
     "get_mail_infos": 174,
     "read_mail": 176,
     "gold_market_get_average_info": 250,
+    "move": 21,                   # свой запрос движения (позиция для радара)
 }
 
 # Номера событий из client/events.go (сверены со StatisticsAnalysisTool).
@@ -58,8 +59,21 @@ DEFAULT_EVENTS = {
     "loot_chest_opened": 395,
     "redzone_world_map_event": 480,
     "festivities_update": 519,
+    # Радар: объекты вокруг персонажа (radar.py). Номера из того же events.go.
+    "leave": 1,
+    "move": 3,
+    "teleport": 4,
+    "health_update": 6,
+    "new_character": 29,
+    "new_simple_harvestable_object_list": 39,
+    "new_harvestable_object": 40,
+    "new_silver_object": 44,
+    "harvestable_change_state": 46,
+    "mob_change_state": 47,
+    "new_mob": 123,
+    "new_treasure_chest": 394,
 }
-EVENT_MOVE = 3  # самое частое событие (движение) — не разбираем
+EVENT_MOVE = 3  # самое частое событие (движение) — разбираем, только пока открыт радар
 
 HISTORY_CACHE_SIZE = 1024
 ENCRYPTION_WINDOW = 3.0
@@ -180,6 +194,9 @@ class AlbionState:
         # Время отправки запросов рынка, на которые ещё не пришёл ответ.
         # Игра шлёт по 4 запроса на один просмотр, поэтому считаем штучно.
         self.pending_market_requests: list[float] = []
+        # До какого времени разбирать события движения (их больше всего) —
+        # радар продлевает срок, пока его смотрят.
+        self.moves_until = 0.0
         self._last_location_warning = 0.0
         self.stats = {
             "location": "", "zone": "", "orders": 0, "order_batches": 0, "history_batches": 0,
@@ -219,7 +236,7 @@ class AlbionState:
     # --- подписчики ---------------------------------------------------
     def on(self, name: str, fn: Callable) -> None:
         """Подписка: ``request:<операция>``, ``response:<операция>``, ``event:<событие>``,
-        ``my_orders`` (kind, orders), ``location`` (рынок), ``zone`` (зона, предыдущая зона),
+        ``event`` (код, параметры) — любое событие, ``my_orders`` (kind, orders), ``location`` (рынок), ``zone`` (зона, предыдущая зона),
         ``character`` (имя)."""
         self._listeners.setdefault(name, []).append(fn)
 
@@ -233,6 +250,10 @@ class AlbionState:
     @staticmethod
     def wants_event(code: int) -> bool:
         return code != EVENT_MOVE
+
+    def accepts_event(self, code: int) -> bool:
+        """Фильтр парсера: движение пропускается, пока радар выключен."""
+        return code != EVENT_MOVE or self.clock() < self.moves_until
 
     # --- колбэки парсера -----------------------------------------------
     def on_request(self, op_code: int, params: dict) -> None:
@@ -296,6 +317,9 @@ class AlbionState:
         v = _as_int(params.get(252))
         code = code if v is None else v
         name = self._event_names.get(code)
+        if self._listeners.get("event"):
+            with self.lock:
+                self._fire("event", code, params)
         if not name:
             return
         with self.lock:

@@ -480,7 +480,7 @@ def check_http(r: Report, url: str) -> None:
     r.section("12. Ответы API работающей программы по вкладкам")
     paths = ["/api/session", "/api/chain?item=T4_BAG", "/api/builds", "/api/killboard", "/api/destiny",
              "/api/avalon", "/api/dungeons", "/api/economy", "/api/window", "/api/deals", "/api/fastsell",
-             "/api/craft", "/api/zones", "/api/loot", "/api/world"]
+             "/api/craft", "/api/zones", "/api/loot", "/api/world", "/api/radar"]
     for p in paths:
         try:
             _, ms = _get(url + p, 60)

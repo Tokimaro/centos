@@ -30,6 +30,7 @@ OPERATION_NAMES = {
     "get_mail_infos": "opGetMailInfos",
     "read_mail": "opReadMail",
     "gold_market_get_average_info": "opGoldMarketGetAverageInfo",
+    "move": "opMove",
 }
 EVENT_NAMES = {
     "take_silver": "evTakeSilver",
@@ -48,6 +49,18 @@ EVENT_NAMES = {
     "loot_chest_opened": "evLootChestOpened",
     "redzone_world_map_event": "evRedZoneWorldMapEvent",
     "festivities_update": "evFestivitiesUpdate",
+    "leave": "evLeave",
+    "move": "evMove",
+    "teleport": "evTeleport",
+    "health_update": "evHealthUpdate",
+    "new_character": "evNewCharacter",
+    "new_simple_harvestable_object_list": "evNewSimpleHarvestableObjectList",
+    "new_harvestable_object": "evNewHarvestableObject",
+    "new_silver_object": "evNewSilverObject",
+    "harvestable_change_state": "evHarvestableChangeState",
+    "mob_change_state": "evMobChangeState",
+    "new_mob": "evNewMob",
+    "new_treasure_chest": "evNewTreasureChest",
 }
 
 _START = re.compile(r"^(\w+)\s+\w+Type\s*=\s*iota\s*$")

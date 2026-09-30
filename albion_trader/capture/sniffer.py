@@ -142,7 +142,7 @@ class Sniffer:
         self._record = None
         # Движение (самое частое событие) не разбираем вовсе.
         self.parser = PhotonParser(state.on_request, state.on_response, state.on_event,
-                                   state.on_encrypted, event_filter=state.wants_event)
+                                   state.on_encrypted, event_filter=state.accepts_event)
         self.parser_lock = threading.Lock()
         self.queue: queue.Queue = queue.Queue(maxsize=QUEUE_LIMIT)
         self.stop_event = threading.Event()

@@ -38,6 +38,10 @@ def value(v) -> bytes:
         return bytes([5]) + struct.pack("<f", v)
     if isinstance(v, str):
         return bytes([7]) + string(v)
+    if isinstance(v, bytes):
+        return bytes([0x40 | 3]) + varuint(len(v)) + v
+    if isinstance(v, list) and v and all(isinstance(x, float) for x in v):
+        return bytes([0x40 | 5]) + varuint(len(v)) + b"".join(struct.pack("<f", x) for x in v)
     if isinstance(v, list) and all(isinstance(x, str) for x in v):
         return bytes([0x40 | 7]) + varuint(len(v)) + b"".join(string(x) for x in v)
     if isinstance(v, list) and all(isinstance(x, int) for x in v):

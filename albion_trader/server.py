@@ -27,6 +27,7 @@ from . import mytrades as mytrades_mod
 from . import world as world_mod
 from .activity import Activity
 from .world import World
+from .radar import Radar
 from .alerts import AlertEngine
 from .notify import Notifier
 from .mytrades import MyTrades
@@ -134,6 +135,8 @@ class App:
                            alert=lambda conn, key, title, text, payload:
                            self.alerts.trigger_kind(conn, "world_event", key, title, text, payload))
         self.world.attach(self.albion)
+        self.radar = Radar(Path(config.db_path).with_name("radar.json"))
+        self.radar.attach(self.albion)
         self.sniffer: Sniffer | None = None
         self.window = CompanionWindow("http://127.0.0.1:8484", Path(config.db_path).parent / "companion-profile")
         self.killboard = KillboardFetcher(self.conn, self.write_lock, self.settings)
@@ -428,6 +431,12 @@ class App:
         now = int(time.time())
         with self.conn() as conn:
             return {"now": now, **world_mod.report(conn, now)}
+
+    def api_radar(self, _q) -> dict:
+        snap = self.radar.snapshot()
+        zone = snap["me"].get("zone")
+        snap["me"]["zone_name"] = self.zone_name(zone) if zone else ""
+        return snap
 
     def api_kills(self, q) -> dict:
         now = int(time.time())
@@ -1155,6 +1164,7 @@ def make_handler(app: App):
         "/api/kills": app.api_kills,
         "/api/zones": app.api_zones,
         "/api/world": app.api_world,
+        "/api/radar": app.api_radar,
         "/api/system": app.api_system,
         "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,

@@ -19,7 +19,7 @@ except ImportError:  # запуск через discover -s tests
 GET_ENDPOINTS = ["/api/deals", "/api/prices", "/api/fastsell", "/api/flips", "/api/history",
                  "/api/underpriced", "/api/bm-demand", "/api/craft", "/api/enchant", "/api/journals",
                  "/api/farming", "/api/alerts", "/api/my/orders", "/api/gold", "/api/session",
-                 "/api/loot", "/api/character", "/api/kills", "/api/zones", "/api/world",
+                 "/api/loot", "/api/character", "/api/kills", "/api/zones", "/api/world", "/api/radar",
                  "/api/my/trades", "/api/items", "/api/chain", "/api/builds", "/api/killboard", "/api/destiny",
                  "/api/avalon", "/api/dungeons", "/api/economy", "/api/window"]
 PARAMS = ["max_age", "min_profit", "min_margin", "limit", "hours", "days", "budget", "tax",
