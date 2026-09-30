@@ -726,7 +726,7 @@ class App:
         if not item:
             raise ApiError("не указан предмет")
         now = int(time.time())
-        buy_markets = [m for m in _split(q.get("buy_markets")) if m in MARKETS and m != "black_market"] \
+        buy_markets = list(dict.fromkeys(m for m in _split(q.get("buy_markets")) if m in MARKETS and m != "black_market")) \
             or [q.get("craft_city") or "martlock"]
         craft_city = q.get("craft_city") or buy_markets[0]
         sell = q.get("sell_market") or craft_city
@@ -790,7 +790,8 @@ class App:
         except ValueError as e:
             raise ApiError(str(e)) from None
         markets = [m for m in (body.get("markets") or []) if isinstance(m, str) and m in MARKETS
-                   and m != "black_market"][:LIST_LIMIT] or DEFAULT_CITIES + ["caerleon"]
+                   and m != "black_market"][:LIST_LIMIT] or DEFAULT_CITIES + ["caerleon", "brecilien"]
+        markets = list(dict.fromkeys(markets))      # без повторов — иначе город посчитается дважды
         now = int(time.time())
         items = sorted({s["item"] for s in build["slots"].values()})
         with self.conn() as conn:

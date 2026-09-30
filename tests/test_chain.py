@@ -71,6 +71,14 @@ class ChainTest(unittest.TestCase):
             return 1 + max((depth(c) for c in n["children"]), default=0)
         self.assertLess(depth(res["tree"]), 6)       # цикл T3_LEATHER ↔ T4_LEATHER оборван
 
+    def test_top_with_recipe_but_missing_resource(self):
+        # Сумка продаётся и покупается, но ткани нет — себестоимость не посчитать, причина названа.
+        book = PriceBook([offer("T4_BAG", 8000), offer("T4_LEATHER", 300), request("T4_BAG", 9000)])
+        res = build_chain(gd(), book, "T4_BAG", 1, self.params())
+        self.assertEqual(res["tree"]["decision"], "missing")
+        self.assertIsNone(res["cost"])
+        self.assertIn("T4_CLOTH", res["missing"])
+
     def test_focus_raises_return_and_counts_focus(self):
         book = PriceBook([offer("T4_HIDE", 50), offer("T3_LEATHER", 100), offer("T4_CLOTH", 200)])
         plain = build_chain(gd(), book, "T4_BAG", 1, self.params())

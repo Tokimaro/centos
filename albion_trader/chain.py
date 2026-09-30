@@ -88,8 +88,9 @@ def _node(gd: GameData, book: PriceBook, item: str, qty: float, p: ChainParams, 
             node["craft_total"] = total + fee + silver
             node["craft_unit"] = node["craft_total"] / qty if qty else None
     buy, craft = node["buy_total"], node["craft_total"]
-    if top and craft is not None:
-        decision = "craft"           # верхний предмет делаем — иначе это просто перепродажа
+    if top and node["kind"] is not None:
+        # Верхний предмет делаем (иначе это просто перепродажа); не хватает цен ресурсов — «нет цены».
+        decision = "craft" if craft is not None else "missing"
     elif buy is None and craft is None:
         decision = "missing"
     elif craft is None or (buy is not None and buy <= craft):

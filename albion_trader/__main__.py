@@ -57,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("update-items", help="скачать названия предметов (RU/EN) и игровые таблицы из ao-bin-dumps")
 
+    p_check = sub.add_parser("check", help="самопроверка всех вкладок на ваших данных (отчёт в data/check_report.txt)")
+    p_check.add_argument("--url", default="http://127.0.0.1:8484", help="адрес работающей программы (если запущена)")
+    p_check.add_argument("--out", help="куда записать отчёт (по умолчанию data/check_report.txt)")
+
     p_clean = sub.add_parser("cleanup", help="удалить истёкшие и устаревшие заказы")
     p_clean.add_argument("--retention-hours", type=float, default=72)
     return parser
@@ -134,6 +138,19 @@ def main(argv=None) -> int:
               f"страниц без известной локации: {st['no_location_drops']}")
         if st["encrypted_at"]:
             print("Внимание: данные рынка в записи зашифрованы.")
+        return 0
+    if cmd == "check":
+        from .selfcheck import run as run_check
+        logging.basicConfig(level=logging.ERROR)
+        text, out = run_check(data_dir, args.url, args.out)
+        if sys.stdout is not None:
+            try:
+                print(text)
+            except UnicodeEncodeError:   # старая консоль Windows без UTF-8
+                print(text.encode("ascii", "replace").decode())
+            print(f"Отчёт сохранён: {out}")
+        if getattr(sys, "frozen", False) and hasattr(os, "startfile"):
+            os.startfile(out)            # у .exe нет консоли — открываем отчёт в Блокноте
         return 0
     if cmd == "cleanup":
         db.init_db(db_path)

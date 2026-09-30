@@ -155,6 +155,15 @@ class BuildApiTest(unittest.TestCase):
         self.assertTrue(staff["spec_name"].startswith("Бой:"))
         self.assertAlmostEqual(res["average_ip"], (900 * 2 + 900) / 6)
 
+    def test_default_markets_not_duplicated(self):
+        res = self.post("/api/build-price", {"build": {"slots": {"cape": {"item": "T6_CAPE"}}}})
+        names = [m["market"] for m in res["markets"]]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIn("caerleon", names)
+        res = self.post("/api/build-price", {"build": {"slots": {"cape": {"item": "T6_CAPE"}}},
+                                             "markets": ["martlock", "martlock"]})
+        self.assertEqual([(m["market"], m["total"]) for m in res["markets"]], [("martlock", 40000)])
+
     def test_bad_input_400(self):
         for path, body in (("/api/builds", {"action": "save", "build": {"slots": {"ring": {}}}}),
                            ("/api/builds", {"action": "delete", "id": "x"}),
