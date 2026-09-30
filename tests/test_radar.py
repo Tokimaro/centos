@@ -123,6 +123,31 @@ class RadarTest(unittest.TestCase):
                          (130, 31, 3))
         self.assertEqual(load_opcodes(None)["events"]["new_mob"], 123)
 
+    def test_player_details_like_zqradar(self):
+        self.app.catalog.index.update({"7": "T8_2H_FIRESTAFF", "9": "T4_MOUNT_HORSE"})
+        self.feed(pb.packet(pb.response(2, {0: 1, 2: "Me", 8: "0201", 9: [0.0, 0.0]})),
+                  event(self.ev["new_character"], {0: 5, 1: "Grom", 8: "Wolves", 49: "NORD", 53: 255,
+                                                   12: [3.0, 4.0], 22: 900.0, 23: 2000.0, 40: [7, 0, 0, 0, 0, 0, 0, 9]}),
+                  event(self.ev["new_character"], {0: 6, 1: "Lira", 53: 1, 12: [1.0, 1.0]}))
+        self.feed(event(self.ev["mounted"], {0: 5, 11: True}),
+                  event(self.ev["mounted"], {0: 6, 10: -1}),
+                  event(self.ev["regeneration_health_changed"], {0: 5, 2: 1500.0, 3: 2100.0}),
+                  event(self.ev["change_flagging_finished"], {0: 6, 1: 4}))
+        players = {e["id"]: e for e in self.radar()["entities"]}
+        grom, lira = players[5], players[6]
+        self.assertEqual((grom["alliance"], grom["faction"], grom["flag"]), ("NORD", 255, "враждебный"))
+        self.assertTrue(grom["mounted"])
+        self.assertEqual((grom["health"], grom["max_health"]), (1500.0, 2100.0))
+        self.assertEqual([(i["slot"], i["id"]) for i in grom["equipment"]],
+                         [("оружие", "T8_2H_FIRESTAFF"), ("маунт", "T4_MOUNT_HORSE")])
+        self.assertTrue(lira["mounted"])
+        self.assertEqual((lira["faction"], lira["flag"]), (4, "Форт Стерлинг"))
+        self.feed(event(self.ev["mounted"], {0: 5, 11: False}),
+                  event(self.ev["character_equipment_changed"], {0: 5, 2: [9]}))
+        grom = {e["id"]: e for e in self.radar()["entities"]}[5]
+        self.assertFalse(grom["mounted"])
+        self.assertEqual([i["id"] for i in grom["equipment"]], ["T4_MOUNT_HORSE"])
+
     def test_position_helpers(self):
         self.assertEqual(as_position([1.5, 2.5]), (1.5, 2.5))
         self.assertIsNone(as_position([1, 2]))                   # целые — не координаты

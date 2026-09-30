@@ -71,7 +71,14 @@ DEFAULT_EVENTS = {
     "harvestable_change_state": 46,
     "mob_change_state": 47,
     "new_mob": 123,
-    "new_treasure_chest": 394,
+    "new_treasure_chest": 117,
+    # Сведения об игроках (как в ZQRadar): смена снаряжения, регенерация HP,
+    # маунт, PvP-флаг. Номера до ~165 совпадают с ZQRadar, дальше сдвинуты на
+    # 5–6 — уточняются командой update-opcodes по именам из events.go.
+    "character_equipment_changed": 90,
+    "regeneration_health_changed": 91,
+    "mounted": 209,
+    "change_flagging_finished": 365,
 }
 EVENT_MOVE = 3  # самое частое событие (движение) — разбираем, только пока открыт радар
 

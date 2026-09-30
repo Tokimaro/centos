@@ -303,6 +303,8 @@ class ZoneMaps:
         name = self.name_of(cid)
         if name and name not in (cid, "—"):
             return name
+        if self._index is None and not self.index_path.exists():
+            return name or cid      # списка зон ещё нет — не качаем его ради названия
         return (self.index().get(cid) or {}).get("name") or cid
 
     # --- шаблоны ---------------------------------------------------------------

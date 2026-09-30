@@ -136,7 +136,10 @@ class App:
                            alert=lambda conn, key, title, text, payload:
                            self.alerts.trigger_kind(conn, "world_event", key, title, text, payload))
         self.world.attach(self.albion)
-        self.radar = Radar(Path(config.db_path).with_name("radar.json"))
+        self.radar = Radar(Path(config.db_path).with_name("radar.json"),
+                           item_of=lambda i: self.catalog.index.get(str(i)),
+                           item_name=lambda iid: self.catalog.name(iid),
+                           zone_type=self._zone_type)
         self.radar.attach(self.albion)
         self.sniffer: Sniffer | None = None
         self.window = CompanionWindow("http://127.0.0.1:8484", Path(config.db_path).parent / "companion-profile")
@@ -444,6 +447,15 @@ class App:
         with self.conn() as conn:
             return {"now": now, **world_mod.report(conn, now)}
 
+    def _zone_type(self, zone: str) -> str:
+        t = self.gamedata.cluster_type(zone)
+        if not t:
+            try:
+                t = (self.zonemaps.index().get(zone) or {}).get("type", "") if self.zonemaps.index_path.exists() else ""
+            except (OSError, ValueError):
+                t = ""
+        return t
+
     def api_zonemap(self, q) -> dict:
         """Схема текущей (или указанной) зоны для фона радара; качается при первом запросе."""
         zone = q.get("zone") or self.radar.me.get("zone") or ""
@@ -454,7 +466,7 @@ class App:
     def api_radar(self, _q) -> dict:
         snap = self.radar.snapshot()
         zone = snap["me"].get("zone")
-        snap["me"]["zone_name"] = self.zone_name(zone) if zone else ""
+        snap["me"]["zone_name"] = self.zonemaps.zone_name(zone) if zone else ""
         return snap
 
     def api_kills(self, q) -> dict:

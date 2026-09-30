@@ -44,8 +44,12 @@ DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
     "leave": {"id": 0},
     "move": {"id": 0, "position": [1, 4]},
     "teleport": {"id": 0, "position": [1, 2]},
-    "new_character": {"id": 0, "name": 1, "guild": 8, "alliance": 51, "faction": 53,
-                      "position": [12, 13, 14], "health": 22, "max_health": 23},
+    "new_character": {"id": 0, "name": 1, "guild": 8, "alliance": 49, "faction": 53,
+                      "position": [12, 13, 14], "health": 22, "max_health": 23, "equipment": 40},
+    "character_equipment_changed": {"id": 0, "equipment": 2},
+    "regeneration_health_changed": {"id": 0, "health": 2, "max_health": 3},
+    "mounted": {"id": 0, "mounted": 11, "mounted_alt": 10},
+    "change_flagging_finished": {"id": 0, "faction": 1},
     "new_mob": {"id": 0, "type_id": 1, "position": [7, 8], "health": 13, "max_health": 14,
                 "name": 32, "enchant": 33},
     "mob_change_state": {"id": 0, "enchant": 1},
@@ -90,7 +94,20 @@ class Entity:
     faction: int | None = None
     health: float | None = None
     max_health: float | None = None
+    mounted: bool | None = None
+    equipment: list = field(default_factory=list)   # индексы предметов (AlbionId)
     updated: float = 0.0
+
+
+# PvP-флаг игрока (NewCharacter[53]): 0 — без флага, 1–6 — фракция города, 255 — враждебный.
+FACTIONS = {0: "", 1: "Мартлок", 2: "Лимхерст", 3: "Бриджвотч", 4: "Форт Стерлинг", 5: "Тетфорд",
+            6: "Карлеон", 255: "враждебный"}
+# Слоты снаряжения в NewCharacter[40] по порядку.
+EQUIPMENT_SLOTS = ("оружие", "вторая рука", "голова", "броня", "обувь", "сумка", "плащ", "маунт", "зелье", "еда")
+
+
+def _equipment(v) -> list:
+    return [(_int(x) or 0) for x in _seq(v)][:len(EQUIPMENT_SLOTS)]
 
 
 # --- значения из параметров ------------------------------------------------
@@ -163,8 +180,14 @@ def describe(v) -> str:
 
 # --- радар -----------------------------------------------------------------
 class Radar:
-    def __init__(self, params_path: str | Path | None = None, clock: Callable[[], float] = time.time):
+    def __init__(self, params_path: str | Path | None = None, clock: Callable[[], float] = time.time,
+                 item_of: Callable[[int], str | None] | None = None,
+                 item_name: Callable[[str], str] | None = None,
+                 zone_type: Callable[[str], str] | None = None):
         self.clock = clock
+        self.item_of = item_of or (lambda _i: None)
+        self.item_name = item_name or (lambda iid: iid)
+        self.zone_type = zone_type or (lambda _z: "")
         self.lock = threading.RLock()
         self.entities: dict[int, Entity] = {}
         self.me = {"id": None, "name": "", "x": 0.0, "y": 0.0, "zone": ""}
@@ -264,8 +287,40 @@ class Radar:
         self._put(Entity(id=_int(p.get(keys["id"])), kind=KIND_PLAYER, event="new_character",
                          name=_str(p.get(keys.get("name"))), guild=_str(p.get(keys.get("guild"))),
                          alliance=_str(p.get(keys.get("alliance"))), faction=_int(p.get(keys.get("faction"))),
-                         health=_num(p.get(keys.get("health"))), max_health=_num(p.get(keys.get("max_health")))),
+                         health=_num(p.get(keys.get("health"))), max_health=_num(p.get(keys.get("max_health"))),
+                         equipment=_equipment(p.get(keys.get("equipment")))),
                   p, keys)
+
+    def _player(self, p, keys) -> Entity | None:
+        ent = self.entities.get(_int(p.get(keys["id"])))
+        return ent if ent and ent.kind == KIND_PLAYER else None
+
+    def _ev_character_equipment_changed(self, p, keys):
+        ent = self._player(p, keys)
+        if ent:
+            ent.equipment = _equipment(p.get(keys.get("equipment")))
+
+    def _ev_regeneration_health_changed(self, p, keys):
+        ent = self.entities.get(_int(p.get(keys["id"])))
+        if ent:
+            hp, mx = _num(p.get(keys.get("health"))), _num(p.get(keys.get("max_health")))
+            if hp is not None:
+                ent.health = hp
+            if mx:
+                ent.max_health = mx
+
+    def _ev_mounted(self, p, keys):
+        """Маунт: параметр 11 — true, либо 10 == -1 (так делает ZQRadar)."""
+        ent = self._player(p, keys)
+        if ent:
+            flag, alt = p.get(keys.get("mounted")), _int(p.get(keys.get("mounted_alt")))
+            ent.mounted = flag is True or flag == "true" or alt == -1
+
+    def _ev_change_flagging_finished(self, p, keys):
+        ent = self._player(p, keys)
+        faction = _int(p.get(keys.get("faction")))
+        if ent and faction is not None:
+            ent.faction = faction
 
     def _ev_new_mob(self, p, keys):
         self._put(Entity(id=_int(p.get(keys["id"])), kind=KIND_MOB, event="new_mob",
@@ -342,6 +397,14 @@ class Radar:
         ent.updated = self.clock()
         self.entities[ent.id] = ent
 
+    def _items(self, indices: list) -> list:
+        out = []
+        for slot, idx in zip(EQUIPMENT_SLOTS, indices):
+            iid = self.item_of(idx) if idx > 0 else None
+            if iid:
+                out.append({"slot": slot, "id": iid, "name": self.item_name(iid)})
+        return out
+
     # --- снимок для интерфейса ---------------------------------------------
     def snapshot(self, touch: bool = True) -> dict:
         if touch:
@@ -355,7 +418,11 @@ class Radar:
             for e in self.entities.values():
                 d = asdict(e)
                 d["dist"] = round(math.hypot(e.x - me["x"], e.y - me["y"]), 1)
+                if e.kind == KIND_PLAYER:
+                    d["equipment"] = self._items(e.equipment)
+                    d["flag"] = FACTIONS.get(e.faction, "")
                 ents.append(d)
+            me["zone_type"] = self.zone_type(me["zone"]) if me["zone"] else ""
             names = {v: k for k, v in (self.state.ev.items() if self.state else ())}
             codes = [{"code": c, "name": names.get(c), **info} for c, info in sorted(self.codes.items())]
         ents.sort(key=lambda d: d["dist"])

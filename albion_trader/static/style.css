@@ -242,9 +242,12 @@ body.companion .ec-grid { grid-template-columns: 1fr; }
 .radar-side .radar-opts label { display: flex; flex-direction: row; align-items: center; gap: 6px;
   margin: 3px 0; text-align: left; font-size: 13px; }
 .radar-side .radar-opts input { margin: 0; }
+.radar-side .radar-opts input[type=text], .radar-side .radar-opts select { flex: 1; min-width: 0; }
+.radar-side .radar-opts label[hidden] { display: none; }
 .radar-side input[type=range] { flex: 1; }
 .radar-side input[type=number] { width: 56px; }
-.radar-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.radar-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35); vertical-align: -1px; }
 .radar-list { flex: 1; overflow: auto; max-height: 40vh; }
 .radar-list > div { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid var(--border); }
 .radar-list > div > .muted { margin-left: auto; font-variant-numeric: tabular-nums; }

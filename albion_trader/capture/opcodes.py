@@ -61,6 +61,10 @@ EVENT_NAMES = {
     "mob_change_state": "evMobChangeState",
     "new_mob": "evNewMob",
     "new_treasure_chest": "evNewTreasureChest",
+    "character_equipment_changed": "evCharacterEquipmentChanged",
+    "regeneration_health_changed": "evRegenerationHealthChanged",
+    "mounted": "evMounted",
+    "change_flagging_finished": "evChangeFlaggingFinished",
 }
 
 _START = re.compile(r"^(\w+)\s+\w+Type\s*=\s*iota\s*$")
