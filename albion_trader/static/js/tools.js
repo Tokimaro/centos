@@ -479,3 +479,107 @@ App.tab({
     this.table.set(r.rows);
   },
 });
+
+// ---------- Картограф Дорог Авалона ----------
+function leftText(sec) {
+  if (sec === null || sec === undefined) return "неизвестно";
+  if (sec <= 0) return "закрылся";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return h ? `${h} ч ${m} мин` : `${m} мин`;
+}
+function zoneLabel(z) {
+  return `<span class="${z.road ? "road" : ""}">${esc(z.name || z.id)}</span>`;
+}
+function zonePicker(input) {
+  const id = `dlz-${Math.random().toString(36).slice(2)}`;
+  const list = document.createElement("datalist");
+  list.id = id;
+  input.setAttribute("list", id);
+  input.after(list);
+  input.addEventListener("input", debounce(async () => {
+    const q = input.value.trim();
+    if (q.length < 2) return;
+    try {
+      const r = await api("/api/avalon", { q, limit: 30 });
+      list.innerHTML = r.zones.map((z) => `<option value="${esc(z.name)}">${z.road ? "Дорога Авалона" : esc(z.type)}</option>`).join("");
+    } catch { /* подсказки необязательны */ }
+  }, 250));
+}
+
+App.tab({
+  id: "avalon", group: "tools", title: "Авалон", live: true,
+  init(el) {
+    el.innerHTML = `<p class="muted intro">Порталы Дорог Авалона: переход через портал запоминается сам (время жизни укажите вручную — в игре оно видно на портале), связи можно добавить и руками. Маршрут ищется по связям и обычным переходам карты.</p>
+      <div class="summary" id="av-zone"></div>
+      <form id="av-route" class="filters row">
+        <label class="grow">Откуда <input type="text" name="from" placeholder="текущая зона"></label>
+        <label class="grow">Куда <input type="text" name="to" placeholder="зона или город"></label>
+        <label class="inline"><input type="checkbox" name="static" checked> обычные переходы карты</label>
+        <button type="submit" class="primary">Маршрут</button>
+      </form>
+      <div id="av-route-out"></div>
+      <details class="tool-form" id="av-add-box"><summary>Добавить связь</summary>
+        <form id="av-add" class="filters row">
+          <label class="grow">Зона A <input type="text" name="a" placeholder="например, Ouyos-Aoeuam"></label>
+          <label class="grow">Зона B <input type="text" name="b"></label>
+          <label>Портал <select name="size"><option value="0">?</option><option value="2">на 2</option><option value="7">на 7</option><option value="20">на 20</option></select></label>
+          <label>Осталось, ч <input type="number" name="hours" min="0" step="1" value="0"></label>
+          <label>мин <input type="number" name="minutes" min="0" max="59" step="1" value="0"></label>
+          <label class="grow">Заметка <input type="text" name="note" maxlength="200"></label>
+          <button type="submit" class="primary">Добавить</button>
+        </form>
+      </details>
+      <h2>Связи</h2><div id="av-links"></div>`;
+    ["from", "to"].forEach((n) => zonePicker($(`#av-route [name=${n}]`, el)));
+    ["a", "b"].forEach((n) => zonePicker($(`#av-add [name=${n}]`, el)));
+    this.table = makeTable($("#av-links", el), [
+      { key: "a", title: "Связь", sort: (r) => r.a_info.name,
+        html: (r) => `${zoneLabel(r.a_info)} ↔ ${zoneLabel(r.b_info)}<span class="sub">${r.source === "auto" ? "замечен при переходе" : "добавлен вручную"}${r.note ? ` · ${esc(r.note)}` : ""}
+          <span class="row-actions"><button type="button" data-time="${r.id}">время</button><button type="button" data-del="${r.id}">убрать</button></span></span>` },
+      { key: "size", title: "Портал", num: true, html: (r) => r.size ? `на ${r.size}` : "?" },
+      { key: "left", title: "Осталось", num: true, sort: (r) => r.left ?? 1e12,
+        html: (r) => `<span class="${r.left !== null && r.left < 1800 ? "warn" : ""}">${leftText(r.left)}</span>` },
+    ], { sort: "left", asc: true, empty: "Связей нет — пройдите через портал или добавьте вручную" });
+    $("#av-route", el).addEventListener("submit", (e) => { e.preventDefault(); this.refresh(el); });
+    $("#av-add", el).addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        this.apply(el, await apiPost("/api/avalon", { action: "add", a: f.a.value, b: f.b.value, size: f.size.value,
+          hours: f.hours.value, minutes: f.minutes.value, note: f.note.value }));
+        f.reset();
+      } catch (err) { summaryLine($("#av-zone", el), "", err.message); }
+    });
+    $("#av-links", el).addEventListener("click", async (e) => {
+      const t = e.target.closest("[data-time]"), d = e.target.closest("[data-del]");
+      try {
+        if (d) this.apply(el, await apiPost("/api/avalon", { action: "delete", id: Number(d.dataset.del) }));
+        if (t) {
+          const row = this.rows.find((r) => r.id === Number(t.dataset.time));
+          const ans = prompt("Сколько осталось порталу (часы:минуты), например 3:20", "");
+          if (ans === null) return;
+          const [h, m] = ans.split(":").map((x) => Number(x) || 0);
+          this.apply(el, await apiPost("/api/avalon", { action: "update", id: row.id, size: row.size, hours: h, minutes: m, note: row.note }));
+        }
+      } catch (err) { summaryLine($("#av-zone", el), "", err.message); }
+    });
+    this.refresh(el);
+  },
+  async refresh(el) {
+    const f = $("#av-route", el);
+    const params = f.to.value.trim() ? { from: f.from.value.trim(), to: f.to.value.trim(), static: f.static.checked } : {};
+    try { this.apply(el, await api("/api/avalon", params)); } catch (e) { summaryLine($("#av-zone", el), "", e.message); }
+  },
+  apply(el, r) {
+    this.rows = r.links;
+    $("#av-zone", el).innerHTML = (r.zone ? `Вы сейчас: ${zoneLabel(r.zone)}` : "Текущая зона пока неизвестна — смените зону в игре.")
+      + (r.has_map === false ? ` <span class="warn">Нет карты мира — выполните update-items.</span>` : "");
+    const out = $("#av-route-out", el);
+    if (r.route) {
+      const rt = r.route;
+      out.innerHTML = `<div class="card route"><div class="l">Маршрут: ${rt.steps.length} переход(ов), из них порталов ${rt.portals}${rt.expires ? ` · ближайший портал закроется через ${leftText(rt.expires - r.now)}` : ""}</div>
+        <ol>${rt.zones.map((z, i) => `<li>${zoneLabel(z)}${i && rt.steps[i - 1].portal ? ` <span class="pill">портал${rt.steps[i - 1].size ? ` на ${rt.steps[i - 1].size}` : ""}</span>` : ""}</li>`).join("")}</ol></div>`;
+    } else out.innerHTML = r.route_error ? `<p class="warn">${esc(r.route_error)}</p>` : "";
+    this.table.set(r.links);
+  },
+});

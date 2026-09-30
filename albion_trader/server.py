@@ -43,6 +43,7 @@ from . import builds as builds_mod
 from . import destiny as destiny_mod
 from . import killboard as killboard_mod
 from .killboard import KillboardFetcher
+from . import avalon as avalon_mod
 from .gamedata import GAMEDATA_VERSION, GameData
 from .gamedata import download as download_gamedata
 from .items import download_catalog
@@ -120,6 +121,7 @@ class App:
             builds_mod.init(conn)
             killboard_mod.init(conn)
             destiny_mod.init(conn)
+            avalon_mod.init(conn)
         self.activity = Activity(self.conn, self.write_lock, index_to_item=self.catalog.index)
         self.activity.attach(self.albion)
         self.albion.on("character", self._remember_character)
@@ -134,6 +136,7 @@ class App:
         self.sniffer: Sniffer | None = None
         self.window = CompanionWindow("http://127.0.0.1:8484", Path(config.db_path).parent / "companion-profile")
         self.killboard = KillboardFetcher(self.conn, self.write_lock, self.settings)
+        self.albion.on("zone", self._on_zone)
 
     # --- окно-компаньон -------------------------------------------------
     def api_window(self, _q) -> dict:
@@ -232,6 +235,7 @@ class App:
         with self.write_lock, self.conn() as conn:
             res = db.cleanup(conn, self.config.retention_hours)
             res["alerts"] = self.alerts.cleanup(conn)
+            res["avalon_links"] = avalon_mod.cleanup(conn)
             return res
 
     # --- мои сделки -----------------------------------------------------
@@ -799,6 +803,65 @@ class App:
             m["name"] = market_info(m["market"])["name"]
         return {"now": now, "build": build, **res}
 
+    # --- Дороги Авалона ---------------------------------------------------
+    def _on_zone(self, zone: str, prev: str) -> None:
+        with self.write_lock, self.conn() as conn:
+            if avalon_mod.on_zone_change(conn, self.gamedata, zone, prev):
+                log.info("Дороги Авалона: связь %s ↔ %s", prev, zone)
+
+    def _zone_info(self, cid: str) -> dict:
+        return {"id": cid, "name": self.zone_name(cid), "type": self.gamedata.cluster_type(cid),
+                "road": avalon_mod.is_road(self.gamedata, cid)}
+
+    def api_avalon(self, q) -> dict:
+        now = int(time.time())
+        if q.get("q") is not None and q.get("q") != "":
+            return {"zones": avalon_mod.search_zones(self.gamedata, q.get("q"), _limit(q, 30))}
+        with self.conn() as conn:
+            rows = avalon_mod.links(conn, now)
+        for r in rows:
+            r["a_info"], r["b_info"] = self._zone_info(r["a"]), self._zone_info(r["b"])
+        out = {"now": now, "links": rows, "has_map": bool(self.gamedata.clusters),
+               "zone": self._zone_info(self.albion.zone) if self.albion.zone else None}
+        if q.get("from") or q.get("to"):
+            start = avalon_mod.resolve_zone(self.gamedata, q.get("from") or self.albion.zone)
+            goal = avalon_mod.resolve_zone(self.gamedata, q.get("to"))
+            if not start or not goal:
+                out["route_error"] = "не нашёл зону: " + ", ".join(
+                    x for x, z in ((q.get("from") or "текущая", start), (q.get("to") or "—", goal)) if not z)
+            else:
+                r = avalon_mod.route(self.gamedata, rows, start, goal, q.get("static", "1") != "0", now)
+                if r is None:
+                    out["route_error"] = "пути нет — добавьте связи"
+                else:
+                    r["zones"] = [self._zone_info(z) for z in r["zones"]]
+                    out["route"] = r
+        return out
+
+    def api_avalon_post(self, _q, body) -> dict:
+        body = body if isinstance(body, dict) else {}
+        action = body.get("action")
+        try:
+            size = int(_float(body.get("size"), 0))
+            hours = _float(body.get("hours"), 0) + _float(body.get("minutes"), 0) / 60
+            note = str(body.get("note") or "")
+            with self.write_lock, self.conn() as conn:
+                if action == "add":
+                    a = avalon_mod.resolve_zone(self.gamedata, str(body.get("a") or ""))
+                    b = avalon_mod.resolve_zone(self.gamedata, str(body.get("b") or ""))
+                    if not a or not b:
+                        raise ValueError("не нашёл зону — выберите из подсказок")
+                    avalon_mod.add_link(conn, a, b, size, hours, note)
+                elif action == "update":
+                    avalon_mod.update_link(conn, self._rule_id(body.get("id")), size, hours, note)
+                elif action == "delete":
+                    avalon_mod.delete_link(conn, self._rule_id(body.get("id")))
+                else:
+                    raise ValueError("action: add | update | delete")
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        return self.api_avalon({})
+
     # --- Доска судьбы ----------------------------------------------------
     def api_destiny(self, q) -> dict:
         now = int(time.time())
@@ -1070,6 +1133,7 @@ def make_handler(app: App):
         "/api/builds": app.api_builds,
         "/api/killboard": app.api_killboard,
         "/api/destiny": app.api_destiny,
+        "/api/avalon": app.api_avalon,
     }
 
     post_api = {
@@ -1085,6 +1149,7 @@ def make_handler(app: App):
         "/api/build-price": app.api_build_price,
         "/api/killboard": app.api_killboard_post,
         "/api/destiny": app.api_destiny_post,
+        "/api/avalon": app.api_avalon_post,
     }
     # Запускают программы на этом компьютере — только для запросов с него же.
     local_only = {"/api/window", "/api/system", "/api/update-opcodes"}
