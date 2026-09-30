@@ -34,6 +34,8 @@ def value(v) -> bytes:
     if isinstance(v, int):
         # 32-битные — compressed int (9), большие (тики времени) — compressed long (10).
         return bytes([9 if -2**31 <= v < 2**31 else 10]) + zigzag(v)
+    if isinstance(v, float):
+        return bytes([5]) + struct.pack("<f", v)
     if isinstance(v, str):
         return bytes([7]) + string(v)
     if isinstance(v, list) and all(isinstance(x, str) for x in v):

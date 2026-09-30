@@ -119,6 +119,7 @@ class App:
             activity_mod.init(conn)
             builds_mod.init(conn)
             killboard_mod.init(conn)
+            destiny_mod.init(conn)
         self.activity = Activity(self.conn, self.write_lock, index_to_item=self.catalog.index)
         self.activity.attach(self.albion)
         self.albion.on("character", self._remember_character)
@@ -798,6 +799,36 @@ class App:
             m["name"] = market_info(m["market"])["name"]
         return {"now": now, "build": build, **res}
 
+    # --- Доска судьбы ----------------------------------------------------
+    def api_destiny(self, q) -> dict:
+        now = int(time.time())
+        days = min(max(_float(q.get("days"), 7), 0.1), 90)
+        with self.conn() as conn:
+            rep = destiny_mod.report(conn, self.gamedata, self.catalog.name, now, days)
+        nodes = destiny_mod.search_nodes(self.gamedata, self.catalog.name, q.get("q") or "",
+                                         _limit(q, 40)) if q.get("q") else []
+        return {"now": now, "has_data": bool(self.gamedata.destiny.get("nodes")), "nodes": nodes,
+                "sources": activity_mod.FAME_SOURCES, **rep}
+
+    def api_destiny_post(self, _q, body) -> dict:
+        body = body if isinstance(body, dict) else {}
+        node = body.get("node")
+        if not isinstance(node, str) or not node:
+            raise ApiError("не указан узел")
+        with self.write_lock, self.conn() as conn:
+            if body.get("action") == "track":
+                try:
+                    destiny_mod.track(conn, self.gamedata, node, int(_float(body.get("level"), 0)),
+                                      _float(body.get("progress"), 0), int(_float(body.get("target"), 100)),
+                                      body.get("active", True) is not False)
+                except ValueError as e:
+                    raise ApiError(str(e)) from None
+            elif body.get("action") == "untrack":
+                destiny_mod.untrack(conn, node)
+            else:
+                raise ApiError("action: track | untrack")
+        return self.api_destiny({})
+
     # --- киллборд ---------------------------------------------------------
     def base_name(self, base: str) -> str:
         for t in (4, 5, 6, 7, 8, 3, 2, 1):
@@ -1038,6 +1069,7 @@ def make_handler(app: App):
         "/api/chain": app.api_chain,
         "/api/builds": app.api_builds,
         "/api/killboard": app.api_killboard,
+        "/api/destiny": app.api_destiny,
     }
 
     post_api = {
@@ -1052,6 +1084,7 @@ def make_handler(app: App):
         "/api/builds": app.api_builds_post,
         "/api/build-price": app.api_build_price,
         "/api/killboard": app.api_killboard_post,
+        "/api/destiny": app.api_destiny_post,
     }
     # Запускают программы на этом компьютере — только для запросов с него же.
     local_only = {"/api/window", "/api/system", "/api/update-opcodes"}

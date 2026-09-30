@@ -196,7 +196,7 @@ App.tab({
       <h2>По слотам</h2><div id="build-rows"></div><h2>По городам</h2><div id="build-markets"></div>`);
     this.rowsTable = makeTable($("#build-rows", el), [
       { key: "slot_name", title: "Слот" },
-      { key: "name", title: "Предмет", html: (r) => `${itemCell(r)}${r.spec_name ? `<span class="sub">${esc(r.spec_name)}</span>` : ""}` },
+      { key: "name", title: "Предмет", html: (r) => `${itemCell(r)}${r.spec_name ? `<a href="#" class="sub spec-link" data-node="${esc(r.spec)}" data-title="${esc(r.spec_name)}" title="Отслеживать на Доске судьбы">${esc(r.spec_name)}</a>` : ""}` },
       { key: "ip", title: "Сила", num: true, html: (r) => fmt(r.ip) },
       { key: "best_price", title: "Дешевле всего", num: true, html: (r) => r.best_price === null ? `<span class="bad">нет цены</span>`
         : `${fmt(r.best_price)}<span class="sub">${esc(App.locName(r.best_market))}${r.count > 1 ? ` · ${r.count} шт` : ""}</span>` },
@@ -208,6 +208,13 @@ App.tab({
         html: (r) => r.missing.length ? `<span class="warn">${esc(r.missing.map((s) => this.slotName(s)).join(", "))}</span>` : `<span class="good">всё есть</span>` },
     ], { empty: "—" });
     $("#build-calc", el).addEventListener("click", () => this.calc(el));
+    $("#build-rows", el).addEventListener("click", (e) => {
+      const a = e.target.closest(".spec-link");
+      if (!a) return;
+      e.preventDefault();
+      saveSettings({ node: a.dataset.node, title: a.dataset.title }, DESTINY_OPEN);
+      App.go("destiny");
+    });
     $("#build-save", el).addEventListener("click", () => this.save(el));
     $("#build-new", el).addEventListener("click", () => { this.id = null; this.fill(el, { name: "", slots: {} }); this.renderList(el); this.saveDraft(el); });
     $("#build-del", el).addEventListener("click", () => this.remove(el));
@@ -373,5 +380,102 @@ App.tab({
       $("#kb-popular", el).innerHTML = Object.entries(slotNames).filter(([s]) => r.popular[s]).map(([s, t]) =>
         `<div class="card"><div class="l">${esc(t)}</div><ol>${r.popular[s].slice(0, 5).map((i) => `<li>${esc(i.name)} <span class="muted">× ${fmt(i.count)}</span></li>`).join("")}</ol></div>`).join("");
     } catch (e) { summaryLine($("#kb-status", el), "", e.message); }
+  },
+});
+
+// ---------- Доска судьбы ----------
+const DESTINY_OPEN = "albion-trader-destiny-open";
+
+function hoursText(h) {
+  if (h === null || h === undefined) return "—";
+  if (h === 0) return "готово";
+  return h < 48 ? `${fmt1(h)} ч игры` : `${fmt1(h / 24)} дн. игры`;
+}
+
+App.tab({
+  id: "destiny", group: "tools", title: "Доска", live: true,
+  init(el) {
+    el.innerHTML = `<p class="muted intro">Отметьте узлы Доски судьбы, которые качаете: текущий уровень и славу внутри уровня (видно в игре на доске), цель. Слава нужного типа (бой, сбор, крафт, рыбалка), набранная после отметки, прибавляется сама; прогноз — по вашей средней славе в час.</p>
+      <div class="buttons"><input type="search" id="ds-q" placeholder="найти узел: палаш, сумка, рыбалка…">
+        <label>Прогноз по последним <select id="ds-days"><option value="1">суткам</option><option value="7" selected>7 дням</option><option value="30">30 дням</option></select></label></div>
+      <div id="ds-found" class="ds-found"></div>
+      <form id="ds-form" class="filters row" hidden>
+        <strong id="ds-form-title" class="grow"></strong>
+        <label>Текущий уровень <input type="number" name="level" min="0" max="100" value="0"></label>
+        <label>Слава в уровне <input type="number" name="progress" min="0" value="0" step="100"></label>
+        <label>Цель <input type="number" name="target" min="1" max="100" value="100"></label>
+        <label class="inline"><input type="checkbox" name="active" checked> Качаю сейчас (прибавлять славу)</label>
+        <button type="submit" class="primary">Отслеживать</button>
+      </form>
+      <div class="summary" id="ds-summary"></div><div id="ds-rows"></div>`;
+    const srcName = (s) => (this.sources || {})[s] || "не отслеживается";
+    this.table = makeTable($("#ds-rows", el), [
+      { key: "title", title: "Узел", html: (r) => `<b>${esc(r.title)}</b><span class="sub">${esc(srcName(r.source))}${r.active ? "" : " · на паузе"}
+        <span class="row-actions"><button type="button" data-edit="${esc(r.node_id)}">изменить</button><button type="button" data-del="${esc(r.node_id)}" title="Не отслеживать">убрать</button></span></span>` },
+      { key: "level", title: "Уровень", num: true, html: (r) => `${r.level} → ${r.target}<div class="bar"><span style="width:${r.next_level_fame ? Math.min(100, r.progress / r.next_level_fame * 100) : 100}%"></span></div>` },
+      { key: "remaining", title: "Осталось", num: true, hint: "славы до цели; ниже — набрано с момента отметки",
+        html: (r) => `${fmt(r.remaining)}<span class="sub">+${fmt(r.gained)}</span>` },
+      { key: "eta_hours", title: "Прогноз", num: true, hint: "время игры до цели при вашей средней славе в час",
+        html: (r) => `${hoursText(r.eta_hours)}<span class="sub">${r.rate ? `${fmt(r.rate)}/ч` : ""}</span>` },
+    ], { sort: "eta_hours", asc: true, empty: "Пока ничего не отслеживается — найдите узел выше" });
+    $("#ds-q", el).addEventListener("input", debounce(() => this.search(el), 250));
+    $("#ds-days", el).addEventListener("change", () => this.refresh(el));
+    $("#ds-found", el).addEventListener("click", (e) => {
+      const b = e.target.closest("[data-node]");
+      if (b) this.edit(el, b.dataset.node, b.dataset.title);
+    });
+    $("#ds-rows", el).addEventListener("click", async (e) => {
+      const ed = e.target.closest("[data-edit]"), del = e.target.closest("[data-del]");
+      if (ed) {
+        const r = this.rows.find((x) => x.node_id === ed.dataset.edit);
+        this.edit(el, r.node_id, r.title, r);
+      } else if (del) {
+        this.apply(el, await apiPost("/api/destiny", { action: "untrack", node: del.dataset.del }));
+      }
+    });
+    $("#ds-form", el).addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        this.apply(el, await apiPost("/api/destiny", { action: "track", node: this.editing, level: f.level.value,
+          progress: f.progress.value, target: f.target.value, active: f.active.checked }));
+        f.hidden = true;
+      } catch (err) { summaryLine($("#ds-summary", el), "", err.message); }
+    });
+    this.refresh(el);
+  },
+  show(el) {
+    const open = loadSettings(DESTINY_OPEN);
+    if (open.node) { saveSettings({}, DESTINY_OPEN); this.edit(el, open.node, open.title || open.node); }
+  },
+  edit(el, node, title, row) {
+    this.editing = node;
+    const f = $("#ds-form", el);
+    f.hidden = false;
+    $("#ds-form-title", el).textContent = title;
+    f.level.value = row ? row.level : 0;
+    f.progress.value = row ? row.progress : 0;
+    f.target.value = row ? row.target : 100;
+    f.active.checked = row ? row.active : true;
+    f.scrollIntoView({ block: "nearest" });
+  },
+  async search(el) {
+    const q = $("#ds-q", el).value.trim();
+    const box = $("#ds-found", el);
+    if (q.length < 2) { box.innerHTML = ""; return; }
+    const r = await api("/api/destiny", { q, limit: 12, days: $("#ds-days", el).value });
+    box.innerHTML = r.nodes.length ? r.nodes.map((n) => `<button type="button" class="secondary" data-node="${esc(n.node_id)}" data-title="${esc(n.title)}" title="До 100 уровня: ${fmt(n.total_fame)} славы">${esc(n.title)}</button>`).join("")
+      : `<span class="muted">${r.has_data ? "Ничего не найдено" : "Нет данных Доски судьбы — выполните update-items"}</span>`;
+  },
+  async refresh(el) {
+    try { this.apply(el, await api("/api/destiny", { days: $("#ds-days", el).value })); } catch (e) { summaryLine($("#ds-summary", el), "", e.message); }
+  },
+  apply(el, r) {
+    this.sources = r.sources;
+    this.rows = r.rows;
+    const rates = Object.entries(r.rates).filter(([, v]) => v).map(([k, v]) => `${esc(r.sources[k])}: ${fmt(v)}`);
+    $("#ds-summary", el).innerHTML = r.has_data === false ? `<span class="warn">Нет данных Доски судьбы — выполните update-items.</span>`
+      : `Слава в час за период (${fmt1(r.hours)} ч в игре): ${rates.length ? rates.join(" · ") : "пока нет данных"}`;
+    this.table.set(r.rows);
   },
 });

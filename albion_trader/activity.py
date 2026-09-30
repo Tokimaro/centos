@@ -4,7 +4,11 @@
 События игры (номера сверены по albiondata-client и StatisticsAnalysisTool;
 значения «с фиксированной точкой» делятся на 10 000):
 
-* UpdateFame: 1 — вся слава персонажа, 2 — полученная с множителем зоны;
+* UpdateFame: 1 — вся слава персонажа, 2 — полученная с множителем зоны (без
+  премиума), 5 — премиум (+50 %), 10 — слава сумки прозрения, 17 — бонус-фактор
+  (дробное число, не фиксированная точка). Получено = (2 + премиум + 10) × (1 + 17);
+* источник славы — событие завершения рядом по времени: HarvestFinished (сбор),
+  CraftItemFinished (крафт), FishingFinished (рыбалка), иначе бой;
 * TakeSilver: 3 — серебро до налогов, 4 — налог кластера, 5 — налог гильдии;
 * UpdateMoney: 1 — баланс серебра;
 * OtherGrabbedLoot: 1 — у кого, 2 — кто подобрал, 3 — это серебро, 4 — индекс
@@ -26,6 +30,8 @@ from typing import Callable
 log = logging.getLogger("albion_trader.activity")
 
 FIXPOINT = 10_000
+FAME_WINDOW = 3.0     # секунды: слава сразу после сбора/крафта/улова — от них
+FAME_SOURCES = {"combat": "бой", "gathering": "сбор", "crafting": "крафт", "fishing": "рыбалка"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -81,6 +87,7 @@ class Activity:
         self.index = index_to_item or {}
         self.clock = clock
         self.session_id: int | None = None
+        self.last_finished: dict[str, float] = {}   # источник славы -> время завершения действия
 
     # --- сессии ---------------------------------------------------------
     def new_session(self) -> int:
@@ -102,26 +109,67 @@ class Activity:
         state.on("event:killed_player", self.on_killed)
         state.on("event:update_respec_points", self.on_respec)
         state.on("event:character_stats", self.on_stats)
+        state.on("event:harvest_finished", lambda p: self._finished("gathering", p))
+        state.on("event:craft_item_finished", lambda p: self._finished("crafting", p))
+        state.on("event:fishing_finished", lambda p: self._finished("fishing", p))
         state.on("location", self.on_zone)
 
-    def record(self, kind: str, **fields) -> None:
+    def record(self, kind: str, **fields) -> int:
         if self.session_id is None:
             self.new_session()
         loc = getattr(self.state, "location", None) if self.state else None
         with self.write_lock, self.conn_factory() as conn:
-            conn.execute(
+            return conn.execute(
                 """INSERT INTO activity_events(ts, session_id, kind, location, item_id, amount, value, actor,
                                                target, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (int(self.clock()), self.session_id, kind, loc, fields.get("item_id"), fields.get("amount"),
                  fields.get("value"), fields.get("actor"), fields.get("target"),
-                 json.dumps(fields["data"], ensure_ascii=False, default=str) if "data" in fields else None))
+                 json.dumps(fields["data"], ensure_ascii=False, default=str) if "data" in fields else None)).lastrowid
 
     # --- обработчики событий --------------------------------------------
+    def is_mine(self, p: dict, key: int = 0) -> bool:
+        """Событие своего персонажа: id объекта совпадает с Join[0] (если оба известны)."""
+        own = getattr(self.state, "object_id", None) if self.state else None
+        who = _int(p.get(key))
+        return own is None or who is None or who == own
+
+    def _finished(self, source: str, p: dict) -> None:
+        if not self.is_mine(p):
+            return
+        now = self.clock()
+        self.last_finished[source] = now
+        # Слава могла прийти чуть раньше события завершения — уточняем её источник.
+        last = getattr(self, "_last_fame", None)
+        if last and last[2] == "combat" and now - last[1] <= FAME_WINDOW:
+            self._last_fame = (last[0], last[1], source)
+            with self.write_lock, self.conn_factory() as conn:
+                row = conn.execute("SELECT data FROM activity_events WHERE id = ?", (last[0],)).fetchone()
+                if row:
+                    data = json.loads(row[0] or "{}")
+                    data["src"] = source
+                    conn.execute("UPDATE activity_events SET data = ? WHERE id = ?",
+                                 (json.dumps(data, ensure_ascii=False), last[0]))
+
+    def fame_source(self) -> str:
+        now = self.clock()
+        recent = [(ts, src) for src, ts in self.last_finished.items() if now - ts <= FAME_WINDOW]
+        return max(recent)[1] if recent else "combat"
+
     def on_fame(self, p: dict) -> None:
-        gained = _fix(p.get(2))
-        if gained is None:
-            gained = _fix(p.get(3))
-        self.record("fame", value=gained or 0, amount=_fix(p.get(1)))
+        base = _fix(p.get(2))
+        if base is None:
+            base = _fix(p.get(3)) or 0.0
+        premium = base * 0.5 if p.get(5) is True else 0.0
+        satchel = _fix(p.get(10)) or 0.0
+        bonus = p.get(17)
+        bonus = float(bonus) if isinstance(bonus, (int, float)) and not isinstance(bonus, bool) \
+            and 0 <= bonus < 100 else 0.0
+        total = (base + premium + satchel) * (1 + bonus)
+        src = self.fame_source()
+        rowid = self.record("fame", value=round(total, 2), amount=_fix(p.get(1)),
+                            data={"src": src, "base": round(base, 2), "premium": round(premium, 2),
+                                  "satchel": round(satchel, 2), "bonus": round(bonus, 4)})
+        self._last_fame = (rowid, self.clock(), src)
 
     def on_silver(self, p: dict) -> None:
         gross = _fix(p.get(3)) or 0

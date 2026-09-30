@@ -213,3 +213,8 @@ body.companion th, body.companion td { padding: 4px 6px; font-size: 13px; }
 .kb-import { padding: 2px 8px; font-size: 12px; }
 .kb-popular { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 .kb-popular ol { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
+.ds-found { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.ds-found button { margin-top: 0; font-size: 13px; padding: 4px 10px; }
+#ds-q { flex: 1 1 240px; }
+.bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: 3px; min-width: 60px; }
+.bar span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }

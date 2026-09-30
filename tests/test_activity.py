@@ -166,3 +166,48 @@ class RememberCharacterTest(unittest.TestCase):
             self.assertEqual(app2.character(), "Hero")
             self.assertEqual(app2.api_kills({})["character"], "Hero")
             self.assertEqual(app2.zone_name("3003"), "Карлеон")
+
+
+class FameDetailTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.app = App(AppConfig(db_path=d / "m.db", items_path=d / "i.json", capture=False))
+        self.clock = [1000.0]
+        self.app.activity.clock = lambda: self.clock[0]
+        self.parser = photon.PhotonParser(self.app.albion.on_request, self.app.albion.on_response,
+                                          self.app.albion.on_event)
+        self.parser.receive_packet(pb.packet(pb.response(2, {0: 77, 2: "Hero", 8: "3008"})))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fames(self):
+        with self.app.conn() as c:
+            return [(r["value"], json.loads(r["data"])) for r in
+                    c.execute("SELECT value, data FROM activity_events WHERE kind = 'fame' ORDER BY id")]
+
+    def test_formula(self):
+        # база 1000, премиум (+500), сумка прозрения 200, бонус-фактор 0.1 → (1000+500+200)*1.1
+        self.parser.receive_packet(event(82, {1: 5 * FP, 2: 1000 * FP, 5: True, 10: 200 * FP, 17: 0.1}))
+        value, data = self.fames()[-1]
+        self.assertAlmostEqual(value, 1870, places=0)
+        self.assertEqual((data["base"], data["premium"], data["satchel"], data["src"]), (1000, 500, 200, "combat"))
+        self.parser.receive_packet(event(82, {2: 100 * FP, 17: 1e9, 5: 1}))   # мусор в бонусе/премиуме игнорируется
+        self.assertEqual(self.fames()[-1][0], 100)
+
+    def test_source_from_finish_events(self):
+        self.parser.receive_packet(event(61, {0: 77}))                  # сбор завершён (свой)
+        self.clock[0] += 1
+        self.parser.receive_packet(event(82, {2: 50 * FP}))
+        self.clock[0] += 10
+        self.parser.receive_packet(event(82, {2: 60 * FP}))             # давно — бой
+        self.parser.receive_packet(event(71, {0: 999}))                 # крафт чужого персонажа — не считаем
+        self.clock[0] += 10
+        self.parser.receive_packet(event(82, {2: 70 * FP}))             # слава раньше события…
+        self.clock[0] += 1
+        self.parser.receive_packet(event(71, {0: 77}))                  # …крафта: уточняем задним числом
+        self.clock[0] += 10
+        self.parser.receive_packet(event(358, {}))                      # рыбалка без id — своя
+        self.parser.receive_packet(event(82, {2: 80 * FP}))
+        self.assertEqual([d["src"] for _, d in self.fames()], ["gathering", "combat", "crafting", "fishing"])
