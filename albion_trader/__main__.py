@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("update-items", help="скачать названия предметов (RU/EN) и игровые таблицы из ao-bin-dumps")
 
+    p_maps = sub.add_parser("update-maps", help="скачать схемы зон для фона радара (из ao-bin-dumps)")
+    p_maps.add_argument("zones", nargs="*", help="id зон (например, 3004 0201); по умолчанию — города и зоны, "
+                                                  "где вы бывали")
+    p_maps.add_argument("--all", action="store_true", help="все зоны игры (долго: сотни мегабайт)")
+
     p_check = sub.add_parser("check", help="самопроверка всех вкладок на ваших данных (отчёт в data/check_report.txt)")
     p_check.add_argument("--url", default="http://127.0.0.1:8484", help="адрес работающей программы (если запущена)")
     p_check.add_argument("--out", help="куда записать отчёт (по умолчанию data/check_report.txt)")
@@ -138,6 +143,31 @@ def main(argv=None) -> int:
               f"страниц без известной локации: {st['no_location_drops']}")
         if st["encrypted_at"]:
             print("Внимание: данные рынка в записи зашифрованы.")
+        return 0
+    if cmd == "update-maps":
+        from .zonemaps import ZoneMaps
+        from .gamedata import GameData
+        logging.basicConfig(level=logging.WARNING)
+        gd = GameData.load(data_dir / "gamedata.json")
+        zm = ZoneMaps(data_dir / "zonemaps", name_of=gd.cluster_name)
+        index = zm.index()
+        ids = list(args.zones)
+        if args.all:
+            ids = sorted(index)
+        elif not ids:
+            ids = sorted(cid for cid, c in index.items() if c["type"].startswith("PLAYERCITY"))
+            if db_path.exists():
+                conn = db.connect(db_path)
+                try:
+                    ids += [r[0] for r in conn.execute(
+                        "SELECT DISTINCT target FROM activity_events WHERE kind='zone' AND target IS NOT NULL")]
+                except Exception:   # таблиц ещё нет
+                    pass
+                finally:
+                    conn.close()
+            ids = [i for i in dict.fromkeys(ids) if i in index]
+        res = zm.prefetch(ids, lambda cid, n, total, status: print(f"[{n}/{total}] {cid} {zm.zone_name(cid)}: {status}"))
+        print(f"Готово: {res['ok']} из {res['total']}, ошибок {res['failed']} -> {zm.dir}")
         return 0
     if cmd == "check":
         from .selfcheck import run as run_check

@@ -12,8 +12,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.request
 from pathlib import Path
+
+log = logging.getLogger("albion_trader.gamedata")
 
 DUMPS_URL = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/"
 GAMEDATA_VERSION = 2
@@ -364,8 +367,15 @@ def download(path: str | Path, base_url: str = DUMPS_URL) -> dict:
             raise
     with urllib.request.urlopen(base_url + "formatted/world.txt", timeout=180) as resp:
         world = resp.read().decode("utf-8", errors="replace")
+    raw_world = fetch("cluster/world.json", optional=True)
     data = build(fetch("items.json"), fetch("loot.json"), fetch("craftingmodifiers.json"), world,
-                 fetch("achievements.json", optional=True), fetch("cluster/world.json", optional=True))
+                 fetch("achievements.json", optional=True), raw_world)
+    if raw_world:   # список зон и их файлов раскладки — для фонов радара
+        from .zonemaps import ZoneMaps
+        try:
+            ZoneMaps(Path(path).with_name("zonemaps")).save_index(raw_world)
+        except OSError as e:
+            log.warning("Не удалось сохранить список зон: %s", e)
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")

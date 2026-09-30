@@ -28,6 +28,7 @@ from . import world as world_mod
 from .activity import Activity
 from .world import World
 from .radar import Radar
+from .zonemaps import ZoneMaps
 from .alerts import AlertEngine
 from .notify import Notifier
 from .mytrades import MyTrades
@@ -37,7 +38,7 @@ from .capture.sniffer import Sniffer
 from . import __version__
 from . import tray as tray_mod
 from . import window as window_mod
-from .window import CompanionWindow
+from .window import RADAR_PAGE, RADAR_SIZE, RADAR_TITLE, CompanionWindow
 from .chain import ChainParams, build_chain, items_in_chain
 from . import builds as builds_mod
 from . import destiny as destiny_mod
@@ -139,22 +140,33 @@ class App:
         self.radar.attach(self.albion)
         self.sniffer: Sniffer | None = None
         self.window = CompanionWindow("http://127.0.0.1:8484", Path(config.db_path).parent / "companion-profile")
+        self.radar_window = self._radar_window("http://127.0.0.1:8484")
+        self.zonemaps = ZoneMaps(Path(config.db_path).parent / "zonemaps", name_of=self.zone_name)
         self.killboard = KillboardFetcher(self.conn, self.write_lock, self.settings)
         self.albion.on("zone", self._on_zone)
 
     # --- окно-компаньон -------------------------------------------------
-    def api_window(self, _q) -> dict:
-        return {"topmost": self.window.topmost, "running": self.window.running(),
-                "windows": window_mod.IS_WINDOWS}
+    def _radar_window(self, base: str) -> CompanionWindow:
+        return CompanionWindow(base, Path(self.config.db_path).parent / "radar-profile",
+                               page=RADAR_PAGE, title=RADAR_TITLE, size=RADAR_SIZE)
+
+    def _which_window(self, which) -> CompanionWindow:
+        return self.radar_window if which == "radar" else self.window
+
+    def api_window(self, q) -> dict:
+        w = self._which_window((q or {}).get("which"))
+        return {"topmost": w.topmost, "running": w.running(), "windows": window_mod.IS_WINDOWS}
 
     def api_window_post(self, _q, body) -> dict:
         body = body if isinstance(body, dict) else {}
+        which = body.get("which")
+        w = self._which_window(which)
         out = {}
         if body.get("action") == "open":
-            out.update(self.window.open())
+            out.update(w.open())
         if "topmost" in body:
-            out.update(self.window.set_topmost(bool(body["topmost"])))
-        return {**self.api_window(None), **out}
+            out.update(w.set_topmost(bool(body["topmost"])))
+        return {**self.api_window({"which": which}), **out}
 
     def start_capture(self, open_sockets=None) -> bool:
         kwargs = {"open_sockets": open_sockets} if open_sockets else {}
@@ -431,6 +443,13 @@ class App:
         now = int(time.time())
         with self.conn() as conn:
             return {"now": now, **world_mod.report(conn, now)}
+
+    def api_zonemap(self, q) -> dict:
+        """Схема текущей (или указанной) зоны для фона радара; качается при первом запросе."""
+        zone = q.get("zone") or self.radar.me.get("zone") or ""
+        if q.get("retry"):
+            self.zonemaps.retry(zone)
+        return self.zonemaps.get(zone)
 
     def api_radar(self, _q) -> dict:
         snap = self.radar.snapshot()
@@ -1165,6 +1184,7 @@ def make_handler(app: App):
         "/api/zones": app.api_zones,
         "/api/world": app.api_world,
         "/api/radar": app.api_radar,
+        "/api/zonemap": app.api_zonemap,
         "/api/system": app.api_system,
         "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,
@@ -1386,6 +1406,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
     log.info("Внешний клиент (необязательно): albiondata-client -i %s", ingest_url)
     local_base = f"http://127.0.0.1:{port}"
     app.window = CompanionWindow(local_base, Path(config.db_path).parent / "companion-profile")
+    app.radar_window = app._radar_window(local_base)
     if config.tray:
         tray = tray_mod.Tray(base, on_exit=httpd.shutdown, icon_path=str(STATIC_DIR / "icon.ico"),
                              on_window=app.window.open)

@@ -254,3 +254,8 @@ body.companion .ec-grid { grid-template-columns: 1fr; }
   .radar-side { width: 100%; }
   .radar-map { height: 60vh; }
 }
+/* Окно радара: только карта */
+body.radar-window { margin: 0; height: 100vh; overflow: hidden; background: #28332b; }
+body.radar-window #radar-canvas { display: block; width: 100vw; height: 100vh; }
+#radar-status { position: fixed; left: 6px; bottom: 6px; padding: 3px 6px; border-radius: 4px; font-size: 12px;
+  background: rgba(0, 0, 0, 0.7); color: #ffb4ab; }

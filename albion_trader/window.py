@@ -26,6 +26,9 @@ IS_WINDOWS = sys.platform == "win32"
 TITLE = "Albion Trader — инструменты"   # совпадает с <title> companion.html
 PAGE = "companion.html"
 DEFAULT_SIZE = (560, 860)
+RADAR_TITLE = "Albion Trader — радар"   # совпадает с <title> radar.html
+RADAR_PAGE = "radar.html"
+RADAR_SIZE = (520, 520)
 
 
 def browser_candidates(env=None) -> list[str]:
@@ -66,8 +69,11 @@ def app_command(browser: str, url: str, profile_dir: str | Path, size=DEFAULT_SI
 
 class CompanionWindow:
     def __init__(self, base_url: str, profile_dir: str | Path, popen=subprocess.Popen,
-                 finder: Callable[[], str | None] = find_browser, opener=webbrowser.open):
-        self.url = base_url.rstrip("/") + "/" + PAGE
+                 finder: Callable[[], str | None] = find_browser, opener=webbrowser.open,
+                 page: str = PAGE, title: str = TITLE, size=DEFAULT_SIZE):
+        self.url = base_url.rstrip("/") + "/" + page
+        self.title = title
+        self.size = size
         self.profile_dir = Path(profile_dir)
         self.popen = popen
         self.finder = finder
@@ -83,15 +89,15 @@ class CompanionWindow:
         """Открыть окно (или вывести уже открытое на передний план)."""
         with self.lock:
             if self.running():
-                _activate(TITLE)
+                _activate(self.title)
                 return {"mode": "app", "already": True}
             browser = self.finder()
             if browser:
                 self.profile_dir.mkdir(parents=True, exist_ok=True)
                 try:
-                    self.proc = self.popen(app_command(browser, self.url, self.profile_dir),
+                    self.proc = self.popen(app_command(browser, self.url, self.profile_dir, self.size),
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    log.info("Окно-компаньон открыто (%s)", Path(browser).name)
+                    log.info("Окно %s открыто (%s)", self.title, Path(browser).name)
                     if self.topmost:
                         threading.Thread(target=self._apply_topmost_later, daemon=True).start()
                     return {"mode": "app", "browser": Path(browser).name}
@@ -104,14 +110,14 @@ class CompanionWindow:
         self.topmost = bool(on)
         if not IS_WINDOWS:
             return {"topmost": self.topmost, "applied": False, "reason": "только в Windows"}
-        applied = _set_topmost(TITLE, self.topmost)
+        applied = _set_topmost(self.title, self.topmost)
         return {"topmost": self.topmost, "applied": applied,
                 "reason": "" if applied else "окно не найдено — откройте его из трея или кнопкой"}
 
     def _apply_topmost_later(self) -> None:  # pragma: no cover - требует Windows
         for _ in range(40):  # окно появляется не сразу
             time.sleep(0.25)
-            if _set_topmost(TITLE, True):
+            if _set_topmost(self.title, True):
                 return
 
 
