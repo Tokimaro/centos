@@ -583,3 +583,45 @@ App.tab({
     this.table.set(r.links);
   },
 });
+
+// ---------- Журнал данжей и сундуков ----------
+const RARITY_CLS = { 0: "r0", 1: "r1", 2: "r2", 3: "r3" };
+function chestPills(chests, names) {
+  const keys = Object.keys(chests || {}).sort((a, b) => Number(b) - Number(a));
+  return keys.length ? `<span class="chests">${keys.map((k) => `<span class="chest ${RARITY_CLS[k] || ""}" title="${esc(names[k] || "редкость неизвестна")}">● ${chests[k]}</span>`).join("")}</span>` : "";
+}
+function duration(sec) {
+  const m = Math.round(sec / 60);
+  return m >= 60 ? `${Math.floor(m / 60)} ч ${m % 60} мин` : `${m} мин`;
+}
+
+App.tab({
+  id: "dungeons", group: "tools", title: "Данжи", live: true,
+  init(el) {
+    el.innerHTML = `<p class="muted intro">Каждое прохождение — от входа в данж до выхода в обычную зону (уровни одного данжа — одно прохождение): время, слава, серебро, ваш лут по рыночной оценке и открытые сундуки по редкости (<span class="chest r0">●</span> обычный, <span class="chest r1">●</span> необычный, <span class="chest r2">●</span> редкий, <span class="chest r3">●</span> легендарный).</p>
+      <div class="buttons"><label>Период <select id="dg-days"><option value="1">сутки</option><option value="7" selected>неделя</option><option value="30">30 дней</option></select></label></div>
+      <h2>По типам</h2><div id="dg-summary"></div><h2>Прохождения</h2><div id="dg-runs"></div>`;
+    this.sum = makeTable($("#dg-summary", el), [
+      { key: "name", title: "Тип", html: (r) => `${esc(r.name)}<span class="sub">${chestPills(r.chests, this.rarity) || "сундуков нет"}</span>` },
+      { key: "runs", title: "Раз", num: true },
+      { key: "avg_minutes", title: "Среднее", num: true, html: (r) => `${fmt1(r.avg_minutes)} мин` },
+      { key: "income_per_hour", title: "Доход/ч", num: true, html: (r) => `${fmt(r.income_per_hour)}<span class="sub">слава ${fmt(r.fame_per_hour)}/ч</span>` },
+    ], { sort: "income_per_hour", empty: "Прохождений пока нет" });
+    this.runs = makeTable($("#dg-runs", el), [
+      { key: "started", title: "Когда", html: (r) => `${dateTime(r.started)}<span class="sub">${r.active ? `<span class="good">идёт</span>` : duration(r.seconds)}${r.deaths ? ` · <span class="bad">смертей: ${r.deaths}</span>` : ""}</span>` },
+      { key: "kind_name", title: "Данж", html: (r) => `${esc(r.kind_name)}<span class="sub">${esc(r.zone_names.join(" → "))}</span><span class="sub">${chestPills(r.chests, this.rarity)}</span>` },
+      { key: "income", title: "Доход", num: true, html: (r) => `${fmt(r.income)}<span class="sub">${fmt(r.income_per_hour)}/ч</span>` },
+      { key: "fame", title: "Слава", num: true, html: (r) => `${fmt(r.fame)}<span class="sub">${fmt(r.fame_per_hour)}/ч</span>` },
+    ], { sort: "started", empty: "Прохождений пока нет — войдите в данж с запущенным сборщиком" });
+    $("#dg-days", el).addEventListener("change", () => this.refresh(el));
+    this.refresh(el);
+  },
+  async refresh(el) {
+    try {
+      const r = await api("/api/dungeons", { days: $("#dg-days", el).value });
+      this.rarity = r.rarity;
+      this.sum.set(r.summary);
+      this.runs.set(r.runs);
+    } catch (e) { $("#dg-runs", el).insertAdjacentHTML("afterbegin", `<p class="bad">${esc(e.message)}</p>`); }
+  },
+});

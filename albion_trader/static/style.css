@@ -220,3 +220,9 @@ body.companion th, body.companion td { padding: 4px 6px; font-size: 13px; }
 .bar span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
 .road { color: var(--series-3); font-weight: 600; }
 .card.route ol { margin: 6px 0 0; padding-left: 20px; }
+.chests { display: inline-flex; gap: 8px; }
+.chest { white-space: nowrap; }
+.chest.r0 { color: var(--muted); }
+.chest.r1 { color: var(--good); }
+.chest.r2 { color: var(--series-1); }
+.chest.r3 { color: var(--accent); }

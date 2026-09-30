@@ -112,12 +112,15 @@ class Activity:
         state.on("event:harvest_finished", lambda p: self._finished("gathering", p))
         state.on("event:craft_item_finished", lambda p: self._finished("crafting", p))
         state.on("event:fishing_finished", lambda p: self._finished("fishing", p))
-        state.on("location", self.on_zone)
+        state.on("zone", self.on_zone)
+        state.on("event:new_loot_chest", self.on_new_chest)
+        state.on("event:loot_chest_opened", self.on_chest_opened)
 
     def record(self, kind: str, **fields) -> int:
         if self.session_id is None:
             self.new_session()
-        loc = getattr(self.state, "location", None) if self.state else None
+        # Любая зона (данж, Дорога Авалона…), а не только рыночная локация.
+        loc = (getattr(self.state, "zone", "") or getattr(self.state, "location", None)) if self.state else None
         with self.write_lock, self.conn_factory() as conn:
             return conn.execute(
                 """INSERT INTO activity_events(ts, session_id, kind, location, item_id, amount, value, actor,
@@ -172,6 +175,8 @@ class Activity:
         self._last_fame = (rowid, self.clock(), src)
 
     def on_silver(self, p: dict) -> None:
+        if not self.is_mine(p):        # TakeSilver приходит и за участников группы
+            return
         gross = _fix(p.get(3)) or 0
         net = gross - (_fix(p.get(4)) or 0) - (_fix(p.get(5)) or 0)
         self.record("silver", value=round(net, 2), amount=gross)
@@ -207,8 +212,33 @@ class Activity:
     def on_stats(self, p: dict) -> None:
         self.record("stats", data={str(k): v for k, v in p.items() if k not in (252,)})
 
-    def on_zone(self, loc: str) -> None:
+    def on_zone(self, loc: str, _prev: str = "") -> None:
         self.record("zone", target=loc)
+
+    # Сундуки: NewLootChest (0 — id, 3 — имя, 21 или 23 для STATIC_ — редкость 0…3),
+    # LootChestOpened (0 — id). Имена запоминаем, пока сундук не открыт.
+    MAX_CHESTS = 500
+
+    def on_new_chest(self, p: dict) -> None:
+        cid = _int(p.get(0))
+        name = p.get(3) if isinstance(p.get(3), str) else ""
+        if cid is None:
+            return
+        rarity = _int(p.get(21))
+        if rarity is None and name.startswith("STATIC_"):
+            rarity = _int(p.get(23))
+        chests = self.__dict__.setdefault("chests", {})
+        if len(chests) >= self.MAX_CHESTS:
+            chests.pop(next(iter(chests)))
+        chests[cid] = (name[:120], rarity if rarity in (0, 1, 2, 3) else None)
+
+    def on_chest_opened(self, p: dict) -> None:
+        cid = _int(p.get(0))
+        chests = self.__dict__.setdefault("chests", {})
+        if cid is None or cid not in chests:
+            return
+        name, rarity = chests.pop(cid)
+        self.record("chest", item_id=name, amount=rarity, data={"rarity": rarity})
 
 
 # --- отчёты ---------------------------------------------------------------

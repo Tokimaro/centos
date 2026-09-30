@@ -44,6 +44,7 @@ from . import destiny as destiny_mod
 from . import killboard as killboard_mod
 from .killboard import KillboardFetcher
 from . import avalon as avalon_mod
+from . import dungeons as dungeons_mod
 from .gamedata import GAMEDATA_VERSION, GameData
 from .gamedata import download as download_gamedata
 from .items import download_catalog
@@ -803,6 +804,18 @@ class App:
             m["name"] = market_info(m["market"])["name"]
         return {"now": now, "build": build, **res}
 
+    # --- данжи -----------------------------------------------------------
+    def api_dungeons(self, q) -> dict:
+        now = int(time.time())
+        since = now - int(min(max(_float(q.get("days"), 7), 0.01), 365) * 86400)
+        with self.conn() as conn:
+            rows = dungeons_mod.runs(conn, self.gamedata, since, self.character(), self.value_of_factory(conn), now)
+        for r in rows:
+            r["kind_name"] = dungeons_mod.KINDS.get(r["kind"], r["kind"])
+            r["zone_names"] = [self.zone_name(z) for z in r["zones"]]
+        return {"now": now, "runs": rows[:_limit(q, 300)], "summary": dungeons_mod.summary(rows),
+                "rarity": dungeons_mod.RARITY}
+
     # --- Дороги Авалона ---------------------------------------------------
     def _on_zone(self, zone: str, prev: str) -> None:
         with self.write_lock, self.conn() as conn:
@@ -1134,6 +1147,7 @@ def make_handler(app: App):
         "/api/killboard": app.api_killboard,
         "/api/destiny": app.api_destiny,
         "/api/avalon": app.api_avalon,
+        "/api/dungeons": app.api_dungeons,
     }
 
     post_api = {
