@@ -42,7 +42,9 @@ DEFAULT_OPCODES = {
 
 # Номера событий из client/events.go (сверены со StatisticsAnalysisTool).
 DEFAULT_EVENTS = {
+    "harvest_finished": 61,
     "take_silver": 62,
+    "craft_item_finished": 71,
     "update_money": 81,
     "update_fame": 82,
     "update_respec_points": 84,
@@ -51,6 +53,9 @@ DEFAULT_EVENTS = {
     "killed_player": 164,
     "died": 165,
     "other_grabbed_loot": 279,
+    "fishing_finished": 358,
+    "new_loot_chest": 393,
+    "loot_chest_opened": 395,
     "redzone_world_map_event": 480,
     "festivities_update": 519,
 }
@@ -97,6 +102,28 @@ def normalize_location_id(value) -> str:
             or s.startswith("BLACKBANK-") or s.endswith(("-HellDen", "-Auction2"))):
         return s
     return ""
+
+
+_RE_ZONE = re.compile(r"^[\w\-#@.]{1,80}$")
+
+
+def normalize_zone(value) -> str:
+    """Любая зона игры: город (``3004``), Дорога Авалона (``TNL-001``), данж и т. п.
+
+    Переходы приходят как ``<uuid>@<кластер>`` — берём кластер. Острова
+    нормализуются так же, как у рынка.
+    """
+    if not isinstance(value, str):
+        return ""
+    s = value.strip()
+    if not s:
+        return ""
+    island = normalize_location_id(s)
+    if island.startswith("@ISLAND@"):
+        return island
+    if "@" in s:
+        s = s.rsplit("@", 1)[1]
+    return s if _RE_ZONE.match(s) else ""
 
 
 def is_market_location(loc: str) -> bool:
@@ -146,6 +173,8 @@ class AlbionState:
         self.clock = clock
         self.lock = threading.Lock()
         self.location = ""
+        self.zone = ""              # любая текущая зона (не только рынок)
+        self.object_id: int | None = None   # id объекта своего персонажа (Join[0])
         self.history_lookup: dict[int, tuple[int, int, int]] = {}
         self.last_market_request = 0.0
         # Время отправки запросов рынка, на которые ещё не пришёл ответ.
@@ -153,7 +182,7 @@ class AlbionState:
         self.pending_market_requests: list[float] = []
         self._last_location_warning = 0.0
         self.stats = {
-            "location": "", "orders": 0, "order_batches": 0, "history_batches": 0,
+            "location": "", "zone": "", "orders": 0, "order_batches": 0, "history_batches": 0,
             "last_data_at": None, "encrypted_at": None, "no_location_drops": 0,
             "market_requests": 0, "market_responses_lost": 0,
             "character": "", "events": 0,
@@ -190,7 +219,8 @@ class AlbionState:
     # --- подписчики ---------------------------------------------------
     def on(self, name: str, fn: Callable) -> None:
         """Подписка: ``request:<операция>``, ``response:<операция>``, ``event:<событие>``,
-        ``my_orders`` (kind, orders), ``location`` (raw)."""
+        ``my_orders`` (kind, orders), ``location`` (рынок), ``zone`` (зона, предыдущая зона),
+        ``character`` (имя)."""
         self._listeners.setdefault(name, []).append(fn)
 
     def _fire(self, name: str, *args) -> None:
@@ -214,6 +244,7 @@ class AlbionState:
         with self.lock:
             if code == self.op["get_game_server_by_cluster"]:
                 self._set_location(params.get(0), "GetGameServerByCluster")
+                self._set_zone(params.get(0))
             elif code in (self.op["auction_get_offers"], self.op["auction_get_requests"]):
                 now = self.clock()
                 self._expire_market_requests(now)
@@ -242,15 +273,20 @@ class AlbionState:
                 self.stats["orders_by_content_at"] = self.clock()
                 self._market_orders(orders)
             elif code == self.op["join"]:
+                self._set_object_id(params.get(0))
                 self._set_location(params.get(8), "Join")
+                self._set_zone(params.get(8))
                 self._set_character(params.get(2))
             elif code == self.op["get_game_server_by_cluster"]:
                 self._set_location(params.get(0), "GetGameServerByCluster")
+                self._set_zone(params.get(0))
             elif code == self.op["auction_get_item_average_stats"]:
                 self._history_response(params)
             elif code not in self._interesting and normalize_location_id(params.get(8)):
                 # После обновлений игры код Join может сместиться — узнаём его по форме.
+                self._set_object_id(params.get(0))
                 self._set_location(params.get(8), "Join?")
+                self._set_zone(params.get(8))
                 self._set_character(params.get(2))
             name = self._op_names.get(code)
             if name:
@@ -330,6 +366,18 @@ class AlbionState:
             self.location = loc
             self.stats["location"] = loc
             self._fire("location", loc)
+
+    def _set_zone(self, raw) -> None:
+        zone = normalize_zone(raw)
+        if zone and zone != self.zone:
+            prev, self.zone = self.zone, zone
+            self.stats["zone"] = zone
+            self._fire("zone", zone, prev)
+
+    def _set_object_id(self, raw) -> None:
+        oid = _as_int(raw)
+        if oid is not None and not isinstance(raw, bool):
+            self.object_id = oid
 
     def _market_orders(self, raw_orders: list[str]) -> None:
         self._market_response_arrived()

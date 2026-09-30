@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from albion_trader.capture import photon
-from albion_trader.capture.albion import AlbionState, normalize_location_id
+from albion_trader.capture.albion import AlbionState, normalize_location_id, normalize_zone
 from albion_trader.capture.sniffer import Sniffer, parse_ipv4_udp, read_pcap
 from albion_trader.server import App, AppConfig
 
@@ -336,6 +336,39 @@ class DispatcherTest(unittest.TestCase):
         parser.receive_packet(pb.packet(pb.response(JOIN, {2: "Hero", 8: "3005"})))
         self.assertEqual(state.character_name, "Hero")
         self.assertEqual(state.stats["character"], "Hero")
+
+    def test_zone_and_object_id_from_join(self):
+        sink, state, parser = make_state()
+        zones = []
+        state.on("zone", lambda z, prev: zones.append((z, prev)))
+        parser.receive_packet(pb.packet(pb.response(JOIN, {0: 4242, 2: "Hero", 8: "3004"})))
+        self.assertEqual((state.object_id, state.zone, state.location), (4242, "3004", "3004"))
+        # Дорога Авалона: рыночная локация не меняется, зона — меняется.
+        parser.receive_packet(pb.packet(pb.response(JOIN, {0: 4243, 2: "Hero", 8: "TNL-001"})))
+        self.assertEqual((state.object_id, state.zone, state.location), (4243, "TNL-001", "3004"))
+        parser.receive_packet(pb.packet(pb.request(CLUSTER, {0: "0f1e-uuid@4206"})))
+        parser.receive_packet(pb.packet(pb.request(CLUSTER, {0: "0f1e-uuid@4206"})))   # повтор — без события
+        self.assertEqual(zones, [("3004", ""), ("TNL-001", "3004"), ("4206", "TNL-001")])
+        self.assertEqual(state.stats["zone"], "4206")
+
+    def test_normalize_zone(self):
+        self.assertEqual(normalize_zone("DNG-KPR-02-MAIN-04"), "DNG-KPR-02-MAIN-04")
+        self.assertEqual(normalize_zone("abc@TNL-017"), "TNL-017")
+        self.assertEqual(normalize_zone("@island@0e8a6c1b-2d6a-4bd4-9f8f-6f1f1f1f1f1f"),
+                         "@ISLAND@0e8a6c1b-2d6a-4bd4-9f8f-6f1f1f1f1f1f")
+        for bad in (None, 5, "", "  ", "a b", "x" * 200, "<script>"):
+            self.assertEqual(normalize_zone(bad), "", bad)
+
+    def test_new_events_dispatched(self):
+        sink, state, parser = make_state()
+        got = []
+        for name in ("harvest_finished", "craft_item_finished", "fishing_finished", "new_loot_chest",
+                     "loot_chest_opened"):
+            state.on("event:" + name, lambda p, n=name: got.append((n, p.get(0))))
+        for code in (61, 71, 358, 393, 395):
+            parser.receive_packet(pb.packet(pb.event(code, {0: code})))
+        self.assertEqual(got, [("harvest_finished", 61), ("craft_item_finished", 71), ("fishing_finished", 358),
+                               ("new_loot_chest", 393), ("loot_chest_opened", 395)])
 
     def test_my_orders_not_stored_as_market(self):
         sink, state, parser = make_state()

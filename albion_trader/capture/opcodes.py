@@ -41,6 +41,11 @@ EVENT_NAMES = {
     "killed_player": "evKilledPlayer",
     "died": "evDied",
     "other_grabbed_loot": "evOtherGrabbedLoot",
+    "harvest_finished": "evHarvestFinished",
+    "craft_item_finished": "evCraftItemFinished",
+    "fishing_finished": "evFishingFinished",
+    "new_loot_chest": "evNewLootChest",
+    "loot_chest_opened": "evLootChestOpened",
     "redzone_world_map_event": "evRedZoneWorldMapEvent",
     "festivities_update": "evFestivitiesUpdate",
 }

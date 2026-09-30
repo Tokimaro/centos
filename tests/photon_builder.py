@@ -64,6 +64,10 @@ def response(op_code: int, p: dict, return_code: int = 0) -> bytes:
     return command(3, bytes([1]) + struct.pack("<h", return_code) + bytes([8]) + params({**p, 253: op_code}))
 
 
+def event(code: int, p: dict) -> bytes:
+    return command(4, bytes([1]) + params({**p, 252: code}))
+
+
 def orders_response(orders: list[dict]) -> bytes:
     """Как в Albion: заказы строковым массивом на месте debug-сообщения."""
     strings = [json.dumps(o) for o in orders]
