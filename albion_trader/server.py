@@ -39,6 +39,8 @@ from . import tray as tray_mod
 from . import window as window_mod
 from .window import CompanionWindow
 from .chain import ChainParams, build_chain, items_in_chain
+from . import builds as builds_mod
+from . import destiny as destiny_mod
 from .gamedata import GAMEDATA_VERSION, GameData
 from .gamedata import download as download_gamedata
 from .items import download_catalog
@@ -111,6 +113,7 @@ class App:
         self.albion.on("response:gold_market_get_average_info", self._gold_from_capture)
         with self.conn() as conn:
             activity_mod.init(conn)
+            builds_mod.init(conn)
         self.activity = Activity(self.conn, self.write_lock, index_to_item=self.catalog.index)
         self.activity.attach(self.albion)
         self.albion.on("character", self._remember_character)
@@ -742,6 +745,53 @@ class App:
             "sell_market": sell})
         return res
 
+    # --- билды -----------------------------------------------------------
+    def api_builds(self, _q) -> dict:
+        with self.conn() as conn:
+            rows = builds_mod.list_builds(conn)
+        return {"builds": rows, "slots": builds_mod.SLOTS}
+
+    def api_builds_post(self, _q, body) -> dict:
+        body = body if isinstance(body, dict) else {}
+        action = body.get("action")
+        with self.write_lock, self.conn() as conn:
+            if action == "save":
+                try:
+                    build = builds_mod.clean_build(body.get("build"), self.gamedata)
+                except ValueError as e:
+                    raise ApiError(str(e)) from None
+                bid = body.get("id")
+                bid = self._rule_id(bid) if bid not in (None, "", 0) else None
+                new_id = builds_mod.save_build(conn, build, bid)
+            elif action == "delete":
+                builds_mod.delete_build(conn, self._rule_id(body.get("id")))
+                new_id = None
+            else:
+                raise ApiError("action: save | delete")
+            rows = builds_mod.list_builds(conn)
+        return {"id": new_id, "builds": rows, "slots": builds_mod.SLOTS}
+
+    def api_build_price(self, _q, body) -> dict:
+        body = body if isinstance(body, dict) else {}
+        try:
+            build = builds_mod.clean_build(body.get("build"), self.gamedata)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        markets = [m for m in (body.get("markets") or []) if isinstance(m, str) and m in MARKETS
+                   and m != "black_market"][:LIST_LIMIT] or DEFAULT_CITIES + ["caerleon"]
+        now = int(time.time())
+        items = sorted({s["item"] for s in build["slots"].values()})
+        with self.conn() as conn:
+            orders = db.load_orders(conn, now - int(_float(body.get("max_age"), 48) * 3600), markets, now,
+                                    items=items) if items else []
+        res = builds_mod.price_build(self.gamedata, build, orders, markets)
+        for r in res["rows"]:
+            r["name"] = self.catalog.name(r["item_id"])
+            r["spec_name"] = destiny_mod.node_title(self.gamedata, self.catalog.name, r["spec"]) if r["spec"] else None
+        for m in res["markets"]:
+            m["name"] = market_info(m["market"])["name"]
+        return {"now": now, "build": build, **res}
+
     def api_enchant(self, q) -> dict:
         if not self.gamedata:
             return self._no_gamedata()
@@ -930,6 +980,7 @@ def make_handler(app: App):
         "/api/items": app.api_items,
         "/api/window": app.api_window,
         "/api/chain": app.api_chain,
+        "/api/builds": app.api_builds,
     }
 
     post_api = {
@@ -941,6 +992,8 @@ def make_handler(app: App):
         "/api/system": app.api_system_post,
         "/api/alert-rules": app.api_alert_rules_post,
         "/api/window": app.api_window_post,
+        "/api/builds": app.api_builds_post,
+        "/api/build-price": app.api_build_price,
     }
     # Запускают программы на этом компьютере — только для запросов с него же.
     local_only = {"/api/window", "/api/system", "/api/update-opcodes"}

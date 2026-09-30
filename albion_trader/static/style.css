@@ -201,3 +201,10 @@ body.companion th, body.companion td { padding: 4px 6px; font-size: 13px; }
 .tree-toggle { display: inline-block; width: 18px; background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; font: inherit; }
 .tool-form { margin: 0 0 8px; }
 .tool-form > summary { font-weight: 600; color: var(--text); margin-bottom: 8px; }
+.build-bar input[type=text] { width: auto; flex: 1 1 160px; }
+.build-bar select { width: auto; flex: 1 1 160px; }
+.build-bar button { margin-top: 0; }
+.build-slots { display: grid; gap: 6px 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin: 10px 0; }
+.build-slot { display: grid; grid-template-columns: minmax(0, 1fr) 110px 64px; gap: 4px; align-items: center; }
+.build-slot .field-label { grid-column: 1 / -1; margin: 0; }
+.build-slot input[type=number] { width: 64px; }

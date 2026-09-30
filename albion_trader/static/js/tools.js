@@ -167,3 +167,141 @@ App.tab({
     draw();
   },
 });
+
+// ---------- Конструктор билдов ----------
+const BUILD_DRAFT = "albion-trader-build-draft";
+const BUILD_IMPORT = "albion-trader-build-import";
+
+App.tab({
+  id: "build", group: "tools", title: "Билд",
+  init(el) {
+    this.slots = [];
+    this.id = null;
+    el.innerHTML = `<p class="muted intro">Соберите комплект — увидите цену в каждом городе, где он дешевле всего по слотам и среднюю силу предметов (без учёта мастерства). Качество: берутся предложения не хуже выбранного.</p>
+      <div class="buttons build-bar">
+        <select id="build-list" title="Сохранённые билды"></select>
+        <input type="text" id="build-name" placeholder="Название билда">
+        <button type="button" class="secondary" id="build-save">Сохранить</button>
+        <button type="button" class="secondary" id="build-new">Новый</button>
+        <button type="button" class="secondary" id="build-del">Удалить</button>
+      </div>
+      <div id="build-slots" class="build-slots"></div>`;
+    const form = toolForm(el, "albion-trader-build", [
+      { legend: "Где покупать", cls: "locs", fields: [{ type: "markets", name: "markets", buyable: true }] },
+      { legend: "Цены", fields: [{ type: "number", name: "max_age", label: "Свежесть цен, ч", value: 48, min: 0.1 }] },
+    ], { submitText: "Посчитать", onSubmit: () => this.calc(el) });
+    this.form = form;
+    el.insertAdjacentHTML("beforeend", `<div class="buttons"><button type="button" class="primary" id="build-calc">Посчитать</button></div>
+      <div class="summary" id="build-summary"></div><div class="cards" id="build-cards"></div>
+      <h2>По слотам</h2><div id="build-rows"></div><h2>По городам</h2><div id="build-markets"></div>`);
+    this.rowsTable = makeTable($("#build-rows", el), [
+      { key: "slot_name", title: "Слот" },
+      { key: "name", title: "Предмет", html: (r) => `${itemCell(r)}${r.spec_name ? `<span class="sub">${esc(r.spec_name)}</span>` : ""}` },
+      { key: "ip", title: "Сила", num: true, html: (r) => fmt(r.ip) },
+      { key: "best_price", title: "Дешевле всего", num: true, html: (r) => r.best_price === null ? `<span class="bad">нет цены</span>`
+        : `${fmt(r.best_price)}<span class="sub">${esc(App.locName(r.best_market))}${r.count > 1 ? ` · ${r.count} шт` : ""}</span>` },
+    ], { empty: "Добавьте предметы в слоты" });
+    this.marketTable = makeTable($("#build-markets", el), [
+      { key: "name", title: "Рынок", html: (r) => locCell(r.market) },
+      { key: "total", title: "Сумма", num: true, html: (r) => r.total ? fmt(r.total) + (r.complete ? "" : `<span class="sub">без недостающих</span>`) : "—" },
+      { key: "missing", title: "Не хватает", sort: (r) => r.missing.length,
+        html: (r) => r.missing.length ? `<span class="warn">${esc(r.missing.map((s) => this.slotName(s)).join(", "))}</span>` : `<span class="good">всё есть</span>` },
+    ], { empty: "—" });
+    $("#build-calc", el).addEventListener("click", () => this.calc(el));
+    $("#build-save", el).addEventListener("click", () => this.save(el));
+    $("#build-new", el).addEventListener("click", () => { this.id = null; this.fill(el, { name: "", slots: {} }); this.renderList(el); this.saveDraft(el); });
+    $("#build-del", el).addEventListener("click", () => this.remove(el));
+    $("#build-list", el).addEventListener("change", (e) => {
+      const b = this.saved.find((x) => String(x.id) === e.target.value);
+      if (b) { this.id = b.id; this.fill(el, b); this.calc(el); } else { this.id = null; }
+      this.saveDraft(el);
+    });
+    this.load(el);
+  },
+  show(el) {
+    // Билд, переданный из «Меты по киллборду».
+    const imported = loadSettings(BUILD_IMPORT);
+    if (imported.slots && this.slots.length) {
+      saveSettings({}, BUILD_IMPORT);
+      this.id = null;
+      this.fill(el, imported);
+      this.calc(el);
+    }
+  },
+  slotName(key) { return (this.slots.find(([k]) => k === key) || [key, key])[1]; },
+  async load(el) {
+    const data = await api("/api/builds");
+    this.slots = data.slots;
+    this.saved = data.builds;
+    this.renderList(el);
+    const draft = loadSettings(BUILD_DRAFT);
+    this.id = this.saved.some((b) => b.id === draft.id) ? draft.id : null;
+    this.renderList(el);
+    this.fill(el, draft.slots ? draft : { name: "", slots: {} });
+    this.show(el);
+    if (Object.keys(this.read(el).slots).length) this.calc(el);
+  },
+  renderList(el) {
+    $("#build-list", el).innerHTML = `<option value="">— сохранённые билды —</option>` + this.saved.map((b) =>
+      `<option value="${b.id}"${b.id === this.id ? " selected" : ""}>${esc(b.name)}</option>`).join("");
+  },
+  fill(el, build) {
+    $("#build-name", el).value = build.name || "";
+    const box = $("#build-slots", el);
+    box.innerHTML = this.slots.map(([key, title]) => {
+      const s = (build.slots || {})[key] || {};
+      const qualities = Object.entries(QUALITY).map(([q, t]) => `<option value="${q}"${String(s.quality || 1) === q ? " selected" : ""}>${esc(t)}</option>`).join("");
+      const count = key === "food" || key === "potion"
+        ? `<input type="number" data-count="${key}" min="1" max="999" value="${s.count || 1}" title="Количество">` : "";
+      return `<div class="build-slot"><span class="field-label">${esc(title)}</span>
+        <input type="text" data-slot="${key}" value="${esc(s.item || "")}" placeholder="предмет">
+        <select data-quality="${key}">${qualities}</select>${count}</div>`;
+    }).join("");
+    $$("input[data-slot]", box).forEach((i) => itemPicker(i, { slot: i.dataset.slot }));
+    box.onchange = () => this.saveDraft(el);
+  },
+  saveDraft(el) { saveSettings({ ...this.read(el), id: this.id }, BUILD_DRAFT); },
+  read(el) {
+    const slots = {};
+    for (const [key] of this.slots) {
+      const item = $(`input[data-slot="${key}"]`, el)?.value.trim();
+      if (!item) continue;
+      slots[key] = { item, quality: Number($(`select[data-quality="${key}"]`, el).value) };
+      const c = $(`input[data-count="${key}"]`, el);
+      if (c) slots[key].count = Number(c.value) || 1;
+    }
+    return { name: $("#build-name", el).value.trim(), slots };
+  },
+  async calc(el) {
+    const build = this.read(el);
+    this.saveDraft(el);
+    const sum = $("#build-summary", el);
+    if (!Object.keys(build.slots).length) { sum.textContent = "Добавьте предметы в слоты."; return; }
+    sum.textContent = "Считаю…";
+    try {
+      const p = this.form.read();
+      const r = await apiPost("/api/build-price", { build, markets: p.markets, max_age: p.max_age });
+      sum.innerHTML = r.complete ? "" : `<span class="warn">Не для всех предметов есть цены — откройте их на рынке в игре.</span>`;
+      const best = r.markets.find((m) => m.complete);
+      $("#build-cards", el).innerHTML = [
+        card(fmt(r.cheapest_total), "дешевле всего (по слотам)"),
+        card(best ? fmt(best.total) : "—", best ? `целиком в: ${App.locName(best.market)}` : "нигде нет всего"),
+        card(fmt(r.average_ip), "средняя сила"),
+      ].join("");
+      this.rowsTable.set(r.rows);
+      this.marketTable.set(r.markets);
+    } catch (e) { summaryLine(sum, "", e.message); }
+  },
+  async save(el) {
+    try {
+      const r = await apiPost("/api/builds", { action: "save", build: this.read(el), id: this.id });
+      this.id = r.id; this.saved = r.builds; this.renderList(el); this.saveDraft(el);
+      summaryLine($("#build-summary", el), "Сохранено.");
+    } catch (e) { summaryLine($("#build-summary", el), "", e.message); }
+  },
+  async remove(el) {
+    if (!this.id) return;
+    const r = await apiPost("/api/builds", { action: "delete", id: this.id });
+    this.id = null; this.saved = r.builds; this.renderList(el); this.saveDraft(el);
+  },
+});
