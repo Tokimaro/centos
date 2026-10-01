@@ -66,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--url", default="http://127.0.0.1:8484", help="адрес работающей программы (если запущена)")
     p_check.add_argument("--out", help="куда записать отчёт (по умолчанию data/check_report.txt)")
 
+    p_rc = sub.add_parser("check-radar", help="проверка радара на этом компьютере (отчёт в data/radar_check.txt)")
+    p_rc.add_argument("--url", default="http://127.0.0.1:8484", help="адрес работающей программы")
+    p_rc.add_argument("--out", help="куда записать отчёт (по умолчанию data/radar_check.txt)")
+    p_rc.add_argument("--window", action="store_true",
+                      help="открыть окно радара и проверить «поверх игры» и оверлей (программа должна работать)")
+    p_rc.add_argument("--no-browser", action="store_true", help="не открывать страницу самотеста в браузере")
+
     p_clean = sub.add_parser("cleanup", help="удалить истёкшие и устаревшие заказы")
     p_clean.add_argument("--retention-hours", type=float, default=72)
     return parser
@@ -182,6 +189,22 @@ def main(argv=None) -> int:
         if getattr(sys, "frozen", False) and hasattr(os, "startfile"):
             os.startfile(out)            # у .exe нет консоли — открываем отчёт в Блокноте
         return 0
+    if cmd == "check-radar":
+        from .radar_check import run as run_radar_check
+        logging.basicConfig(level=logging.ERROR)
+        text, out = run_radar_check(data_dir, args.url, args.out, try_window=args.window)
+        if sys.stdout is not None:
+            try:
+                print(text)
+            except UnicodeEncodeError:   # старая консоль Windows без UTF-8
+                print(text.encode("ascii", "replace").decode())
+            print(f"Отчёт сохранён: {out}")
+        if not args.no_browser and "Программа не отвечает" not in text:
+            import webbrowser
+            webbrowser.open(args.url.rstrip("/") + "/radar-selftest.html")
+        if getattr(sys, "frozen", False) and hasattr(os, "startfile"):
+            os.startfile(out)
+        return 1 if "[FAIL]" in text else 0
     if cmd == "cleanup":
         db.init_db(db_path)
         conn = db.connect(db_path)

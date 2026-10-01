@@ -321,6 +321,9 @@ class Radar:
     def _ev_move(self, p, keys):
         eid = _int(p.get(keys["id"]))
         pos = find_position(p, keys.get("position"))
+        if pos is None:   # старый формат: x и y отдельными числами (параметры 4 и 5)
+            x, y = _num(p.get(4)), _num(p.get(5))
+            pos = (float(x), float(y)) if x is not None and y is not None else None
         if pos is None:
             return
         if eid is not None and eid == self.me["id"]:

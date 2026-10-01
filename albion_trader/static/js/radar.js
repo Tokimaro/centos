@@ -722,18 +722,7 @@ class RadarView {
 
   // Маршрут сбора: от вас через ближайшие ценные узлы (жадный обход).
   drawRoute(ctx, at, ents, me) {
-    const o = this.opts;
-    let nodes = ents.filter((e) => e.kind === "resource");
-    const score = (e) => (e.value != null ? e.value : (e.tier || 0) * 100 + (e.enchant || 0) * 300);
-    nodes = nodes.sort((a, b) => score(b) - score(a)).slice(0, Math.max(2, o.routelen * 2));
-    const path = [];
-    let cur = { x: me.x, y: me.y };
-    while (nodes.length && path.length < o.routelen) {
-      let bi = 0, bd = Infinity;
-      nodes.forEach((n, i) => { const d = Math.hypot(n.x - cur.x, n.y - cur.y); if (d < bd) { bd = d; bi = i; } });
-      cur = nodes.splice(bi, 1)[0];
-      path.push(cur);
-    }
+    const path = gatheringRoute(ents, me, this.opts.routelen);
     if (!path.length) return;
     ctx.save();
     ctx.setLineDash([6, 5]); ctx.lineWidth = 2.5; ctx.strokeStyle = "rgba(255,230,120,0.9)";
@@ -748,17 +737,7 @@ class RadarView {
 
   // Отряды: 4+ враждебных игрока в 25 м друг от друга.
   drawSquads(ctx, at, ents, me) {
-    const hostile = ents.filter((e) => e.kind === "player" && playerStatus(e, me, this.opts).key === "hostile");
-    const seen = new Set();
-    for (const p of hostile) {
-      if (seen.has(p.id)) continue;
-      const group = [p]; seen.add(p.id);
-      for (let i = 0; i < group.length; i++) {
-        for (const q of hostile) {
-          if (!seen.has(q.id) && Math.hypot(q.x - group[i].x, q.y - group[i].y) < 25) { seen.add(q.id); group.push(q); }
-        }
-      }
-      if (group.length < 4) continue;
+    for (const group of findSquads(ents, me, this.opts)) {
       const gx = group.reduce((s, e) => s + e.x, 0) / group.length, gy = group.reduce((s, e) => s + e.y, 0) / group.length;
       const rad = Math.max(...group.map((e) => Math.hypot(e.x - gx, e.y - gy))) + 8;
       const [sx, sy] = at(gx, gy), [ex] = at(gx + rad, gy);
@@ -782,14 +761,7 @@ class RadarView {
   drawArrows(ctx, list, w, h, me) {
     const cx = w / 2, cy = h / 2, pad = 16;
     ctx.font = "bold 10px system-ui, sans-serif";
-    // Объекты в одном направлении — одна стрелка «×N» (ближайший объект группы).
-    const groups = [];
-    for (const [e, sx, sy] of list) {
-      const a = Math.atan2(sy - cy, sx - cx);
-      const g = groups.find((x) => x.kind === e.kind && Math.abs(Math.atan2(Math.sin(a - x.a), Math.cos(a - x.a))) < 0.18);
-      if (g) { g.n++; if (e.dist < g.e.dist) Object.assign(g, { e, sx, sy }); } else groups.push({ e, sx, sy, a, kind: e.kind, n: 1 });
-    }
-    for (const { e, sx, sy, n } of groups.slice(0, 20)) {
+    for (const { e, sx, sy, n } of groupArrows(list, cx, cy).slice(0, 20)) {
       const a = Math.atan2(sy - cy, sx - cx);
       const k = Math.min((w / 2 - pad) / Math.abs(Math.cos(a) || 1e-6), (h / 2 - pad) / Math.abs(Math.sin(a) || 1e-6));
       const x = cx + Math.cos(a) * k, y = cy + Math.sin(a) * k;
@@ -950,6 +922,51 @@ class RadarView {
         + (this.opts.profile ? ` · профиль «${esc(this.opts.profile)}»` : "")
         + (bg ? `<br><span class="muted">${esc(bg)}</span>` : "");
   }
+}
+
+// Маршрут сбора: самые ценные узлы (цена, иначе тир и зачарование), обход «ближайший следующий».
+function gatheringRoute(ents, me, len) {
+  const score = (e) => (e.value != null ? e.value : (e.tier || 0) * 100 + (e.enchant || 0) * 300);
+  let nodes = ents.filter((e) => e.kind === "resource").sort((a, b) => score(b) - score(a))
+    .slice(0, Math.max(2, len * 2));
+  const path = [];
+  let cur = { x: me.x, y: me.y };
+  while (nodes.length && path.length < len) {
+    let bi = 0, bd = Infinity;
+    nodes.forEach((n, i) => { const d = Math.hypot(n.x - cur.x, n.y - cur.y); if (d < bd) { bd = d; bi = i; } });
+    cur = nodes.splice(bi, 1)[0];
+    path.push(cur);
+  }
+  return path;
+}
+
+// Отряды: группы из 4+ враждебных игроков, где каждый не дальше 25 м от кого-то из группы.
+function findSquads(ents, me, o, minSize = 4, gap = 25) {
+  const hostile = ents.filter((e) => e.kind === "player" && playerStatus(e, me, o).key === "hostile");
+  const seen = new Set(), out = [];
+  for (const p of hostile) {
+    if (seen.has(p.id)) continue;
+    const group = [p]; seen.add(p.id);
+    for (let i = 0; i < group.length; i++) {
+      for (const q of hostile) {
+        if (!seen.has(q.id) && Math.hypot(q.x - group[i].x, q.y - group[i].y) < gap) { seen.add(q.id); group.push(q); }
+      }
+    }
+    if (group.length >= minSize) out.push(group);
+  }
+  return out;
+}
+
+// Стрелки за краем: объекты одного вида в одном направлении (±10°) — одна стрелка «×N»
+// к ближайшему из них.
+function groupArrows(list, cx, cy, tol = 0.18) {
+  const groups = [];
+  for (const [e, sx, sy] of list) {
+    const a = Math.atan2(sy - cy, sx - cx);
+    const g = groups.find((x) => x.kind === e.kind && Math.abs(Math.atan2(Math.sin(a - x.a), Math.cos(a - x.a))) < tol);
+    if (g) { g.n++; if (e.dist < g.e.dist) Object.assign(g, { e, sx, sy }); } else groups.push({ e, sx, sy, a, kind: e.kind, n: 1 });
+  }
+  return groups;
 }
 
 function fmtShort(v) {

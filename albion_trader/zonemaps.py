@@ -320,7 +320,7 @@ class ZoneMaps:
         if name and name not in (cid, "—"):
             return name
         if self._index is None and not self.index_path.exists():
-            return name or cid      # списка зон ещё нет — не качаем его ради названия
+            return cid              # списка зон ещё нет — не качаем его ради названия
         return (self.index().get(cid) or {}).get("name") or cid
 
     # --- шаблоны ---------------------------------------------------------------
@@ -368,7 +368,7 @@ class ZoneMaps:
         text = self.fetch("cluster/" + info["file"])
         cluster = parse_cluster(text.decode("utf-8", errors="replace") if isinstance(text, bytes) else text)
         templates = {}
-        for ref in {i["ref"] for i in cluster["instances"]}:
+        for ref in sorted({i["ref"] for i in cluster["instances"]}):
             t = self.template(ref, info["type"])
             if t:
                 templates[ref] = t

@@ -491,6 +491,12 @@ def check_http(r: Report, url: str) -> None:
             r.add(FAIL, f"{p}: {e}")
 
 
+def _radar_files(r: Report, data_dir: Path) -> None:
+    from .radar_check import check_files
+    check_files(r, data_dir)
+    r.add(INFO, "Полная проверка радара (права, окно, оверлей, сеть): команда check-radar или check_radar.bat")
+
+
 def run(data_dir: str | Path, url: str = "http://127.0.0.1:8484", out: str | Path | None = None) -> tuple[str, Path]:
     from .server import App, AppConfig
     data_dir = Path(data_dir)
@@ -521,7 +527,8 @@ def run(data_dir: str | Path, url: str = "http://127.0.0.1:8484", out: str | Pat
                      ("destiny", lambda: check_destiny(r, app)),
                      ("avalon", lambda: check_avalon(r, app)),
                      ("dungeons", lambda: check_dungeons(r, app)),
-                     ("economy", lambda: check_economy(r, app, sid))]
+                     ("economy", lambda: check_economy(r, app, sid)),
+                     ("radar", lambda: _radar_files(r, data_dir))]
             for name, fn in steps:
                 if name == "live":
                     try:

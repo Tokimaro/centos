@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Albion Trader — самотест радара</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { padding: 16px; max-width: 980px; margin: 0 auto; }
+  .r { padding: 4px 0; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
+  .r b { min-width: 60px; }
+  .ok { color: var(--good); } .fail { color: var(--bad); } .warn { color: var(--warn); } .skip { color: var(--muted); }
+  #sum { font-size: 18px; margin: 8px 0 16px; }
+</style>
+</head>
+<body>
+<h1>Самотест радара</h1>
+<p class="muted">Проверяет на этом компьютере логику радара (статусы, фильтры, маршрут, отряды, геометрия карты),
+  отрисовку на canvas и ответы программы. Результат можно скопировать и прислать разработчику.</p>
+<div id="sum">Выполняется…</div>
+<h2>Логика и отрисовка</h2>
+<div id="unit"></div>
+<h2>Программа</h2>
+<div id="live"></div>
+<p><button type="button" id="copy">Скопировать результат</button></p>
+<script src="js/core.js"></script>
+<script src="js/radar.js"></script>
+<script src="js/radar-selftest.js"></script>
+<script>
+"use strict";
+(async () => {
+  const lines = [];
+  const row = (box, status, name, detail = "") => {
+    const cls = status === "OK" ? "ok" : status === "FAIL" ? "fail" : status === "WARN" ? "warn" : "skip";
+    box.insertAdjacentHTML("beforeend", `<div class="r"><b class="${cls}">${status}</b><span>${esc(name)}${detail ? ` — <span class="muted">${esc(detail)}</span>` : ""}</span></div>`);
+    lines.push(`${status} ${name}${detail ? " — " + detail : ""}`);
+  };
+  let fails = 0, warns = 0, total = 0;
+  for (const r of runRadarSelfTest()) {
+    total++;
+    if (!r.ok) fails++;
+    row($("#unit"), r.ok ? (r.note ? "SKIP" : "OK") : "FAIL", r.name, r.ok ? r.note : r.error);
+  }
+  // Ответы работающей программы.
+  // optional — не ошибка, а предупреждение (например, игра не запущена или нет интернета).
+  const live = async (name, fn, optional = false) => {
+    total++;
+    try {
+      const detail = await fn();
+      row($("#live"), "OK", name, detail || "");
+    } catch (e) {
+      if (optional) { warns++; row($("#live"), "WARN", name, e.message); } else { fails++; row($("#live"), "FAIL", name, e.message); }
+    }
+  };
+  await live("/api/radar отвечает", async () => {
+    const d = await api("/api/radar");
+    return `объектов ${d.entities.length}, зона ${d.me.zone || "неизвестна"}, разбор движения ${d.moves ? "включён" : "выключен"}`;
+  });
+  await live("Коды событий приходят", async () => {
+    const d = await api("/api/radar");
+    if (!d.codes.length) throw new Error("событий от игры нет — запущена ли игра и сборщик (права администратора)?");
+    return `разных кодов ${d.codes.length}` + (d.suggestions.length ? `, есть предложения исправить номера: ${d.suggestions.map((s) => s.name).join(", ")}` : "");
+  }, true);
+  await live("Схема текущей зоны", async () => {
+    const d = await api("/api/radar");
+    if (!d.me.zone) return "зона пока неизвестна — смените зону в игре";
+    let m = await api("/api/zonemap", { zone: d.me.zone });
+    for (let i = 0; i < 20 && m.status === "loading"; i++) { await new Promise((r) => setTimeout(r, 1000)); m = await api("/api/zonemap", { zone: d.me.zone }); }
+    if (m.status !== "ready" && !m.image) throw new Error(m.error || m.status);
+    return m.image ? `своя картинка ${m.image.url}` : `тайлов ${m.tiles.length}`;
+  }, true);
+  await live("История и тепловая карта", async () => {
+    const h = await api("/api/radar/history"), t = await api("/api/radar/heat");
+    return `встреч ${h.rows.length}, клеток ресурсов ${t.cells.length}`;
+  });
+  await live("Окно радара (только на компьютере с программой)", async () => {
+    const w = await api("/api/window", { which: "radar" });
+    return `Windows: ${w.windows ? "да" : "нет"}, окно открыто: ${w.running ? "да" : "нет"}`;
+  });
+  await live("Записи для перемотки", async () => {
+    const r = await api("/api/radar/replay");
+    return `файлов .pcap: ${r.files.length}`;
+  });
+  await live("Значки из игры (render.albiononline.com)", () => new Promise((resolve, reject) => {
+    const im = new Image();
+    const t = setTimeout(() => reject(new Error("нет ответа за 8 с — значки будут свои")), 8000);
+    im.onload = () => { clearTimeout(t); resolve("доступны"); };
+    im.onerror = () => { clearTimeout(t); reject(new Error("недоступны — значки будут свои")); };
+    im.src = "https://render.albiononline.com/v1/item/T4_ORE.png?size=32";
+  }), true);
+  $("#sum").innerHTML = fails ? `<span class="fail">Есть ошибки: ${fails} из ${total}</span>`
+    : `<span class="ok">Ошибок нет: ${total} проверок</span>` + (warns ? ` <span class="warn">(предупреждений: ${warns})</span>` : "");
+  lines.unshift(`Самотест радара ${new Date().toLocaleString("ru-RU")}: ошибок ${fails}, предупреждений ${warns} из ${total}`, navigator.userAgent);
+  window.__selftest = { fails, warns, total, lines };
+  $("#copy").addEventListener("click", () => navigator.clipboard.writeText(lines.join("\n")));
+})();
+</script>
+</body>
+</html>

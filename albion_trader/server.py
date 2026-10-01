@@ -177,9 +177,9 @@ class App:
             out.update(w.set_topmost(bool(body["topmost"])))
         if "overlay" in body:
             try:
-                alpha = int(body.get("alpha", 75))
+                alpha = int(body.get("alpha", w.alpha))   # без alpha — прежняя прозрачность
             except (TypeError, ValueError):
-                alpha = 75
+                alpha = w.alpha
             out.update(w.set_overlay(bool(body["overlay"]), alpha))
         return {**self.api_window({"which": which}), **out}
 
