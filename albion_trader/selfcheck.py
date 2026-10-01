@@ -23,6 +23,7 @@ import traceback
 import urllib.error
 import urllib.request
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 from . import __version__
@@ -506,7 +507,8 @@ def run(data_dir: str | Path, url: str = "http://127.0.0.1:8484", out: str | Pat
         tmp = Path(tmp)
         try:
             db_copy = copy_data(data_dir, tmp)
-            with sqlite3.connect(db_copy) as c:
+            # closing — иначе файл остаётся открытым и Windows не даёт удалить временную папку.
+            with closing(sqlite3.connect(db_copy)) as c:
                 try:
                     sid = last_session(c)
                 except sqlite3.OperationalError:

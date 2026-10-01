@@ -1445,7 +1445,26 @@ def make_handler(app: App):
         def log_message(self, fmt, *args):  # noqa: N802 - имя из BaseHTTPRequestHandler
             log.debug("%s - %s", self.address_string(), fmt % args)
 
+        def _drain_body(self) -> None:
+            """Дочитать непрочитанное тело запроса: если ответить на POST, не прочитав его,
+            Windows обрывает соединение (WinError 10053) и клиент не видит ответа."""
+            if self.command != "POST" or getattr(self, "_body_read", False):
+                return
+            self._body_read = True
+            try:
+                left = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return
+            if left < 0 or left > MAX_BODY:
+                return
+            while left > 0:
+                chunk = self.rfile.read(min(left, 65536))
+                if not chunk:
+                    break
+                left -= len(chunk)
+
         def _send(self, status: int, body: bytes, ctype: str = "application/json; charset=utf-8"):
+            self._drain_body()
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -1488,6 +1507,7 @@ def make_handler(app: App):
                 if hmac.compare_digest(given.encode(), pwd.encode()):
                     return True
             body = "Нужен пароль".encode("utf-8")
+            self._drain_body()
             self.send_response(401)
             self.send_header("WWW-Authenticate", 'Basic realm="Albion Trader", charset="UTF-8"')
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1543,6 +1563,7 @@ def make_handler(app: App):
                 self._json(400, {"error": "bad body size"})
                 return
             try:
+                self._body_read = True
                 body = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, UnicodeDecodeError):
                 self._json(400, {"error": "invalid json"})
@@ -1586,6 +1607,7 @@ def make_handler(app: App):
                 self._json(400, {"error": "bad body size"})
                 return
             try:
+                self._body_read = True
                 payload = json.loads(self.rfile.read(length))
             except (ValueError, UnicodeDecodeError):
                 self._json(400, {"error": "invalid json"})
