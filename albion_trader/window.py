@@ -80,6 +80,8 @@ class CompanionWindow:
         self.opener = opener
         self.proc = None
         self.topmost = False
+        self.overlay = False
+        self.alpha = 75
         self.lock = threading.Lock()
 
     def running(self) -> bool:
@@ -113,6 +115,16 @@ class CompanionWindow:
         applied = _set_topmost(self.title, self.topmost)
         return {"topmost": self.topmost, "applied": applied,
                 "reason": "" if applied else "окно не найдено — откройте его из трея или кнопкой"}
+
+    def set_overlay(self, on: bool, alpha: int = 75) -> dict:
+        """Оверлей: окно полупрозрачное (alpha, %) и пропускает клики в игру (Windows)."""
+        self.overlay = bool(on)
+        self.alpha = max(20, min(100, int(alpha)))
+        if not IS_WINDOWS:
+            return {"overlay": self.overlay, "overlay_applied": False, "reason": "только в Windows"}
+        applied = _set_overlay(self.title, self.overlay, self.alpha)
+        return {"overlay": self.overlay, "overlay_applied": applied,
+                "reason": "" if applied else "окно не найдено — откройте его кнопкой"}
 
     def _apply_topmost_later(self) -> None:  # pragma: no cover - требует Windows
         for _ in range(40):  # окно появляется не сразу
@@ -163,4 +175,22 @@ def _activate(title_prefix: str) -> bool:
     for hwnd in hwnds:
         user32.ShowWindow(hwnd, 9)          # SW_RESTORE
         user32.SetForegroundWindow(hwnd)
+    return bool(hwnds)
+
+
+def _set_overlay(title_prefix: str, on: bool, alpha: int) -> bool:
+    """WS_EX_LAYERED + прозрачность; WS_EX_TRANSPARENT — клики проходят сквозь окно."""
+    if not IS_WINDOWS:
+        return False
+    import ctypes  # pragma: no cover - требует Windows
+    user32 = ctypes.windll.user32
+    gwl_exstyle, ws_ex_layered, ws_ex_transparent, lwa_alpha = -20, 0x80000, 0x20, 0x2
+    hwnds = _find_windows(title_prefix)
+    for hwnd in hwnds:
+        style = user32.GetWindowLongW(hwnd, gwl_exstyle) | ws_ex_layered
+        style = style | ws_ex_transparent if on else style & ~ws_ex_transparent
+        user32.SetWindowLongW(hwnd, gwl_exstyle, style)
+        user32.SetLayeredWindowAttributes(hwnd, 0, int(255 * (alpha if on else 100) / 100), lwa_alpha)
+        if on:
+            user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
     return bool(hwnds)

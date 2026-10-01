@@ -278,3 +278,14 @@ body.radar-window { margin: 0; height: 100vh; overflow: hidden; background: #283
 body.radar-window #radar-canvas { display: block; width: 100vw; height: 100vh; }
 #radar-status { position: fixed; left: 6px; bottom: 6px; padding: 3px 6px; border-radius: 4px; font-size: 12px;
   background: rgba(0, 0, 0, 0.7); color: #ffb4ab; }
+.radar-profiles { display: flex; flex-wrap: wrap; gap: 4px; }
+.radar-profiles .chip { padding: 2px 8px; font-size: 12px; border-radius: 12px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text); cursor: pointer; }
+.radar-profiles .chip.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.radar-matrix { border-collapse: collapse; font-size: 11px; margin: 4px 0; }
+.radar-matrix th { font-weight: normal; color: var(--muted); padding: 0 3px; text-align: left; }
+.radar-matrix td { padding: 0; text-align: center; }
+.radar-matrix input { margin: 1px; }
+.radar-more label.col { flex-direction: column; align-items: stretch; gap: 2px; }
+.radar-more textarea { width: 100%; font: inherit; font-size: 12px; }
+.radar-replay .radar-actions { flex-wrap: wrap; }

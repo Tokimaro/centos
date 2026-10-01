@@ -1,7 +1,8 @@
 "use strict";
 // Радар: игроки, мобы, ресурсы и лут вокруг персонажа (события New…, Move, Leave, …Object)
 // на фоне схемы текущей зоны. Отрисовка (RadarView) общая для вкладки и окна radar.html;
-// настройки задаются на вкладке и хранятся в localStorage — окно подхватывает их сразу.
+// настройки задаются на вкладке (radar-tab.js) и хранятся в localStorage — окно
+// подхватывает их сразу.
 //
 // Два вида: «за персонажем» (карта едет под вами, вы в центре) и «статичная карта»
 // (вся зона неподвижна, двигаются точки — и вы тоже).
@@ -15,12 +16,31 @@ const RADAR_KINDS = [
 ];
 const RADAR_COLOR = Object.fromEntries(RADAR_KINDS.map((k) => [k.kind, k.color]));
 const RADAR_KEY = "albion-trader-radar";
+const RES_KINDS = [["wood", "дерево"], ["rock", "камень"], ["fiber", "волокно"], ["hide", "шкура"], ["ore", "руда"]];
 const RADAR_DEFAULTS = {
   player: true, mob: true, resource: true, loot: true, object: true,
   mode: "follow", zoom: 4, staticzoom: 1, rotate: true, labels: true, background: true, bgopacity: 100, exits: true,
-  resstyle: "icon", iconset: "drawn", mintier: 1,
+  resstyle: "icon", iconset: "drawn", mintier: 1, minenchant: 0, resmatrix: {}, reslabel: "tier", minvalue: 0,
   passive: true, factional: true, hostile: true, playerlabel: "name", moblabels: false, myguild: "", myalliance: "",
+  friends: "", ignore: "",
+  mobmintier: 1, bossesonly: false, livingasres: true,
+  alert: false, alertradius: 60, alertsound: true, alertnotify: false,
+  arrows: true, squads: true, trails: false, route: false, routelen: 8,
+  depleted: true, respawnmin: 10, heat: false, stale: true,
 };
+const DEFAULT_PROFILES = {
+  "Фарм": { player: true, mob: true, resource: true, loot: true, hostile: true, factional: false, passive: false,
+    moblabels: true, bossesonly: false, route: false, heat: false, alert: true, trails: false, mintier: 4 },
+  "PvP": { player: true, mob: false, resource: false, loot: true, hostile: true, factional: true, passive: true,
+    playerlabel: "power", squads: true, trails: true, alert: true, arrows: true, route: false, heat: false },
+  "Сбор": { player: true, mob: false, resource: true, loot: false, hostile: true, factional: false, passive: false,
+    mintier: 5, route: true, depleted: true, heat: true, alert: true, resstyle: "icon", reslabel: "value" },
+};
+
+function radarOptions() { return { ...RADAR_DEFAULTS, ...loadSettings(RADAR_KEY) }; }
+function saveRadarOptions(o) { saveSettings(o, RADAR_KEY); }
+
+const nameSet = (text) => new Set(String(text || "").split(/[\n,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean));
 
 // Цвета схемы зоны — как у карты зоны в игре: бирюзовая вода, охристая суша
 // (светлее на возвышенностях), оранжевые дороги, светлые участки под дома.
@@ -37,6 +57,10 @@ const TIER_COLOR = { 1: "#a3a3a3", 2: "#c8c8c8", 3: "#5bbf5b", 4: "#4a90e2", 5: 
   7: "#f5d142", 8: "#f4f4f4" };
 const ENCHANT_COLOR = { 1: "#3ddc84", 2: "#4aa3ff", 3: "#b07cff", 4: "#f5c542" };
 const RES_ITEM = { wood: "WOOD", rock: "ROCK", fiber: "FIBER", hide: "HIDE", ore: "ORE" };
+const RES_COLOR = { wood: "#8bc34a", rock: "#b0b0b0", fiber: "#f0e68c", hide: "#c98a4b", ore: "#5fa8ff" };
+// Редкость сундука: обычный, необычный, редкий, легендарный.
+const CHEST_COLOR = { 0: "#d9d9d9", 1: "#3ddc84", 2: "#4aa3ff", 3: "#f5c542" };
+const CHEST_RARITY = { 0: "обычный", 1: "необычный", 2: "редкий", 3: "легендарный" };
 // Флаги фракций (NewCharacter[53]) — цвета городов.
 const FLAG_COLOR = { 1: "#3c7dd9", 2: "#4caf50", 3: "#f08c2e", 4: "#e8e8e8", 5: "#8e5bd6", 6: "#c62828" };
 const STATUS_STYLE = {
@@ -45,14 +69,15 @@ const STATUS_STYLE = {
   faction: { text: "фракция", color: "#f5a524" },
   passive: { text: "мирный", color: "#9be29b" },
 };
+const STALE_SECONDS = 20;     // игрок или моб без событий дольше — показываем бледным
 
-function radarOptions() { return { ...RADAR_DEFAULTS, ...loadSettings(RADAR_KEY) }; }
-
-// Статус игрока: свой (гильдия/альянс из настроек), враждебный (флаг 255, или красная/чёрная
+// Статус игрока: свой (гильдия/альянс/список друзей), враждебный (флаг 255, или красная/чёрная
 // зона — там напасть может любой), фракционный (флаг города 1–6) или мирный.
 function playerStatus(e, me, o) {
   const same = (a, b) => a && b && a.trim().toLowerCase() === b.trim().toLowerCase();
-  if (same(e.guild, o.myguild) || same(e.alliance, o.myalliance)) return { key: "friend", ...STATUS_STYLE.friend };
+  if (same(e.guild, o.myguild) || same(e.alliance, o.myalliance) || (o._friends || nameSet(o.friends)).has((e.name || "").toLowerCase())) {
+    return { key: "friend", ...STATUS_STYLE.friend };
+  }
   if (e.faction === 255) return { key: "hostile", text: "враждебный (флаг)", color: STATUS_STYLE.hostile.color };
   const zt = (me.zone_type || "").toUpperCase();
   if (zt.includes("BLACK")) return { key: "hostile", text: "чёрная зона", color: STATUS_STYLE.hostile.color };
@@ -63,23 +88,66 @@ function playerStatus(e, me, o) {
   return { key: "passive", ...STATUS_STYLE.passive };
 }
 
+function mobTitle(e) {
+  const m = e.mob;
+  const name = m && m.name.length > 26 ? m.name.slice(0, 25) + "…" : m && m.name;
+  const base = m ? `T${m.tier ?? "?"} ${name}` : (e.name || `моб #${e.type_id ?? "?"}`);
+  return base + (e.enchant ? ` .${e.enchant}` : "") + (m && m.category_ru ? ` (${m.category_ru})` : "");
+}
+
 function radarLabel(e) {
   if (e.kind === "player") return e.name + (e.guild ? ` [${e.guild}]` : "") + (e.alliance ? ` <${e.alliance}>` : "");
   if (e.kind === "resource") {
     return `${e.name} T${e.tier ?? "?"}${e.enchant ? "." + e.enchant : ""}${e.size != null ? " ×" + e.size : ""}`;
   }
-  if (e.kind === "mob") return (e.name || `моб #${e.type_id ?? "?"}`) + (e.enchant ? ` .${e.enchant}` : "");
+  if (e.kind === "mob") return mobTitle(e);
+  if (e.kind === "loot" && e.rarity != null) return `${e.name} (${CHEST_RARITY[e.rarity]})${e.opened ? " — открыт" : ""}`;
   return e.name || e.event;
+}
+
+// Матрица фильтра ресурсов: вид × тир (пусто — всё разрешено) + мин. тир и зачарование.
+function resAllowed(res, tier, enchant, o) {
+  if (tier != null && tier < o.mintier) return false;
+  if ((enchant || 0) < (o.minenchant || 0)) return false;
+  const m = o.resmatrix || {};
+  return !(m[res] && m[res][tier] === false);
 }
 
 function radarVisible(e, o, me) {
   if (!o[e.kind]) return false;
-  if (e.kind === "resource") return !(e.tier != null && e.tier < o.mintier);
+  if (e.kind === "resource") {
+    if (!resAllowed(e.res, e.tier, e.enchant, o)) return false;
+    return !(o.minvalue && e.value != null && e.value < o.minvalue);
+  }
   if (e.kind === "player") {
+    if ((o._ignore || nameSet(o.ignore)).has((e.name || "").toLowerCase())) return false;
     const k = playerStatus(e, me || {}, o).key;
     return k === "hostile" ? o.hostile : k === "faction" ? o.factional : o.passive;
   }
+  if (e.kind === "mob") {
+    const m = e.mob;
+    if (m && m.tier && m.tier < o.mobmintier) return false;
+    if (o.bossesonly && !(m && m.boss)) return false;
+    if (m && m.res && o.livingasres && !resAllowed(m.res, m.tier, e.enchant, o)) return false;
+  }
   return true;
+}
+
+// Аффинное преобразование [a, b, c, d, e, f] (как у canvas): x' = a·x + c·y + e, y' = b·x + d·y + f.
+function affMul(m, n) {   // сначала n, потом m
+  return [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+    m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+}
+
+// Короткий звуковой сигнал (без файлов).
+let AUDIO = null;
+function beep(freq = 880, ms = 160) {
+  try {
+    AUDIO = AUDIO || new (window.AudioContext || window.webkitAudioContext)();
+    const o = AUDIO.createOscillator(), g = AUDIO.createGain();
+    o.frequency.value = freq; o.type = "square"; g.gain.value = 0.05;
+    o.connect(g); g.connect(AUDIO.destination); o.start(); o.stop(AUDIO.currentTime + ms / 1000);
+  } catch { /* звук недоступен */ }
 }
 
 // --- значки ---------------------------------------------------------------
@@ -255,18 +323,29 @@ function renderZoneImage(map) {
   return { canvas: cv, k, x0, z1 };
 }
 
+function affInv(m) {
+  const det = m[0] * m[3] - m[1] * m[2];
+  const a = m[3] / det, b = -m[1] / det, c = -m[2] / det, d = m[0] / det;
+  return [a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])];
+}
+
 class RadarView {
   constructor(canvas, { hud = null, compact = false } = {}) {
     this.canvas = canvas;
     this.hud = hud;
     this.compact = compact;
-    this.opts = radarOptions();
-    this.data = { me: { x: 0, y: 0 }, entities: [], codes: [] };
+    this.setOpts(radarOptions());
+    this.data = { me: { x: 0, y: 0 }, entities: [], codes: [], depleted: [] };
     this.zone = null;        // id зоны, для которой загружена/грузится схема
     this.map = null;         // {status, ...схема} с сервера
     this.image = null;       // отрисованная схема
+    this.mapImg = null;      // своя картинка карты зоны (data/maps)
     this.anchor = null;      // центр статичной карты, если схемы зоны нет
-    window.addEventListener("storage", (ev) => { if (ev.key === RADAR_KEY) this.opts = radarOptions(); });
+    this.heat = [];          // тепловая карта ресурсов зоны
+    this.trails = new Map(); // id → [[t, x, y], …]
+    this.alerted = new Map();
+    this.flash = 0;
+    window.addEventListener("storage", (ev) => { if (ev.key === RADAR_KEY) this.setOpts(radarOptions()); });
     this.tip = document.createElement("div");
     this.tip.className = "radar-tip"; this.tip.hidden = true;
     canvas.parentElement.appendChild(this.tip);
@@ -282,13 +361,98 @@ class RadarView {
     canvas.addEventListener("mouseleave", () => { this.tip.hidden = true; });
   }
 
+  setOpts(o) {
+    this.opts = { ...o, _friends: nameSet(o.friends), _ignore: nameSet(o.ignore) };
+  }
+
+  // Изменить настройку (горячие клавиши, профили) — сохраняется для вкладки и окна.
+  update(patch) {
+    const o = { ...radarOptions(), ...patch };
+    saveRadarOptions(o);
+    this.setOpts(o);
+    if (this.onchange) this.onchange(o);
+  }
+
+  // Горячие клавиши: +/− масштаб, M вид, L подписи, B фон, R поворот, H тепловая карта,
+  // T следы, 1–5 слои, P следующий профиль.
+  bindKeys(target = window) {
+    target.addEventListener("keydown", (ev) => {
+      if (ev.target && /INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)) return;
+      if (target === window && this.keysOnlyWhen && !this.keysOnlyWhen()) return;
+      const o = this.opts, k = ev.key.toLowerCase();
+      const flip = (key) => this.update({ [key]: !o[key] });
+      if (k === "+" || k === "=") {
+        if (o.mode === "static") this.update({ staticzoom: Math.min(4, (o.staticzoom || 1) + 0.25) });
+        else this.update({ zoom: Math.min(20, o.zoom + 0.5) });
+      } else if (k === "-" || k === "_") {
+        if (o.mode === "static") this.update({ staticzoom: Math.max(1, (o.staticzoom || 1) - 0.25) });
+        else this.update({ zoom: Math.max(1, o.zoom - 0.5) });
+      } else if (k === "m" || k === "ь") this.update({ mode: o.mode === "static" ? "follow" : "static" });
+      else if (k === "l" || k === "д") flip("labels");
+      else if (k === "b" || k === "и") flip("background");
+      else if (k === "r" || k === "к") flip("rotate");
+      else if (k === "h" || k === "р") flip("heat");
+      else if (k === "t" || k === "е") flip("trails");
+      else if (k === "p" || k === "з") this.nextProfile();
+      else if (/^[1-5]$/.test(k)) flip(RADAR_KINDS[Number(k) - 1].kind);
+      else return;
+      ev.preventDefault();
+    });
+  }
+
+  nextProfile() {
+    const all = { ...DEFAULT_PROFILES, ...loadSettings("albion-trader-radar-profiles") };
+    const names = Object.keys(all);
+    const cur = names.indexOf(this.opts.profile);
+    const name = names[(cur + 1) % names.length];
+    this.update({ ...all[name], profile: name });
+  }
+
   async poll() {
     try {
       this.data = await api("/api/radar");
       this.error = null;
       this.syncZone();
+      this.trackTrails();
+      this.checkAlerts();
     } catch (e) { this.error = e.message; }
     return this.data;
+  }
+
+  trackTrails() {
+    const now = Date.now() / 1000, keep = 8;
+    const alive = new Set();
+    for (const e of this.data.entities) {
+      if (e.kind !== "player" && e.kind !== "mob") continue;
+      alive.add(e.id);
+      const t = this.trails.get(e.id) || [];
+      const last = t[t.length - 1];
+      if (!last || last[1] !== e.x || last[2] !== e.y) t.push([now, e.x, e.y]);
+      while (t.length && now - t[0][0] > keep) t.shift();
+      this.trails.set(e.id, t);
+    }
+    for (const id of this.trails.keys()) if (!alive.has(id)) this.trails.delete(id);
+  }
+
+  // Оповещение: враждебный игрок ближе заданного — звук, вспышка рамки и (по желанию)
+  // оповещение программы (Windows, Telegram, Discord). Не чаще раза в 5 минут на игрока.
+  checkAlerts() {
+    const o = this.opts;
+    if (!o.alert) return;
+    const now = Date.now(), me = this.data.me;
+    for (const e of this.data.entities) {
+      if (e.kind !== "player" || e.dist > o.alertradius) continue;
+      if (playerStatus(e, me, o).key !== "hostile" || !radarVisible(e, o, me)) continue;
+      if (now - (this.alerted.get(e.name) || 0) < 5 * 60 * 1000) continue;
+      this.alerted.set(e.name, now);
+      this.flash = now;
+      if (o.alertsound) { beep(880); setTimeout(() => beep(660), 200); }
+      if (o.alertnotify && !this.compact) {
+        const text = `${e.name}${e.guild ? ` [${e.guild}]` : ""} в ${fmt(e.dist)} м · ${me.zone_name || ""}`
+          + (e.ip ? ` · IP ${e.ip}` : "") + (e.role ? ` · ${e.role}` : "");
+        apiPost("/api/radar/alert", { name: e.name, text }).catch(() => {});
+      }
+    }
   }
 
   // Схема зоны: запрашивается при смене зоны; пока сервер качает — повтор через 2 с.
@@ -296,7 +460,10 @@ class RadarView {
     const zone = this.data.me.zone || "";
     if (!zone || (!force && zone === this.zone && (!this.map || this.map.status !== "loading"))) return;
     if (this._zoneBusy) return;
-    if (zone !== this.zone) { this.zone = zone; this.map = null; this.image = null; this.anchor = null; }
+    if (zone !== this.zone) {
+      this.zone = zone; this.map = null; this.image = null; this.mapImg = null; this.anchor = null; this.heat = [];
+      this.trails.clear();
+    }
     this._zoneBusy = true;
     try {
       const m = await api("/api/zonemap", { zone });
@@ -304,18 +471,36 @@ class RadarView {
       this.map = m;
       if (m.status === "ready") this.image = renderZoneImage(m);
       else if (m.status === "loading") setTimeout(() => this.syncZone(true), 2000);
+      if (m.image) {
+        const im = new Image();
+        im.onload = () => { if (this.zone === zone) this.mapImg = { img: im, ...m.image }; };
+        im.src = m.image.url;
+      }
+      this.loadHeat();
     } catch (e) {
       this.map = { status: "error", error: e.message };
     } finally { this._zoneBusy = false; }
+  }
+
+  async loadHeat() {
+    if (!this.opts.heat || !this.zone) return;
+    if (this._heatAt && Date.now() - this._heatAt < 60000 && this._heatZone === this.zone) return;
+    this._heatAt = Date.now(); this._heatZone = this.zone;
+    try { this.heat = (await api("/api/radar/heat", { zone: this.zone })).cells; } catch { /* нет данных */ }
+  }
+
+  bounds() {
+    if (this.mapImg && this.mapImg.bounds) return this.mapImg.bounds;
+    if (this.map && this.map.status === "ready") return this.map.bounds;
+    return null;
   }
 
   // Камера: центр (мировые координаты) и масштаб (пикселей на метр).
   camera(w, h) {
     const o = this.opts, me = this.data.me;
     if (o.mode !== "static") return { x: me.x, y: me.y, scale: o.zoom };
-    let b;
-    if (this.map && this.map.status === "ready") b = this.map.bounds;
-    else {
+    let b = this.bounds();
+    if (!b) {
       if (!this.anchor) this.anchor = { x: me.x, y: me.y };
       b = [this.anchor.x - 150, this.anchor.y - 150, this.anchor.x + 150, this.anchor.y + 150];
     }
@@ -340,24 +525,16 @@ class RadarView {
       const dx = x - cam.x, dy = y - cam.y;
       return [cx + (dx * cs - dy * sn) * scale, cy - (dx * sn + dy * cs) * scale];
     };
+    this.at = at;
+    const S = [scale * cs, -scale * sn, -scale * sn, -scale * cs,
+      cx + scale * (-cs * cam.x + sn * cam.y), cy + scale * (sn * cam.x + cs * cam.y)];
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = this.image ? ZONE_STYLE.outside : ZONE_STYLE.base;
+    ctx.fillStyle = (this.image || this.mapImg) ? ZONE_STYLE.outside : ZONE_STYLE.base;
     ctx.fillRect(0, 0, w, h);
 
-    // Фон: картинка схемы в координатах зоны → экран (сдвиг, масштаб, поворот).
-    if (o.background && this.image) {
-      const { canvas: img, k, x0, z1 } = this.image;
-      const a = scale * cs / k, b = -scale * sn / k, c = scale * sn / k, d = scale * cs / k;
-      const [ex, ey] = at(x0, z1);
-      ctx.save();
-      ctx.globalAlpha = Math.max(0.1, Math.min(1, (o.bgopacity ?? 100) / 100));
-      ctx.setTransform(a * dpr, b * dpr, c * dpr, d * dpr, ex * dpr, ey * dpr);
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(img, 0, 0);
-      ctx.restore();
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      if (isStatic) this.drawFrame(ctx, at);
-    }
+    if (o.background) this.drawBackground(ctx, S, dpr, o);
+    if (isStatic && this.bounds()) this.drawFrame(ctx, at);
+    if (o.heat) this.drawHeat(ctx, at, scale);
 
     // Кольца расстояний — вокруг персонажа (в статичном режиме они едут вместе с ним).
     const [mx, my] = at(me.x, me.y);
@@ -369,9 +546,16 @@ class RadarView {
       ctx.beginPath(); ctx.arc(mx, my, r * scale, 0, 2 * Math.PI); ctx.stroke();
       if (!this.compact && (isStatic || r % (ringStep * 2) === 0)) ctx.fillText(`${r} м`, mx + r * scale + 3, my - 3);
     }
+    if (o.alert && !this.dense) {   // радиус оповещения
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = "rgba(255,80,80,0.45)";
+      ctx.beginPath(); ctx.arc(mx, my, o.alertradius * scale, 0, 2 * Math.PI); ctx.stroke(); ctx.setLineDash([]);
+    }
 
     ctx.textAlign = "center";
-    const exitHits = [];
+    const hits = [];
+    this.hits = hits;   // экранные позиции — для подсказки при наведении
+    if (o.depleted) this.drawDepleted(ctx, at, o, hits);
+
     // Выходы из зоны с названиями соседних зон.
     if (o.exits && this.map && this.map.status === "ready") {
       ctx.font = "11px system-ui, sans-serif";
@@ -382,31 +566,37 @@ class RadarView {
         ctx.beginPath(); ctx.arc(sx, sy, 5, 0, 2 * Math.PI); ctx.stroke(); ctx.fill();
         const label = icon === "Bank" ? "банк" : icon === "Marketplace" ? "рынок" : name;
         if (label && o.labels && !this.dense) drawText(ctx, label, sx, sy - 9, "#f2d27a");
-        exitHits.push([sx, sy, { kind: "exit", name: label || "выход", dist: Math.hypot(x - me.x, y - me.y) }]);
+        hits.push([sx, sy, { kind: "exit", name: label || "выход", dist: Math.hypot(x - me.x, y - me.y) }]);
       }
     }
 
-    ctx.font = "11px system-ui, sans-serif";
     const ents = this.data.entities.filter((e) => radarVisible(e, o, me));
-    this.hits = exitHits;   // экранные позиции — для подсказки при наведении
+    if (o.trails) this.drawTrails(ctx, at, ents);
+    if (o.route) this.drawRoute(ctx, at, ents, me);
     // Сначала дальние; игроки поверх остального.
     ents.sort((a, b) => (a.kind === "player") - (b.kind === "player") || b.dist - a.dist);
+    const offscreen = [];
     for (const e of ents) {
       const [sx, sy] = at(e.x, e.y);
-      if (sx < -40 || sy < -40 || sx > w + 40 || sy > h + 40) continue;
+      if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) {
+        if (o.arrows && this.important(e, me)) offscreen.push([e, sx, sy]);
+        continue;
+      }
+      const stale = o.stale && (e.kind === "player" || e.kind === "mob") && e.age > STALE_SECONDS;
+      ctx.globalAlpha = stale ? 0.4 : 1;
       if (e.kind === "resource") this.drawResource(ctx, e, sx, sy);
       else if (e.kind === "player") this.drawPlayer(ctx, e, sx, sy, me);
+      else if (e.kind === "mob") this.drawMob(ctx, e, sx, sy);
+      else if (e.kind === "loot") this.drawLoot(ctx, e, sx, sy);
       else {
         ctx.fillStyle = RADAR_COLOR[e.kind]; ctx.strokeStyle = "rgba(0,0,0,0.7)"; ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        if (e.kind === "loot") { ctx.moveTo(sx, sy - 5); ctx.lineTo(sx + 5, sy); ctx.lineTo(sx, sy + 5); ctx.lineTo(sx - 5, sy); ctx.closePath(); }
-        else ctx.arc(sx, sy, e.kind === "mob" ? 4 : 3.5, 0, 2 * Math.PI);
-        ctx.stroke(); ctx.fill();
-        if (e.kind === "mob" && o.moblabels && e.max_health && e.health != null && !this.dense) this.drawHp(ctx, e, sx, sy + 6, 16);
-        if (o.labels && !this.dense && (e.kind !== "mob" || o.moblabels)) drawText(ctx, radarLabel(e), sx, sy - 8);
+        ctx.beginPath(); ctx.arc(sx, sy, 3.5, 0, 2 * Math.PI); ctx.stroke(); ctx.fill();
+        if (o.labels && !this.dense) drawText(ctx, radarLabel(e), sx, sy - 8);
       }
-      this.hits.push([sx, sy, e]);
+      ctx.globalAlpha = 1;
+      hits.push([sx, sy, e]);
     }
+    if (o.squads) this.drawSquads(ctx, at, ents, me);
 
     // Я: в статичном режиме — метка с обводкой, чтобы было видно на всей карте.
     ctx.fillStyle = "#ffffff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 2;
@@ -415,13 +605,56 @@ class RadarView {
       ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(mx, my, 11, 0, 2 * Math.PI); ctx.stroke();
     }
+    if (offscreen.length) this.drawArrows(ctx, offscreen, w, h, me);
 
+    // Вспышка рамки при оповещении.
+    const since = Date.now() - this.flash;
+    if (since < 1500) {
+      ctx.strokeStyle = `rgba(255,40,40,${0.9 * (1 - since / 1500)})`; ctx.lineWidth = 8;
+      ctx.strokeRect(4, 4, w - 8, h - 8);
+    }
     if (this.hud) this.drawHud(me);
   }
 
-  // Рамка зоны и стороны света, как на карте зоны в игре (север — +y зоны).
+  drawBackground(ctx, S, dpr, o) {
+    const alpha = Math.max(0.1, Math.min(1, (o.bgopacity ?? 100) / 100));
+    let M = null, img = null;
+    if (this.mapImg) {
+      // Своя картинка: «game» — ромб как карта зоны в игре, «flat» — вид сверху без поворота.
+      const mi = this.mapImg, b = this.bounds(), W = mi.img.naturalWidth, H = mi.img.naturalHeight;
+      if (b && W && H) {
+        img = mi.img;
+        if (mi.kind === "flat") {
+          M = affMul(S, [(b[2] - b[0]) / W, 0, 0, -(b[3] - b[1]) / H, b[0], b[3]]);
+        } else {
+          const c = Math.SQRT1_2, mxw = (b[0] + b[2]) / 2, myw = (b[1] + b[3]) / 2;
+          const G = [c, c, c, -c, -c * mxw - c * myw, -c * mxw + c * myw];   // поворот −45° и y вниз
+          const pts = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]]
+            .map(([x, y]) => [G[0] * x + G[2] * y + G[4], G[1] * x + G[3] * y + G[5]]);
+          const gx0 = Math.min(...pts.map((p) => p[0])), gx1 = Math.max(...pts.map((p) => p[0]));
+          const gy0 = Math.min(...pts.map((p) => p[1])), gy1 = Math.max(...pts.map((p) => p[1]));
+          M = affMul(S, affMul(affInv(G), [(gx1 - gx0) / W, 0, 0, (gy1 - gy0) / H, gx0, gy0]));
+        }
+      }
+    }
+    if (!img && this.image) {
+      const { canvas, k, x0, z1 } = this.image;
+      img = canvas;
+      M = affMul(S, [1 / k, 0, 0, -1 / k, x0, z1]);
+    }
+    if (!img) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.setTransform(M[0] * dpr, M[1] * dpr, M[2] * dpr, M[3] * dpr, M[4] * dpr, M[5] * dpr);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(img, 0, 0);
+    ctx.restore();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // Рамка зоны и стороны света, как на карте зоны в игре.
   drawFrame(ctx, at) {
-    const [x0, z0, x1, z1] = this.map.bounds;
+    const [x0, z0, x1, z1] = this.bounds();
     const corners = [at(x0, z0), at(x1, z0), at(x1, z1), at(x0, z1)];
     ctx.save();
     ctx.lineJoin = "round";
@@ -439,6 +672,138 @@ class RadarView {
     ctx.restore();
   }
 
+  // Тепловая карта: где в этой зоне встречались ресурсы (с учётом фильтров).
+  drawHeat(ctx, at, scale) {
+    const o = this.opts, cells = this.heat.filter((c) => resAllowed(c.res, c.tier, c.enchant, o));
+    if (!cells.length) return;
+    const max = Math.max(...cells.map((c) => c.seen));
+    const r = Math.max(3, 6 * scale);
+    for (const c of cells) {
+      const [sx, sy] = at(c.x, c.y);
+      ctx.globalAlpha = 0.15 + 0.5 * Math.log1p(c.seen) / Math.log1p(max);
+      ctx.fillStyle = RES_COLOR[c.res] || "#fff";
+      ctx.beginPath(); ctx.arc(sx, sy, r, 0, 2 * Math.PI); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Истощённые узлы: бледный значок и таймер до ожидаемого респауна.
+  drawDepleted(ctx, at, o, hits) {
+    const respawn = (o.respawnmin || 10) * 60;
+    ctx.font = "bold 10px system-ui, sans-serif";
+    for (const d of this.data.depleted || []) {
+      if (!resAllowed(d.res, d.tier, d.enchant, o)) continue;
+      const [sx, sy] = at(d.x, d.y);
+      const left = respawn - d.ago;
+      ctx.globalAlpha = 0.35;
+      drawResourceIcon(ctx, d, sx, sy, this.dense ? 16 : 26);
+      ctx.globalAlpha = 1;
+      if (!this.dense) drawText(ctx, left > 0 ? `${Math.ceil(left / 60)}м` : "готов?", sx, sy + 14, left > 0 ? "#cfcfcf" : "#7CFC9A");
+      hits.push([sx, sy, { kind: "depleted", ...d, left }]);
+    }
+  }
+
+  drawTrails(ctx, at, ents) {
+    const now = Date.now() / 1000;
+    ctx.lineWidth = 2;
+    for (const e of ents) {
+      const t = this.trails.get(e.id);
+      if (!t || t.length < 2) continue;
+      const color = e.kind === "player" ? playerStatus(e, this.data.me, this.opts).color : RADAR_COLOR.mob;
+      for (let i = 1; i < t.length; i++) {
+        const [a, b] = [at(t[i - 1][1], t[i - 1][2]), at(t[i][1], t[i][2])];
+        ctx.globalAlpha = Math.max(0.05, 0.8 * (1 - (now - t[i][0]) / 8));
+        ctx.strokeStyle = color;
+        ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Маршрут сбора: от вас через ближайшие ценные узлы (жадный обход).
+  drawRoute(ctx, at, ents, me) {
+    const o = this.opts;
+    let nodes = ents.filter((e) => e.kind === "resource");
+    const score = (e) => (e.value != null ? e.value : (e.tier || 0) * 100 + (e.enchant || 0) * 300);
+    nodes = nodes.sort((a, b) => score(b) - score(a)).slice(0, Math.max(2, o.routelen * 2));
+    const path = [];
+    let cur = { x: me.x, y: me.y };
+    while (nodes.length && path.length < o.routelen) {
+      let bi = 0, bd = Infinity;
+      nodes.forEach((n, i) => { const d = Math.hypot(n.x - cur.x, n.y - cur.y); if (d < bd) { bd = d; bi = i; } });
+      cur = nodes.splice(bi, 1)[0];
+      path.push(cur);
+    }
+    if (!path.length) return;
+    ctx.save();
+    ctx.setLineDash([6, 5]); ctx.lineWidth = 2.5; ctx.strokeStyle = "rgba(255,230,120,0.9)";
+    ctx.beginPath();
+    const [sx, sy] = at(me.x, me.y); ctx.moveTo(sx, sy);
+    path.forEach((n) => { const [x, y] = at(n.x, n.y); ctx.lineTo(x, y); });
+    ctx.stroke(); ctx.setLineDash([]);
+    ctx.font = "bold 10px system-ui, sans-serif";
+    path.forEach((n, i) => { const [x, y] = at(n.x, n.y); drawText(ctx, String(i + 1), x - 12, y - 10, "#ffe678"); });
+    ctx.restore();
+  }
+
+  // Отряды: 4+ враждебных игрока в 25 м друг от друга.
+  drawSquads(ctx, at, ents, me) {
+    const hostile = ents.filter((e) => e.kind === "player" && playerStatus(e, me, this.opts).key === "hostile");
+    const seen = new Set();
+    for (const p of hostile) {
+      if (seen.has(p.id)) continue;
+      const group = [p]; seen.add(p.id);
+      for (let i = 0; i < group.length; i++) {
+        for (const q of hostile) {
+          if (!seen.has(q.id) && Math.hypot(q.x - group[i].x, q.y - group[i].y) < 25) { seen.add(q.id); group.push(q); }
+        }
+      }
+      if (group.length < 4) continue;
+      const gx = group.reduce((s, e) => s + e.x, 0) / group.length, gy = group.reduce((s, e) => s + e.y, 0) / group.length;
+      const rad = Math.max(...group.map((e) => Math.hypot(e.x - gx, e.y - gy))) + 8;
+      const [sx, sy] = at(gx, gy), [ex] = at(gx + rad, gy);
+      const r = Math.max(18, Math.hypot(ex - sx, at(gx + rad, gy)[1] - sy));
+      ctx.strokeStyle = "rgba(255,59,59,0.85)"; ctx.lineWidth = 2; ctx.setLineDash([8, 4]);
+      ctx.beginPath(); ctx.arc(sx, sy, r, 0, 2 * Math.PI); ctx.stroke(); ctx.setLineDash([]);
+      ctx.font = "bold 12px system-ui, sans-serif";
+      drawText(ctx, `отряд: ${group.length}`, sx, sy - r - 6, "#ff6b6b");
+    }
+  }
+
+  important(e, me) {
+    if (e.kind === "player") return playerStatus(e, me, this.opts).key === "hostile";
+    if (e.kind === "loot") return !e.opened && (e.rarity == null || e.rarity >= 1);
+    if (e.kind === "mob") return !!(e.mob && e.mob.boss);
+    if (e.kind === "resource") return (e.enchant || 0) >= 2 || (this.opts.minvalue && e.value >= this.opts.minvalue);
+    return false;
+  }
+
+  // Стрелки на краю окна для важных объектов за его пределами.
+  drawArrows(ctx, list, w, h, me) {
+    const cx = w / 2, cy = h / 2, pad = 16;
+    ctx.font = "bold 10px system-ui, sans-serif";
+    // Объекты в одном направлении — одна стрелка «×N» (ближайший объект группы).
+    const groups = [];
+    for (const [e, sx, sy] of list) {
+      const a = Math.atan2(sy - cy, sx - cx);
+      const g = groups.find((x) => x.kind === e.kind && Math.abs(Math.atan2(Math.sin(a - x.a), Math.cos(a - x.a))) < 0.18);
+      if (g) { g.n++; if (e.dist < g.e.dist) Object.assign(g, { e, sx, sy }); } else groups.push({ e, sx, sy, a, kind: e.kind, n: 1 });
+    }
+    for (const { e, sx, sy, n } of groups.slice(0, 20)) {
+      const a = Math.atan2(sy - cy, sx - cx);
+      const k = Math.min((w / 2 - pad) / Math.abs(Math.cos(a) || 1e-6), (h / 2 - pad) / Math.abs(Math.sin(a) || 1e-6));
+      const x = cx + Math.cos(a) * k, y = cy + Math.sin(a) * k;
+      const color = e.kind === "player" ? "#ff3b3b" : e.kind === "loot" ? (CHEST_COLOR[e.rarity] || RADAR_COLOR.loot)
+        : e.kind === "mob" ? RADAR_COLOR.mob : (TIER_COLOR[e.tier] || RADAR_COLOR.resource);
+      ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+      ctx.fillStyle = color; ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(-6, -6); ctx.lineTo(-3, 0); ctx.lineTo(-6, 6); ctx.closePath();
+      ctx.fill(); ctx.stroke(); ctx.restore();
+      const label = `${e.kind === "player" ? (n > 1 ? `×${n} ` : e.name + " ") : n > 1 ? `×${n} ` : ""}${fmt(e.dist)}м`;
+      drawText(ctx, label, x - Math.cos(a) * 18, y - Math.sin(a) * 14 + 3, color);
+    }
+  }
+
   drawHp(ctx, e, x, y, width) {
     const f = Math.max(0, Math.min(1, e.health / e.max_health));
     ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(x - width / 2 - 1, y - 1, width + 2, 5);
@@ -446,12 +811,19 @@ class RadarView {
     ctx.fillRect(x - width / 2, y, width * f, 3);
   }
 
+  resourceText(e) {
+    const o = this.opts;
+    if (o.reslabel === "value" && e.value) return `${fmtShort(e.value)}`;
+    if (o.reslabel === "size" && e.size != null) return `×${e.size}`;
+    return `${e.tier ?? "?"}${e.enchant ? "." + e.enchant : ""}`;
+  }
+
   drawResource(ctx, e, sx, sy) {
     const o = this.opts;
     if (o.resstyle === "text") {
       ctx.fillStyle = TIER_COLOR[e.tier] || RADAR_COLOR.resource; ctx.strokeStyle = "#111"; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.rect(sx - 3, sy - 3, 6, 6); ctx.fill(); ctx.stroke();
-      if (o.labels && !this.dense) drawText(ctx, radarLabel(e), sx, sy - 7);
+      if (o.labels && !this.dense) drawText(ctx, radarLabel(e) + (e.value ? ` · ${fmtShort(e.value)}` : ""), sx, sy - 7);
       return;
     }
     const iid = o.iconset === "game" ? resourceItemId(e) : null;
@@ -460,17 +832,43 @@ class RadarView {
     if (img) ctx.drawImage(img, sx - size / 2, sy - size / 2, size, size);
     else drawResourceIcon(ctx, e, sx, sy, size);
     if (!o.labels || this.dense) return;
-    if (o.resstyle === "both") drawText(ctx, radarLabel(e), sx, sy - size * 0.65);
+    if (o.resstyle === "both") drawText(ctx, radarLabel(e) + (e.value ? ` · ${fmtShort(e.value)}` : ""), sx, sy - size * 0.65);
     else {
       ctx.font = "bold 10px system-ui, sans-serif";
-      drawText(ctx, `${e.tier ?? "?"}${e.enchant ? "." + e.enchant : ""}`, sx + size * 0.55, sy + size * 0.35,
-        e.enchant ? ENCHANT_COLOR[e.enchant] : "#f1f1f1");
+      drawText(ctx, this.resourceText(e), sx + size * 0.55, sy + size * 0.35,
+        o.reslabel === "value" ? "#ffe678" : e.enchant ? ENCHANT_COLOR[e.enchant] : "#f1f1f1");
       ctx.font = "11px system-ui, sans-serif";
     }
   }
 
-  // Игрок компактно: точка цвета статуса (у фракционных — цвет города), ♞ — на маунте,
-  // полоска HP — только у раненых, подпись — имя (или имя и гильдия). Остальное — в подсказке.
+  drawMob(ctx, e, sx, sy) {
+    const o = this.opts, m = e.mob;
+    if (m && m.res && o.livingasres) {   // живой ресурс (шкура с мобов и т. п.) — значком ресурса
+      drawResourceIcon(ctx, { res: m.res, tier: m.tier, enchant: e.enchant || 0 }, sx, sy, this.dense ? 20 : 30);
+      ctx.strokeStyle = RADAR_COLOR.mob; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(sx, sy, this.dense ? 9 : 13, 0, 2 * Math.PI); ctx.stroke();
+    } else {
+      const boss = m && m.boss;
+      ctx.fillStyle = boss ? "#ff7a1a" : RADAR_COLOR.mob; ctx.strokeStyle = "rgba(0,0,0,0.75)"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(sx, sy, boss ? 6 : 4, 0, 2 * Math.PI); ctx.stroke(); ctx.fill();
+      if (boss) { ctx.strokeStyle = "#ffd27a"; ctx.beginPath(); ctx.arc(sx, sy, 9, 0, 2 * Math.PI); ctx.stroke(); }
+    }
+    if (o.moblabels && !this.dense) {
+      if (e.max_health && e.health != null) this.drawHp(ctx, e, sx, sy + 8, 16);
+      if (o.labels) drawText(ctx, mobTitle(e), sx, sy - 9);
+    }
+  }
+
+  drawLoot(ctx, e, sx, sy) {
+    const o = this.opts, color = e.rarity != null ? CHEST_COLOR[e.rarity] : RADAR_COLOR.loot;
+    ctx.fillStyle = e.opened ? "rgba(120,120,120,0.6)" : color; ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(sx, sy - 6); ctx.lineTo(sx + 6, sy); ctx.lineTo(sx, sy + 6); ctx.lineTo(sx - 6, sy); ctx.closePath();
+    ctx.stroke(); ctx.fill();
+    if (o.labels && !this.dense) drawText(ctx, radarLabel(e), sx, sy - 9, e.opened ? "#aaa" : color);
+  }
+
+  // Игрок компактно: точка цвета статуса, ♞ — на маунте, полоска HP — только у раненых,
+  // подпись — по настройке. Остальное — в подсказке.
   drawPlayer(ctx, e, sx, sy, me) {
     const o = this.opts, st = playerStatus(e, me, o);
     const hostile = st.key === "hostile";
@@ -487,7 +885,9 @@ class RadarView {
     if (e.max_health && e.health != null && e.health < e.max_health * 0.995) this.drawHp(ctx, e, sx, sy + 8, 16);
     if (o.labels && o.playerlabel !== "none") {
       ctx.font = "bold 11px system-ui, sans-serif";
-      const text = o.playerlabel === "guild" && e.guild && !this.dense ? `${e.name} [${e.guild}]` : e.name;
+      let text = e.name;
+      if (!this.dense && o.playerlabel === "guild" && e.guild) text = `${e.name} [${e.guild}]`;
+      if (!this.dense && o.playerlabel === "power") text = [e.name, e.ip ? `IP ${e.ip}` : "", e.role].filter(Boolean).join(" · ");
       drawText(ctx, text, sx, sy - 9, hostile ? "#ff6b6b" : "#f1f1f1");
     }
     ctx.font = "11px system-ui, sans-serif";
@@ -502,15 +902,33 @@ class RadarView {
     }
     if (!best) return "";
     const e = best, me = this.data.me;
+    const stale = e.age > STALE_SECONDS && (e.kind === "player" || e.kind === "mob")
+      ? `<div class="muted">нет событий ${fmt(e.age)} с — возможно, ушёл</div>` : "";
     if (e.kind === "player") {
       const st = playerStatus(e, me, this.opts);
       const hp = e.max_health && e.health != null
         ? `${fmt(e.health)} / ${fmt(e.max_health)} (${Math.round(100 * e.health / e.max_health)}%)` : "—";
       const gear = (e.equipment || []).filter((i) => !["зелье", "еда"].includes(i.slot))
         .map((i) => `<div><span class="muted">${esc(i.slot)}:</span> ${esc(i.name || i.id)}</div>`).join("");
+      const kb = e.kb ? `<div>киллборд: убийств ${fmt(e.kb.kills)}, смертей ${fmt(e.kb.deaths)}</div>` : "";
       return `<b>${esc(e.name)}</b>${e.guild ? ` [${esc(e.guild)}]` : ""}${e.alliance ? ` &lt;${esc(e.alliance)}&gt;` : ""}
         <div><span class="radar-dot" style="background:${st.color}"></span> ${esc(st.text)}</div>
-        <div>HP ${hp}${e.mounted ? " · ♞ верхом" : e.mounted === false ? " · пешком" : ""} · ${fmt(e.dist)} м</div>${gear}`;
+        <div>HP ${hp}${e.mounted ? " · ♞ верхом" : e.mounted === false ? " · пешком" : ""} · ${fmt(e.dist)} м</div>
+        ${e.ip || e.role ? `<div>${e.ip ? `сила ≈ ${fmt(e.ip)}` : ""}${e.ip && e.role ? " · " : ""}${esc(e.role || "")}</div>` : ""}
+        ${kb}${gear}${stale}`;
+    }
+    if (e.kind === "resource") {
+      return `<b>${esc(radarLabel(e))}</b><div class="muted">${fmt(e.dist)} м</div>`
+        + (e.price ? `<div>${esc(e.item)}: ${fmt(e.price)} за шт.${e.value ? ` · узел ≈ ${fmt(e.value)}` : ""}</div>` : "");
+    }
+    if (e.kind === "mob") {
+      return `<b>${esc(mobTitle(e))}</b><div class="muted">${fmt(e.dist)} м · тип #${e.type_id ?? "?"}`
+        + `${e.mob ? ` → ${esc(e.mob.id)}` : " (справочник мобов не загружен)"}</div>`
+        + (e.max_health && e.health != null ? `<div>HP ${fmt(e.health)} / ${fmt(e.max_health)}</div>` : "") + stale;
+    }
+    if (e.kind === "depleted") {
+      return `<b>${esc(e.name)} T${e.tier}${e.enchant ? "." + e.enchant : ""}</b><div>истощён ${fmt(e.ago / 60)} мин назад</div>`
+        + `<div class="muted">${e.left > 0 ? `респаун ≈ через ${Math.ceil(e.left / 60)} мин` : "мог уже появиться"}</div>`;
     }
     if (e.kind === "exit") return `<b>${esc(e.name)}</b><div class="muted">выход · ${fmt(e.dist)} м</div>`;
     return `<b>${esc(radarLabel(e))}</b><div class="muted">${fmt(e.dist)} м</div>`;
@@ -522,148 +940,19 @@ class RadarView {
     const hostile = this.data.entities.filter((e) => e.kind === "player" && playerStatus(e, me, this.opts).key === "hostile").length;
     const m = this.map;
     const bg = !this.zone ? "фон: зона неизвестна (смените зону)"
-      : !m || m.status === "loading" ? "фон: скачиваю схему зоны…"
+      : this.mapImg ? "" : !m || m.status === "loading" ? "фон: скачиваю схему зоны…"
         : m.status === "error" ? `фон: ${m.error}` : "";
+    const replay = this.data.replay ? ` · <b>запись</b> ${fmt(this.data.replay.pos)}/${fmt(this.data.replay.duration)} с` : "";
     this.hud.innerHTML = this.error ? `<span class="bad">Нет связи: ${esc(this.error)}</span>`
-      : `<b>${esc(me.name || "персонаж")}</b> · ${esc(me.zone_name || "зона неизвестна")} · (${fmt1(me.x)}, ${fmt1(me.y)})<br>
+      : `<b>${esc(me.name || "персонаж")}</b> · ${esc(me.zone_name || "зона неизвестна")} · (${fmt1(me.x)}, ${fmt1(me.y)})${replay}<br>
         игроки ${n.player || 0}${hostile ? ` (<span style="color:#ff5a5a">враждебных ${hostile}</span>)` : ""} · мобы ${n.mob || 0}
         · ресурсы ${n.resource || 0} · лут ${n.loot || 0} · объекты ${n.object || 0}`
+        + (this.opts.profile ? ` · профиль «${esc(this.opts.profile)}»` : "")
         + (bg ? `<br><span class="muted">${esc(bg)}</span>` : "");
   }
 }
 
-if (typeof App !== "undefined" && document.getElementById("groups")) App.tab({
-  id: "radar", group: "world", title: "Радар",
-  init(el) {
-    const o = radarOptions();
-    const check = (k, t) => `<label><input type="checkbox" data-opt="${k}"${o[k] ? " checked" : ""}> ${t}</label>`;
-    const select = (k, t, opts) => `<label>${t} <select data-opt="${k}">${opts.map(([v, n]) =>
-      `<option value="${v}"${String(o[k]) === v ? " selected" : ""}>${n}</option>`).join("")}</select></label>`;
-    const text = (k, t) => `<label>${t} <input type="text" data-opt="${k}" value="${esc(o[k] || "")}"></label>`;
-    const layer = (k) => `<label><input type="checkbox" data-opt="${k.kind}"${o[k.kind] ? " checked" : ""}>
-      <span class="radar-dot" style="background:${k.color}"></span>${k.title}</label>`;
-    el.innerHTML = `
-      <p class="muted intro">Объекты вокруг персонажа из трафика игры на фоне схемы текущей зоны. Схема строится из
-        раскладки уровня игры (ao-bin-dumps) и скачивается при первом входе в зону, дальше — из
-        <code>data/zonemaps</code>. Настройки ниже действуют и здесь, и в отдельном окне радара.</p>
-      <div class="radar">
-        <div class="radar-map"><canvas id="radar-canvas"></canvas><div class="radar-hud" id="radar-hud"></div></div>
-        <div class="radar-side">
-          <div class="radar-actions">
-            <button type="button" id="radar-open">Окно радара</button>
-            <label title="Держать окно радара поверх игры (Windows)"><input type="checkbox" id="radar-pin"${o.pin ? " checked" : ""}> поверх игры</label>
-          </div>
-          <span class="muted" id="radar-pin-hint"></span>
-          ${select("mode", "Карта", [["follow", "за персонажем"], ["static", "статичная, вся зона"]])}
-          <label data-show="follow">Масштаб <input type="range" min="1" max="20" step="0.5" data-opt="zoom" value="${o.zoom}"></label>
-          <label data-show="static">Приближение <input type="range" min="1" max="4" step="0.25" data-opt="staticzoom" value="${o.staticzoom}"></label>
-          <div class="radar-layers">${RADAR_KINDS.map(layer).join("")}</div>
-          <div class="radar-layers">
-            ${check("hostile", '<span class="radar-dot" style="background:#ff3b3b"></span>враждебные')}
-            ${check("factional", '<span class="radar-dot" style="background:#f5a524"></span>фракция')}
-            ${check("passive", '<span class="radar-dot" style="background:#9be29b"></span>мирные')}
-          </div>
-          <details class="radar-more"><summary>Ещё настройки</summary>
-            ${select("playerlabel", "Подпись игрока", [["name", "имя"], ["guild", "имя и гильдия"], ["none", "без подписи"]])}
-            ${select("resstyle", "Ресурсы", [["icon", "значок"], ["text", "надпись"], ["both", "значок и надпись"]])}
-            ${select("iconset", "Значки", [["drawn", "свои (без интернета)"], ["game", "из игры (render.albiononline.com)"]])}
-            <label>Мин. тир ресурсов <input type="number" min="1" max="8" data-opt="mintier" value="${o.mintier}"></label>
-            ${text("myguild", "Моя гильдия")}
-            ${text("myalliance", "Мой альянс")}
-            ${check("labels", "Подписи")}
-            ${check("moblabels", "Названия мобов")}
-            ${check("exits", "Выходы из зоны")}
-            ${check("rotate", "Поворот 45° (как камера игры)")}
-            ${check("background", "Фон — схема зоны")}
-            <label>Яркость фона <input type="range" min="10" max="100" data-opt="bgopacity" value="${o.bgopacity}"></label>
-          </details>
-          <p class="muted small-hint">Наведите курсор на игрока — статус, HP, маунт и снаряжение.</p>
-          <h2>Рядом</h2>
-          <div class="radar-list" id="radar-list"></div>
-        </div>
-      </div>
-      <h2>Игроки рядом</h2>
-      <div id="radar-players"></div>
-      <details class="radar-codes"><summary>Коды событий (диагностика)</summary>
-        <p class="muted">Все события, что пришли от сервера: код, имя (если известно), количество и параметры с типами.
-          <code>·pos</code> — значение похоже на координаты. Если на радаре пусто, по этой таблице видно, под каким
-          кодом приходят, например, мобы, — его можно указать в <code>data/opcodes.json</code>:
-          <code>{"events": {"new_mob": 126}}</code>.</p>
-        <div id="radar-codes"></div>
-      </details>`;
-    this.view = new RadarView($("#radar-canvas", el), { hud: $("#radar-hud", el) });
-    const modeRows = () => $$("[data-show]", el).forEach((r) => { r.hidden = r.dataset.show !== this.view.opts.mode; });
-    $$("[data-opt]", el).forEach((inp) => inp.addEventListener(inp.type === "text" ? "change" : "input", () => {
-      const s = radarOptions();
-      s[inp.dataset.opt] = inp.type === "checkbox" ? inp.checked
-        : (inp.type === "range" || inp.type === "number") ? Number(inp.value) : inp.value;
-      saveSettings(s, RADAR_KEY);
-      this.view.opts = s;
-      modeRows();
-      this.renderList();
-    }));
-    modeRows();
-    $("#radar-open", el).addEventListener("click", async () => {
-      try {
-        const r = await apiPost("/api/window", { which: "radar", action: "open" });
-        if (r.mode) return;
-      } catch { /* не этот компьютер — всплывающее окно браузера */ }
-      window.open("radar.html", "albion-radar", "popup,width=520,height=520");
-    });
-    $("#radar-pin", el).addEventListener("change", async (ev) => {
-      const on = ev.target.checked;
-      saveSettings({ ...radarOptions(), pin: on }, RADAR_KEY);
-      try {
-        const r = await apiPost("/api/window", { which: "radar", topmost: on });
-        $("#radar-pin-hint").textContent = on && !r.applied ? (r.reason || "") : "";
-      } catch { $("#radar-pin-hint").textContent = on ? "доступно на компьютере с программой" : ""; }
-    });
-    this.players = makeTable($("#radar-players", el), [
-      { key: "name", title: "Игрок", html: (r) => `<b>${esc(r.name)}</b>` + (r.guild || r.alliance
-        ? ` <span class="muted">${r.guild ? `[${esc(r.guild)}]` : ""}${r.alliance ? ` &lt;${esc(r.alliance)}&gt;` : ""}</span>` : "") },
-      { key: "status", title: "Статус", sort: (r) => r._st.key,
-        html: (r) => `<span class="radar-dot" style="background:${r._st.color}"></span> ${esc(r._st.text)}` },
-      { key: "hp", title: "HP", sort: (r) => (r.max_health ? r.health / r.max_health : -1),
-        html: (r) => (r.max_health && r.health != null ? `${Math.round(100 * r.health / r.max_health)}%` : "—") },
-      { key: "mounted", title: "♞", sort: (r) => (r.mounted ? 1 : 0), html: (r) => (r.mounted ? "♞" : "") },
-      { key: "weapon", title: "Оружие", sort: (r) => r._weapon,
-        html: (r) => `<span title="${esc((r.equipment || []).map((i) => `${i.slot}: ${i.name || i.id}`).join("\n"))}">${esc(r._weapon || "—")}</span>` },
-      { key: "dist", title: "м", html: (r) => fmt(r.dist) },
-    ], { sort: "dist", asc: true, empty: "Игроков рядом нет." });
-    const frame = () => { if (App.current === this) this.view.draw(); requestAnimationFrame(frame); };
-    requestAnimationFrame(frame);
-    setInterval(() => { if (App.current === this && !document.hidden) this.poll(); }, 300);
-    setInterval(() => { if (App.current === this && !document.hidden) { this.renderCodes(); this.renderPlayers(); } }, 1500);
-    this.poll().then(() => this.renderPlayers());
-  },
-  show() { if (this.view) this.poll(); },
-
-  async poll() {
-    await this.view.poll();
-    this.renderList();
-  },
-
-  renderPlayers() {
-    const me = this.view.data.me, o = this.view.opts;
-    this.players.set(this.view.data.entities.filter((e) => e.kind === "player")
-      .map((e) => ({ ...e, _st: playerStatus(e, me, o),
-        _weapon: ((e.equipment || []).find((i) => i.slot === "оружие") || {}).name || "" })));
-  },
-
-  renderList() {
-    const o = this.view.opts, me = this.view.data.me;
-    const rows = this.view.data.entities.filter((e) => e.kind !== "player" && radarVisible(e, o, me)).slice(0, 60);
-    $("#radar-list").innerHTML = rows.length ? rows.map((e) =>
-      `<div><span class="radar-dot" style="background:${e.kind === "resource" ? (TIER_COLOR[e.tier] || RADAR_COLOR.resource) : RADAR_COLOR[e.kind]}"></span>
-        <span>${esc(radarLabel(e))}</span><span class="muted">${fmt(e.dist)} м</span></div>`).join("")
-      : '<p class="muted">Никого. Смените зону, чтобы сборщик увидел объекты вокруг.</p>';
-  },
-
-  renderCodes() {
-    const codes = this.view.data.codes || [];
-    $("#radar-codes").innerHTML = codes.length ? `<div class="table-wrap"><table><thead><tr><th>Код</th><th>Имя</th>
-      <th>Кол-во</th><th>Параметры</th></tr></thead><tbody>${codes.map((c) => `<tr><td>${c.code}</td>
-      <td>${esc(c.name || "—")}</td><td>${fmt(c.count)}</td><td><code>${esc(c.shape)}</code></td></tr>`).join("")}
-      </tbody></table></div>` : '<p class="muted">Событий пока не было.</p>';
-  },
-});
+function fmtShort(v) {
+  if (v == null) return "—";
+  return v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v / 1e3)}k` : String(Math.round(v));
+}

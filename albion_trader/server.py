@@ -36,7 +36,7 @@ from .notify import Notifier
 from .mytrades import MyTrades
 from .capture import opcodes as opcodes_mod
 from .capture.albion import AlbionState, load_opcodes
-from .capture.sniffer import Sniffer
+from .capture.sniffer import CaptureError, Sniffer
 from . import __version__
 from . import tray as tray_mod
 from . import window as window_mod
@@ -142,12 +142,8 @@ class App:
                            self.alerts.trigger_kind(conn, "world_event", key, title, text, payload))
         self.world.attach(self.albion)
         self.mobs = MobTable(Path(config.db_path).with_name("mobs.json"))
-        self.radar = Radar(Path(config.db_path).with_name("radar.json"),
-                           item_of=lambda i: self.catalog.index.get(str(i)),
-                           item_name=lambda iid: self.catalog.name(iid),
-                           zone_type=self._zone_type,
-                           item_ip=lambda iid: (self.gamedata.items.get(iid) or {}).get("ip"),
-                           mobs=self.mobs)
+        self.radar = self._new_radar()
+        self.replay = None          # перемотка записи на радаре (RadarReplay)
         self._res_prices: dict[str, float | None] = {}
         self._res_prices_at = 0.0
         self.radar.attach(self.albion)
@@ -179,6 +175,12 @@ class App:
             out.update(w.open())
         if "topmost" in body:
             out.update(w.set_topmost(bool(body["topmost"])))
+        if "overlay" in body:
+            try:
+                alpha = int(body.get("alpha", 75))
+            except (TypeError, ValueError):
+                alpha = 75
+            out.update(w.set_overlay(bool(body["overlay"]), alpha))
         return {**self.api_window({"which": which}), **out}
 
     def start_capture(self, open_sockets=None) -> bool:
@@ -503,6 +505,14 @@ class App:
                         "bounds": cfg.get("bounds")}
         return None
 
+    def _new_radar(self) -> Radar:
+        return Radar(Path(self.config.db_path).with_name("radar.json"),
+                     item_of=lambda i: self.catalog.index.get(str(i)),
+                     item_name=lambda iid: self.catalog.name(iid),
+                     zone_type=self._zone_type,
+                     item_ip=lambda iid: (self.gamedata.items.get(iid) or {}).get("ip"),
+                     mobs=self.mobs)
+
     RES_ITEMS = {"wood": "WOOD", "rock": "ROCK", "fiber": "FIBER", "hide": "HIDE", "ore": "ORE"}
 
     @classmethod
@@ -513,11 +523,18 @@ class App:
         return f"T{tier}_{base}" + (f"_LEVEL{enchant}@{enchant}" if enchant else "")
 
     def api_radar(self, _q) -> dict:
-        snap = self.radar.snapshot()
+        replay = self.replay
+        if replay:
+            replay.advance()
+            replay.radar.mob_offset = self.radar.mob_offset
+            snap = replay.radar.snapshot(touch=False)
+            snap["replay"] = replay.info()
+        else:
+            snap = self.radar.snapshot()
+            with self.write_lock, self.conn() as conn:
+                self.radar.flush(conn)
         zone = snap["me"].get("zone")
         snap["me"]["zone_name"] = self.zonemaps.zone_name(zone) if zone else ""
-        with self.write_lock, self.conn() as conn:
-            self.radar.flush(conn)
         res = [e for e in snap["entities"] if e["kind"] == "resource"]
         players = [e["name"] for e in snap["entities"] if e["kind"] == "player" and e["name"]]
         with self.conn() as conn:
@@ -596,6 +613,50 @@ class App:
             sent = self.alerts.trigger_kind(conn, "radar_hostile", f"{name}:{int(time.time()) // 300}",
                                             f"Враждебный игрок: {name}", text, {"name": name})
         return {"sent": len(sent)}
+
+    def _replay_files(self) -> list[Path]:
+        data_dir = Path(self.config.db_path).parent
+        files = {p.resolve() for p in data_dir.glob("*.pcap")}
+        if self.config.record_path and Path(self.config.record_path).is_file():
+            files.add(Path(self.config.record_path).resolve())
+        return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def api_radar_replay(self, _q) -> dict:
+        files = [{"name": p.name, "size": p.stat().st_size} for p in self._replay_files()]
+        if self.replay:
+            self.replay.advance()
+            return {**self.replay.info(), "files": files}
+        return {"active": False, "files": files}
+
+    def api_radar_replay_post(self, _q, body) -> dict:
+        from .radar_replay import RadarReplay
+        body = body if isinstance(body, dict) else {}
+        if body.get("open"):
+            path = next((p for p in self._replay_files() if p.name == body["open"]), None)
+            if not path:
+                raise ApiError("нет такой записи")
+            try:
+                self.replay = RadarReplay(path, self._new_radar, dict(self.albion.op, events=dict(self.albion.ev)))
+            except (OSError, CaptureError) as e:
+                raise ApiError(f"не удалось открыть запись: {e}") from e
+            self.replay.play()
+        rp = self.replay
+        if rp is None:
+            return self.api_radar_replay({})
+        action = body.get("action")
+        if action == "close":
+            self.replay = None
+            return self.api_radar_replay({})
+        if action == "play":
+            rp.play()
+        elif action == "pause":
+            rp.pause()
+        if "speed" in body:
+            rp.advance()
+            rp.speed = max(0.1, min(64.0, _float(body["speed"], 1)))
+        if "seek" in body:
+            rp.seek(_float(body["seek"], 0))
+        return self.api_radar_replay({})
 
     def api_radar_history(self, q) -> dict:
         now = int(time.time())
@@ -1342,6 +1403,7 @@ def make_handler(app: App):
         "/api/zonemap": app.api_zonemap,
         "/api/radar/history": app.api_radar_history,
         "/api/radar/heat": app.api_radar_heat,
+        "/api/radar/replay": app.api_radar_replay,
         "/api/system": app.api_system,
         "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,
@@ -1372,9 +1434,10 @@ def make_handler(app: App):
         "/api/avalon": app.api_avalon_post,
         "/api/radar/codes": app.api_radar_codes_post,
         "/api/radar/alert": app.api_radar_alert_post,
+        "/api/radar/replay": app.api_radar_replay_post,
     }
     # Запускают программы на этом компьютере — только для запросов с него же.
-    local_only = {"/api/window", "/api/system", "/api/update-opcodes"}
+    local_only = {"/api/window", "/api/system", "/api/update-opcodes", "/api/radar/codes"}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AlbionTrader"

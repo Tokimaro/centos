@@ -2,6 +2,7 @@
 // Окно радара: только карта и значки. Настройки — на вкладке «Мир → Радар» (общие через localStorage).
 (() => {
   const view = new RadarView($("#radar-canvas"), { compact: true });
+  view.bindKeys(window);
   const status = $("#radar-status");
   const poll = async () => {
     await view.poll();

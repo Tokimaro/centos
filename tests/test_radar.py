@@ -1,4 +1,5 @@
 import json
+import unittest.mock
 import struct
 import tempfile
 import unittest
@@ -267,3 +268,56 @@ class RadarFeaturesTest(unittest.TestCase):
         self.assertTrue(img["url"].startswith("maps/0201.png"))
         self.assertEqual((img["kind"], img["bounds"]), ("flat", [-400, -400, 400, 400]))
         self.assertIsNone(self.app.map_image("9999"))
+
+
+def write_pcap(path, packets):
+    """packets: [(время, IP-пакет)] → классический .pcap с Ethernet."""
+    with open(path, "wb") as f:
+        f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+        for ts, ip in packets:
+            frame = b"\xaa" * 12 + b"\x08\x00" + ip
+            f.write(struct.pack("<IIII", int(ts), int((ts % 1) * 1e6), len(frame), len(frame)) + frame)
+
+
+class ReplayAndOverlayTest(unittest.TestCase):
+    def test_replay_play_seek_close(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            app = App(AppConfig(db_path=d / "m.db", items_path=d / "i.json", capture=False))
+            ev = app.albion.ev
+            pk = lambda *c: pb.ip_udp(pb.packet(*c))
+            write_pcap(d / "rec.pcap", [
+                (1000.0, pk(pb.response(2, {0: 1, 2: "Me", 8: "0201", 9: [0.0, 0.0]}))),
+                (1001.0, pk(pb.event(ev["new_character"], {0: 5, 1: "Bob", 12: [1.0, 1.0]}))),
+                (1010.0, pk(pb.command(4, bytes([3]) + pb.params({0: 5, 1: b"\x03" + b"\x00" * 8 + struct.pack("<ff", 9.0, 9.0) + b"\x00" * 8})))),
+                (1020.0, pk(pb.event(ev["leave"], {0: 5}))),
+            ])
+            files = app.api_radar_replay({})["files"]
+            self.assertEqual([f["name"] for f in files], ["rec.pcap"])
+            st = app.api_radar_replay_post({}, {"open": "rec.pcap"})
+            self.assertEqual((st["active"], st["duration"], st["packets"]), (True, 20.0, 4))
+            app.api_radar_replay_post({}, {"action": "pause"})
+            app.api_radar_replay_post({}, {"seek": 5})
+            snap = app.api_radar({})
+            self.assertEqual(snap["replay"]["pos"], 5.0)
+            self.assertEqual([(e["name"], e["x"]) for e in snap["entities"]], [("Bob", 1.0)])
+            app.api_radar_replay_post({}, {"seek": 15})
+            self.assertEqual(app.api_radar({})["entities"][0]["x"], 9.0)
+            app.api_radar_replay_post({}, {"seek": 2})          # назад — пересборка с начала
+            self.assertEqual(app.api_radar({})["entities"][0]["x"], 1.0)
+            app.api_radar_replay_post({}, {"seek": 25})
+            self.assertEqual(app.api_radar({})["entities"], [])
+            self.assertEqual(app.api_radar({})["me"]["zone"], "0201")
+            self.assertFalse(app.api_radar_replay_post({}, {"action": "close"})["active"])
+            self.assertNotIn("replay", app.api_radar({}))
+            # Рыночные данные и история встреч из записи не сохраняются.
+            self.assertEqual(app.api_radar_history({})["rows"], [])
+            with self.assertRaises(Exception):
+                app.api_radar_replay_post({}, {"open": "../nope.pcap"})
+
+    def test_overlay_not_windows(self):
+        from albion_trader import window
+        w = window.CompanionWindow("http://x", "/tmp/p", page=window.RADAR_PAGE, title=window.RADAR_TITLE)
+        with unittest.mock.patch.object(window, "IS_WINDOWS", False):
+            r = w.set_overlay(True, 60)
+        self.assertEqual((r["overlay"], r["overlay_applied"], w.alpha), (True, False, 60))
