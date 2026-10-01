@@ -31,22 +31,26 @@ from .gamedata import DUMPS_URL
 
 log = logging.getLogger("albion_trader.zonemaps")
 
-ZONEMAP_VERSION = 3
+ZONEMAP_VERSION = 5
 TEMPLATE_FOLDERS = ("GREEN", "RED", "DEAD", "NONE")
 MAX_TILES = 40000            # на зону; лишнее (мелочь) отбрасывается
 
 # Категории тайлов по ключевым словам имени (порядок важен: первое совпадение).
 # (категория, ключевые слова, размер по умолчанию: ширина, длина)
 _SKIP = ("VEG_", "DECO", "LANTERN", "BANNER", "BUNTING", "HALLOWEEN", "XMAS", "EASTER", "ANNIVERSARY",
-         "FACTION_GUARD", "LIGHT", "FX_", "SOUND", "PARTICLE", "SPAWN", "GUARD", "ATMOSPHEREBUBBLE", "DEBRIS")
+         "FACTION_GUARD", "LIGHT", "FX_", "SOUND", "PARTICLE", "SPAWN", "GUARD", "ATMOSPHEREBUBBLE", "DEBRIS",
+         "LILY", "DUGWEED", "ALGAE", "WATER_FILL", "MOSS", "FLOWER", "MONSTERA", "SPIKE", "RAILING", "COLUMN")
 # Имена тайлов начинаются с биома и «цвета» зоны (SWAMP_RED_…, ROADS_…, FOREST_RED_…) —
 # их отрезаем, иначе ROADS_GROUND выглядел бы как дорога, а FOREST_GROUND — как лес.
 _BIOMES = {"FOREST", "SWAMP", "HIGHLAND", "HIGHLANDS", "STEPPE", "MOUNTAIN", "MOUNTAINS", "ROADS", "MISTS", "MIST",
            "HELL", "AVALON", "CORRUPTED", "UNDEAD", "KEEPER", "MORGANA", "HERETIC", "ISLAND"}
 _COLORS = {"RED", "GREEN", "BLACK", "DEAD", "YELLOW", "BLUE", "AVA", "NONE", "RO"}
 _RULES = [
+    # Сначала мостки и дороги: в болотах дороги — настилы (WALKWAY_STONE — не камень),
+    # а деревянные мостки между участками на карте игры — тонкие тёмные тропки.
+    ("path", ("WALKING_PLANKS", "PLANKS", "BOARDWALK", "WALKWAY_WOODEN"), (5, 3)),
+    ("road", ("ROAD", "STREET", "BRIDGE", "PATH_", "WALKWAY", "TRAIL", "PAVEMENT"), (10, 10)),
     ("water", ("WATER", "RIVER", "LAKE", "OCEAN", "FORD", "SWAMP_POND", "POND", "FISHINGZONE"), (10, 10)),
-    ("road", ("ROAD", "STREET", "BRIDGE", "PATH_"), (10, 10)),
     ("plot", ("CONSTRUCTION", "REALESTATE"), (10, 10)),          # участки под постройки игроков
     ("building", ("CITYWALL", "HOUSE", "BUILDING", "BANK", "MARKETPLACE", "TOWER", "CASTLE",
                   "CITY_", "_HALL", "FORT", "WALL_WOOD", "STALL", "TENT"), (8, 8)),
@@ -57,6 +61,7 @@ _RULES = [
 ]
 _SIZE = re.compile(r"(\d{1,3})\s*[xX]\s*(\d{1,3})")
 _LEN = re.compile(r"_(\d{1,2})M(?:_|$)")
+_SQUARE = re.compile(r"_(\d{1,3})X(?:_|$)")          # GROUND_20x, WATER_river_30x — квадрат
 _GENERIC_GROUND = re.compile(r"_\d{1,3}[xX]\d{1,3}")   # _SWAMP_RED_10x10_B и т. п.
 
 
@@ -66,7 +71,7 @@ def classify(name: str) -> tuple[str, float, float] | None:
     while len(tokens) > 1 and (tokens[0] in _BIOMES or tokens[0] in _COLORS):
         tokens.pop(0)
     up = "_" + "_".join(tokens)
-    if any(s in up for s in _SKIP) and "WATER" not in up and "RIVER" not in up:
+    if any(s in up for s in _SKIP):
         return None
     cat = None
     size = (0.0, 0.0)
@@ -80,11 +85,16 @@ def classify(name: str) -> tuple[str, float, float] | None:
         else:
             return None
     m = _SIZE.search(up)
+    sq = _SQUARE.search(up)
     if m:
         size = (float(m.group(1)), float(m.group(2)))
+    elif sq:
+        size = (float(sq.group(1)), float(sq.group(1)))
     else:
         lm = _LEN.search(up)
-        if lm and cat == "cliff":
+        if cat in ("road", "path") and ("WALKWAY" in up or "PLANKS" in up):
+            size = (float(lm.group(1)), 6.0) if lm else (5.0, 3.0)   # настил: длина × ширина
+        elif lm and cat == "cliff":
             size = (float(lm.group(1)) if "STRAIGHT" in up else size[0], size[1])
             if "20M" in up:
                 size = (20.0, 4.0)
@@ -133,6 +143,11 @@ def parse_template(xml_text: str) -> dict:
         if not c:
             return
         cat, w, h = c
+        up = name.upper()
+        if "DIAGONAL_RIGHT" in up:   # диагональные куски уже повёрнуты в модели
+            rot -= 45
+        elif "DIAGONAL_LEFT" in up:
+            rot += 45
         scale = _floats(el.get("scale"), 3) if el.get("scale") else None
         if scale and scale[0] > 0 and scale[2] > 0:
             w, h = w * scale[0], h * scale[2]
@@ -206,7 +221,8 @@ def assemble(cluster: dict, templates: dict[str, dict]) -> dict:
             wx, wz = _rotate(x, z, inst["rot"])
             exits.append([round(wx + inst["x"], 1), round(wz + inst["z"], 1), icon])
     if len(tiles) > MAX_TILES:   # сначала крупное: земля, вода, дороги, скалы, постройки
-        order = {"ground": 0, "water": 1, "road": 2, "cliff": 3, "building": 4, "plot": 5, "rock": 6, "tree": 7}
+        order = {"ground": 0, "water": 1, "road": 2, "cliff": 3, "building": 4, "plot": 5, "path": 6, "rock": 7,
+                 "tree": 8}
         tiles.sort(key=lambda t: order.get(t[0], 9))
         tiles = tiles[:MAX_TILES]
     b = cluster["bounds"]

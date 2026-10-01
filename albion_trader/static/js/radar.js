@@ -22,14 +22,15 @@ const RADAR_DEFAULTS = {
   passive: true, factional: true, hostile: true, playerlabel: "name", moblabels: false, myguild: "", myalliance: "",
 };
 
-// Цвета схемы зоны (как у мини-карты игры — одинаковые в светлой и тёмной теме).
+// Цвета схемы зоны — как у карты зоны в игре: бирюзовая вода, охристая суша
+// (светлее на возвышенностях), оранжевые дороги, светлые участки под дома.
 const ZONE_STYLE = {
-  base: "#28332b", low: [44, 58, 42], high: [104, 120, 76],
-  water: "#2d6f93", road: "#9a8759", cliff: "rgba(12,15,13,0.7)", building: "#6e5438",
-  plot: "rgba(255,255,255,0.07)",
-  rock: "#6f7470", tree: "#1d4a2a",
+  base: "#7a6a30", outside: "#1b1d22", low: [118, 100, 42], high: [196, 168, 84],
+  water: "#3f7f90", road: "#d4862f", cliff: "rgba(70,48,22,0.85)", building: "#9a948a",
+  plot: "#d8c58c", plotEdge: "rgba(110,85,35,0.75)", path: "#5b3d1d",
+  rock: "#8b8174", tree: "#566428", frame: "#d9b98a", frameEdge: "#7a5a33",
 };
-const ZONE_ORDER = ["ground", "water", "plot", "road", "cliff", "building", "rock", "tree"];
+const ZONE_ORDER = ["ground", "water", "plot", "road", "path", "cliff", "building", "rock", "tree"];
 
 // Цвета тиров и зачарований — как в игре.
 const TIER_COLOR = { 1: "#a3a3a3", 2: "#c8c8c8", 3: "#5bbf5b", 4: "#4a90e2", 5: "#e5484d", 6: "#f28c28",
@@ -241,7 +242,13 @@ function renderZoneImage(map) {
       ctx.rotate(rot * Math.PI / 180);
       if (cat === "tree" || cat === "rock") {
         ctx.beginPath(); ctx.arc(0, 0, Math.max(tw, th) * k / 2, 0, 2 * Math.PI); ctx.fill();
-      } else ctx.fillRect(-tw * k / 2, -th * k / 2, tw * k, th * k);
+      } else {
+        ctx.fillRect(-tw * k / 2, -th * k / 2, tw * k, th * k);
+        if (cat === "plot") {
+          ctx.strokeStyle = ZONE_STYLE.plotEdge; ctx.lineWidth = Math.max(1, k * 0.6);
+          ctx.strokeRect(-tw * k / 2, -th * k / 2, tw * k, th * k);
+        }
+      }
       ctx.restore();
     }
   }
@@ -314,7 +321,7 @@ class RadarView {
     }
     const span = Math.max(b[2] - b[0], b[3] - b[1]) * (o.rotate ? Math.SQRT2 : 1);
     return { x: (b[0] + b[2]) / 2, y: (b[1] + b[3]) / 2,
-      scale: Math.min(w, h) / Math.max(span, 1) * Math.max(1, Number(o.staticzoom) || 1) };
+      scale: 0.9 * Math.min(w, h) / Math.max(span, 1) * Math.max(1, Number(o.staticzoom) || 1) };
   }
 
   draw() {
@@ -334,7 +341,7 @@ class RadarView {
       return [cx + (dx * cs - dy * sn) * scale, cy - (dx * sn + dy * cs) * scale];
     };
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = ZONE_STYLE.base;
+    ctx.fillStyle = this.image ? ZONE_STYLE.outside : ZONE_STYLE.base;
     ctx.fillRect(0, 0, w, h);
 
     // Фон: картинка схемы в координатах зоны → экран (сдвиг, масштаб, поворот).
@@ -349,6 +356,7 @@ class RadarView {
       ctx.drawImage(img, 0, 0);
       ctx.restore();
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (isStatic) this.drawFrame(ctx, at);
     }
 
     // Кольца расстояний — вокруг персонажа (в статичном режиме они едут вместе с ним).
@@ -363,6 +371,7 @@ class RadarView {
     }
 
     ctx.textAlign = "center";
+    const exitHits = [];
     // Выходы из зоны с названиями соседних зон.
     if (o.exits && this.map && this.map.status === "ready") {
       ctx.font = "11px system-ui, sans-serif";
@@ -372,13 +381,14 @@ class RadarView {
         ctx.fillStyle = "#f2d27a"; ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.arc(sx, sy, 5, 0, 2 * Math.PI); ctx.stroke(); ctx.fill();
         const label = icon === "Bank" ? "банк" : icon === "Marketplace" ? "рынок" : name;
-        if (label && o.labels) drawText(ctx, label, sx, sy - 9, "#f2d27a");
+        if (label && o.labels && !this.dense) drawText(ctx, label, sx, sy - 9, "#f2d27a");
+        exitHits.push([sx, sy, { kind: "exit", name: label || "выход", dist: Math.hypot(x - me.x, y - me.y) }]);
       }
     }
 
     ctx.font = "11px system-ui, sans-serif";
     const ents = this.data.entities.filter((e) => radarVisible(e, o, me));
-    this.hits = [];   // экранные позиции — для подсказки при наведении
+    this.hits = exitHits;   // экранные позиции — для подсказки при наведении
     // Сначала дальние; игроки поверх остального.
     ents.sort((a, b) => (a.kind === "player") - (b.kind === "player") || b.dist - a.dist);
     for (const e of ents) {
@@ -407,6 +417,26 @@ class RadarView {
     }
 
     if (this.hud) this.drawHud(me);
+  }
+
+  // Рамка зоны и стороны света, как на карте зоны в игре (север — +y зоны).
+  drawFrame(ctx, at) {
+    const [x0, z0, x1, z1] = this.map.bounds;
+    const corners = [at(x0, z0), at(x1, z0), at(x1, z1), at(x0, z1)];
+    ctx.save();
+    ctx.lineJoin = "round";
+    ctx.beginPath(); corners.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath();
+    ctx.strokeStyle = ZONE_STYLE.frameEdge; ctx.lineWidth = 14; ctx.stroke();
+    ctx.strokeStyle = ZONE_STYLE.frame; ctx.lineWidth = 10; ctx.stroke();
+    const pad = (x1 - x0) * 0.03;
+    ctx.font = "bold 18px Georgia, serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    // Как в игре, стороны света — на углах ромба (при повороте 45°).
+    for (const [t, x, y] of [["N", x0 - pad, z1 + pad], ["E", x1 + pad, z1 + pad], ["S", x1 + pad, z0 - pad],
+      ["W", x0 - pad, z0 - pad]]) {
+      const [sx, sy] = at(x, y);
+      drawText(ctx, t, sx, sy, "#f1dfb8");
+    }
+    ctx.restore();
   }
 
   drawHp(ctx, e, x, y, width) {
@@ -482,6 +512,7 @@ class RadarView {
         <div><span class="radar-dot" style="background:${st.color}"></span> ${esc(st.text)}</div>
         <div>HP ${hp}${e.mounted ? " · ♞ верхом" : e.mounted === false ? " · пешком" : ""} · ${fmt(e.dist)} м</div>${gear}`;
     }
+    if (e.kind === "exit") return `<b>${esc(e.name)}</b><div class="muted">выход · ${fmt(e.dist)} м</div>`;
     return `<b>${esc(radarLabel(e))}</b><div class="muted">${fmt(e.dist)} м</div>`;
   }
 
