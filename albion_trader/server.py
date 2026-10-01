@@ -27,7 +27,9 @@ from . import mytrades as mytrades_mod
 from . import world as world_mod
 from .activity import Activity
 from .world import World
+from . import radar as radar_mod
 from .radar import Radar
+from .radar_data import MobTable
 from .zonemaps import ZoneMaps
 from .alerts import AlertEngine
 from .notify import Notifier
@@ -76,6 +78,7 @@ DEFAULT_SETTINGS = {
     "notify_kinds": [],          # пусто — все типы оповещений
     "killboard_enabled": False,  # загрузка киллборда из официального API (внешний запрос)
     "killboard_region": "europe",
+    "radar_autocodes": False,    # радар сам исправляет номера событий по форме параметров
 }
 
 
@@ -131,15 +134,22 @@ class App:
         self.activity.new_session()
         with self.conn() as conn:
             world_mod.init(conn)
+            radar_mod.init(conn)
+            self.alerts.ensure_rule(conn, "radar_hostile", "Радар: враждебный игрок рядом")
             self.alerts.ensure_rule(conn, "world_event", "События мира")
         self.world = World(self.conn, self.write_lock,
                            alert=lambda conn, key, title, text, payload:
                            self.alerts.trigger_kind(conn, "world_event", key, title, text, payload))
         self.world.attach(self.albion)
+        self.mobs = MobTable(Path(config.db_path).with_name("mobs.json"))
         self.radar = Radar(Path(config.db_path).with_name("radar.json"),
                            item_of=lambda i: self.catalog.index.get(str(i)),
                            item_name=lambda iid: self.catalog.name(iid),
-                           zone_type=self._zone_type)
+                           zone_type=self._zone_type,
+                           item_ip=lambda iid: (self.gamedata.items.get(iid) or {}).get("ip"),
+                           mobs=self.mobs)
+        self._res_prices: dict[str, float | None] = {}
+        self._res_prices_at = 0.0
         self.radar.attach(self.albion)
         self.sniffer: Sniffer | None = None
         self.window = CompanionWindow("http://127.0.0.1:8484", Path(config.db_path).parent / "companion-profile")
@@ -461,13 +471,146 @@ class App:
         zone = q.get("zone") or self.radar.me.get("zone") or ""
         if q.get("retry"):
             self.zonemaps.retry(zone)
-        return self.zonemaps.get(zone)
+        out = self.zonemaps.get(zone)
+        img = self.map_image(zone)
+        if img:
+            out["image"] = img
+        return out
+
+    @property
+    def maps_dir(self) -> Path:
+        return Path(self.config.db_path).parent / "maps"
+
+    def map_image(self, zone: str) -> dict | None:
+        """Своя картинка карты зоны: data/maps/<зона>.png|jpg|webp (+ <зона>.json с настройками).
+
+        По умолчанию картинка — как карта зоны в игре: ромб (повёрнута на 45°), вписанный
+        в границы зоны. ``{"kind": "flat"}`` — вид сверху без поворота (x вправо, y вверх);
+        ``"bounds": [x0, y0, x1, y1]`` — свои границы."""
+        if not zone:
+            return None
+        for ext in ("png", "jpg", "jpeg", "webp"):
+            f = self.maps_dir / f"{zone}.{ext}"
+            if f.is_file():
+                cfg = {}
+                meta = self.maps_dir / f"{zone}.json"
+                if meta.is_file():
+                    try:
+                        cfg = json.loads(meta.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        cfg = {}
+                return {"url": f"maps/{f.name}?v={int(f.stat().st_mtime)}", "kind": cfg.get("kind", "game"),
+                        "bounds": cfg.get("bounds")}
+        return None
+
+    RES_ITEMS = {"wood": "WOOD", "rock": "ROCK", "fiber": "FIBER", "hide": "HIDE", "ore": "ORE"}
+
+    @classmethod
+    def resource_item(cls, res: str, tier, enchant) -> str | None:
+        base = cls.RES_ITEMS.get(res)
+        if not base or not tier:
+            return None
+        return f"T{tier}_{base}" + (f"_LEVEL{enchant}@{enchant}" if enchant else "")
 
     def api_radar(self, _q) -> dict:
         snap = self.radar.snapshot()
         zone = snap["me"].get("zone")
         snap["me"]["zone_name"] = self.zonemaps.zone_name(zone) if zone else ""
+        with self.write_lock, self.conn() as conn:
+            self.radar.flush(conn)
+        res = [e for e in snap["entities"] if e["kind"] == "resource"]
+        players = [e["name"] for e in snap["entities"] if e["kind"] == "player" and e["name"]]
+        with self.conn() as conn:
+            # Цены ресурсов — из собранных цен рынка, пересчёт не чаще раза в минуту.
+            wanted = {i for e in res for i in [self.resource_item(e["res"], e["tier"], e["enchant"])] if i}
+            if wanted - set(self._res_prices) or time.time() - self._res_prices_at > 60:
+                value_of = self.value_of_factory(conn)
+                self._res_prices = {i: value_of(i) for i in wanted | set(self._res_prices)}
+                self._res_prices_at = time.time()
+            kb = radar_mod.kills(conn, players)
+        for e in res:
+            iid = self.resource_item(e["res"], e["tier"], e["enchant"])
+            price = self._res_prices.get(iid) if iid else None
+            e["item"], e["price"] = iid, price
+            e["value"] = round(price * e["size"]) if price and e.get("size") else None
+        for e in snap["entities"]:
+            if e["kind"] == "player" and e["name"] in kb:
+                e["kb"] = kb[e["name"]]
+        if any(e["kind"] == "mob" for e in snap["entities"]) and self.config.capture:
+            self.mobs.download_async()      # справочник мобов — при первой встрече с мобом
+        snap["autocodes"] = bool(self.settings().get("radar_autocodes"))
+        if snap["autocodes"] and snap["suggestions"]:
+            self._apply_codes({s["name"]: s["code"] for s in snap["suggestions"]})
         return snap
+
+    def _apply_codes(self, events: dict) -> dict:
+        """Записать номера событий в data/opcodes.json и применить на лету."""
+        path = self.config.opcodes_path or Path(self.config.db_path).with_name("opcodes.json")
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8")) if Path(path).exists() else {}
+        except (OSError, ValueError):
+            data = {}
+        data.setdefault("events", {}).update({str(k): int(v) for k, v in events.items()})
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        with self.albion.lock:
+            self.albion.set_opcodes(load_opcodes(path))
+        log.info("Радар: номера событий %s записаны в %s", events, path)
+        return data["events"]
+
+    def api_radar_codes_post(self, _q, body) -> dict:
+        body = body if isinstance(body, dict) else {}
+        out = {}
+        if isinstance(body.get("apply"), dict):
+            known = set(self.albion.ev)
+            events = {k: int(v) for k, v in body["apply"].items() if k in known and str(v).lstrip("-").isdigit()}
+            if events:
+                out["events"] = self._apply_codes(events)
+        if "auto" in body:
+            with self.write_lock, self.conn() as conn:
+                db.set_settings(conn, {"radar_autocodes": bool(body["auto"])})
+            out["auto"] = bool(body["auto"])
+        if "mob_offset" in body:
+            try:
+                self.radar.mob_offset = int(body["mob_offset"])
+            except (TypeError, ValueError) as e:
+                raise ApiError("mob_offset — целое число") from e
+            path = Path(self.config.db_path).with_name("radar.json")
+            try:
+                data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            except (OSError, ValueError):
+                data = {}
+            data["mob_offset"] = self.radar.mob_offset
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+            out["mob_offset"] = self.radar.mob_offset
+        return out
+
+    def api_radar_alert_post(self, _q, body) -> dict:
+        """Оповещение «враждебный игрок рядом» — через правила оповещений (Windows, Telegram, Discord)."""
+        body = body if isinstance(body, dict) else {}
+        name = str(body.get("name") or "")[:60]
+        if not name:
+            raise ApiError("нет имени игрока")
+        text = str(body.get("text") or "")[:300]
+        with self.write_lock, self.conn() as conn:
+            sent = self.alerts.trigger_kind(conn, "radar_hostile", f"{name}:{int(time.time()) // 300}",
+                                            f"Враждебный игрок: {name}", text, {"name": name})
+        return {"sent": len(sent)}
+
+    def api_radar_history(self, q) -> dict:
+        now = int(time.time())
+        with self.conn() as conn:
+            rows = radar_mod.history(conn, now - int(_float(q.get("days"), 7) * 86400), _limit(q, 300))
+            kb = radar_mod.kills(conn, [r["name"] for r in rows])
+        for r in rows:
+            r["kb"] = kb.get(r["name"])
+            r["zone_names"] = [self.zonemaps.zone_name(z) for z in r["zones"]]
+        return {"now": now, "rows": rows}
+
+    def api_radar_heat(self, q) -> dict:
+        zone = q.get("zone") or self.radar.me.get("zone") or ""
+        with self.conn() as conn:
+            return {"zone": zone, "cells": radar_mod.heat(conn, zone) if zone else []}
 
     def api_kills(self, q) -> dict:
         now = int(time.time())
@@ -1197,6 +1340,8 @@ def make_handler(app: App):
         "/api/world": app.api_world,
         "/api/radar": app.api_radar,
         "/api/zonemap": app.api_zonemap,
+        "/api/radar/history": app.api_radar_history,
+        "/api/radar/heat": app.api_radar_heat,
         "/api/system": app.api_system,
         "/api/my/trades": app.api_my_trades,
         "/api/alert-rules": app.api_alert_rules,
@@ -1225,6 +1370,8 @@ def make_handler(app: App):
         "/api/killboard": app.api_killboard_post,
         "/api/destiny": app.api_destiny_post,
         "/api/avalon": app.api_avalon_post,
+        "/api/radar/codes": app.api_radar_codes_post,
+        "/api/radar/alert": app.api_radar_alert_post,
     }
     # Запускают программы на этом компьютере — только для запросов с него же.
     local_only = {"/api/window", "/api/system", "/api/update-opcodes"}
@@ -1299,6 +1446,15 @@ def make_handler(app: App):
                 except Exception as e:  # pragma: no cover - защитный путь
                     log.exception("API error")
                     self._json(500, {"error": str(e)})
+                return
+            if url.path.startswith("/maps/"):
+                # Свои картинки карт зон (data/maps) — фон радара.
+                maps_dir = app.maps_dir.resolve()
+                path = (maps_dir / url.path[len("/maps/"):]).resolve()
+                if maps_dir not in path.parents or not path.is_file():
+                    self._json(404, {"error": "not found"})
+                    return
+                self._send(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream")
                 return
             name = "index.html" if url.path in ("/", "") else url.path.lstrip("/")
             path = (STATIC_DIR / name).resolve()

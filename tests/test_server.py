@@ -149,7 +149,7 @@ class AlertsApiTest(SettingsApiTest):
         rid = res["id"]
         mine = lambda rules: [r for r in rules if r["id"] == rid]
         self.assertEqual(mine(res["rules"])[0]["name"], "Дешёвая сумка")
-        self.assertEqual([r["kind"] for r in res["rules"] if r["id"] != rid], ["outbid", "world_event"])  # по умолчанию
+        self.assertEqual([r["kind"] for r in res["rules"] if r["id"] != rid], ["outbid", "radar_hostile", "world_event"])  # по умолчанию
         self.assertIn("price_below", res["kinds"])
         self.post("/marketorders.ingest", self.orders())   # предложение T5_BAG за 1000 в Тетфорде
         data = self.get("/api/alerts")

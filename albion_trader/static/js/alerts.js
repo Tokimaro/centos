@@ -130,6 +130,7 @@ function ruleSummary(r) {
       return `скидка от ${p.min_discount}%; прибыль от ${fmt(Number(p.min_profit))}; ${esc(locs(p.locations))}`;
     case "outbid": return "ваш заказ на рынке больше не лучший";
     case "world_event": return "нападение бандитов, фестивали";
+    case "radar_hostile": return "враждебный игрок подошёл ближе заданного на вкладке «Радар»";
     default: return "";
   }
 }

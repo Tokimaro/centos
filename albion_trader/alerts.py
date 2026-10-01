@@ -50,6 +50,7 @@ KINDS = {
     "underpriced": "Недооценённый лот",
     "outbid": "Мой заказ перебили",
     "world_event": "Событие мира",
+    "radar_hostile": "Радар: враждебный игрок",
 }
 MARKET_KINDS = ("price_below", "price_above", "deal", "underpriced")
 REPEAT_SECONDS = 30 * 60

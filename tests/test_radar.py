@@ -159,3 +159,111 @@ class RadarTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RadarFeaturesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.app = App(AppConfig(db_path=d / "m.db", items_path=d / "i.json", capture=False,
+                                 opcodes_path=d / "opcodes.json"))
+        st = self.app.albion
+        self.ev = st.ev
+        self.parser = photon.PhotonParser(st.on_request, st.on_response, st.on_event, event_filter=st.accepts_event)
+        self.feed(pb.packet(pb.response(2, {0: 1, 2: "Me", 8: "0201", 9: [0.0, 0.0]})))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def feed(self, *packets):
+        for p in packets:
+            self.parser.receive_packet(p)
+
+    def test_chest_rarity_and_opened(self):
+        self.feed(event(self.ev["new_loot_chest"], {0: 30, 1: [2.0, 2.0], 3: "CHEST_A", 21: 2}))
+        self.assertEqual(self.app.radar.entities[30].rarity, 2)
+        self.feed(event(self.ev["loot_chest_opened"], {0: 30}))
+        self.assertTrue(self.app.api_radar({})["entities"][0]["opened"])
+
+    def test_depleted_nodes_heat_and_values(self):
+        self.app.value_of_factory = lambda conn: (lambda iid: {"T6_ORE_LEVEL1@1": 500.0}.get(iid))
+        self.feed(event(self.ev["new_harvestable_object"], {0: 10, 5: 25, 7: 6, 8: [12.0, 3.0], 10: 4, 11: 1}))
+        snap = self.app.api_radar({})
+        ore = snap["entities"][0]
+        self.assertEqual((ore["item"], ore["price"], ore["value"]), ("T6_ORE_LEVEL1@1", 500.0, 2000))
+        self.feed(event(self.ev["harvestable_change_state"], {0: 10, 1: 0}))
+        snap = self.app.api_radar({})
+        self.assertEqual([(d["res"], d["tier"], d["enchant"]) for d in snap["depleted"]], [("ore", 6, 1)])
+        cells = self.app.api_radar_heat({})["cells"]
+        self.assertEqual([(c["res"], c["tier"], c["seen"]) for c in cells], [("ore", 6, 1)])
+        # Узел появился снова — из истощённых пропадает.
+        self.feed(event(self.ev["new_harvestable_object"], {0: 11, 5: 25, 7: 6, 8: [12.0, 3.0], 10: 4, 11: 1}))
+        self.assertEqual(self.app.api_radar({})["depleted"], [])
+
+    def test_history_kills_power_and_role(self):
+        self.app.catalog.index.update({"7": "T8_2H_HOLYSTAFF", "8": "T6_ARMOR_CLOTH_SET1"})
+        self.app.gamedata.items.update({"T8_2H_HOLYSTAFF": {"ip": 1100}, "T6_ARMOR_CLOTH_SET1": {"ip": 900}})
+        with self.app.conn() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS kb_events (event_id INTEGER PRIMARY KEY, ts INTEGER, region TEXT,"
+                         " participants INTEGER, fame INTEGER, killer TEXT, victim TEXT)")
+            conn.execute("INSERT INTO kb_events VALUES (1, 100, 'europe', 1, 1, 'Grom', 'X')")
+            conn.execute("INSERT INTO kb_events VALUES (2, 200, 'europe', 1, 1, 'Y', 'Grom')")
+            conn.execute("INSERT INTO kb_events VALUES (3, 300, 'europe', 1, 1, 'Grom', 'Z')")
+        self.feed(event(self.ev["new_character"], {0: 5, 1: "Grom", 8: "Wolves", 53: 255, 12: [3.0, 4.0],
+                                                   40: [7, 0, 0, 8]}))
+        grom = self.app.api_radar({})["entities"][0]
+        self.assertEqual((grom["ip"], grom["role"]), (1000, "хил"))
+        self.assertEqual((grom["kb"]["kills"], grom["kb"]["deaths"]), (2, 1))
+        hist = self.app.api_radar_history({})["rows"]
+        self.assertEqual((hist[0]["name"], hist[0]["times"], hist[0]["hostile"], hist[0]["zones"]),
+                         ("Grom", 1, 1, ["0201"]))
+        # Повторное появление в течение 10 минут — та же встреча.
+        self.feed(event(self.ev["leave"], {0: 5}), event(self.ev["new_character"], {0: 6, 1: "Grom", 12: [1.0, 1.0]}))
+        self.assertEqual(self.app.api_radar_history({})["rows"][0]["times"], 1)
+
+    def test_mob_names_with_offset(self):
+        from albion_trader.radar_data import MobTable
+        mobs = MobTable(Path(self.tmp.name) / "mobs.json")
+        mobs.save({"Mobs": {"Mob": [{"@uniquename": "T4_MOB_A", "@tier": "4"},
+                                    {"@uniquename": "T8_MOB_HIDE_STEPPE_MAMMOTH", "@tier": "8",
+                                     "@mobtypecategory": "boss"}]}})
+        self.app.radar.mobs = mobs
+        self.feed(event(self.ev["new_mob"], {0: 9, 1: 11, 7: [1.0, 1.0]}))
+        self.assertIsNone(self.app.api_radar({})["entities"][0]["mob"])
+        self.app.api_radar_codes_post({}, {"mob_offset": -10})
+        mob = self.app.api_radar({})["entities"][0]["mob"]
+        self.assertEqual((mob["name"], mob["tier"], mob["res"], mob["boss"]), ("hide steppe mammoth", 8, "hide", True))
+        self.assertEqual(json.loads((Path(self.tmp.name) / "radar.json").read_text())["mob_offset"], -10)
+
+    def test_code_guessing_and_apply(self):
+        # Сервер шлёт мобов под кодом 777 вместо настроенного.
+        for i in range(6):
+            self.feed(event(777, {0: 100 + i, 1: 5, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: [1.0, 2.0], 13: 10.0}))
+        sugg = self.app.api_radar({})["suggestions"]
+        self.assertIn({"name": "new_mob", "code": 777, "current": self.ev["new_mob"], "samples": 6, "share": 1.0}, sugg)
+        self.app.api_radar_codes_post({}, {"apply": {"new_mob": 777}})
+        self.assertEqual(self.app.albion.ev["new_mob"], 777)
+        self.assertEqual(json.loads((Path(self.tmp.name) / "opcodes.json").read_text())["events"]["new_mob"], 777)
+        self.feed(event(777, {0: 200, 1: 5, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: [1.0, 2.0]}))
+        self.assertIn(200, self.app.radar.entities)
+        self.assertNotIn("new_mob", [s["name"] for s in self.app.api_radar({})["suggestions"]])
+
+    def test_auto_codes(self):
+        self.app.api_radar_codes_post({}, {"auto": True})
+        for i in range(6):
+            self.feed(event(778, {0: 300 + i, 5: 25, 7: 5, 8: [1.0, 1.0], 10: 2}))
+        self.assertTrue(self.app.api_radar({})["autocodes"])
+        self.assertEqual(self.app.albion.ev["new_harvestable_object"], 778)
+
+    def test_hostile_alert_and_map_image(self):
+        r = self.app.api_radar_alert_post({}, {"name": "Grom", "text": "40 м"})
+        self.assertEqual(r["sent"], 1)
+        self.assertEqual(self.app.api_radar_alert_post({}, {"name": "Grom"})["sent"], 0)   # повтор не шлём
+        maps = Path(self.tmp.name) / "maps"
+        maps.mkdir()
+        (maps / "0201.png").write_bytes(b"\x89PNG")
+        (maps / "0201.json").write_text('{"kind": "flat", "bounds": [-400, -400, 400, 400]}')
+        img = self.app.map_image("0201")
+        self.assertTrue(img["url"].startswith("maps/0201.png"))
+        self.assertEqual((img["kind"], img["bounds"]), ("flat", [-400, -400, 400, 400]))
+        self.assertIsNone(self.app.map_image("9999"))
