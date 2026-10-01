@@ -750,3 +750,39 @@ class Win32CallsTest(unittest.TestCase):
             self.assertTrue(window._activate(window.RADAR_TITLE))
             user32.SetForegroundWindow.assert_called_with(1)
             self.assertFalse(window._set_overlay("Нет такого окна", True, 50))
+
+
+class GamePortsTest(unittest.TestCase):
+    def test_parse_cli_env_and_defaults(self):
+        from albion_trader.__main__ import game_ports
+        self.assertEqual(game_ports(None, ""), (5056,))
+        self.assertEqual(game_ports([5055, 5055, 5056], "1"), (5055, 5056))     # CLI важнее переменной
+        self.assertEqual(game_ports(None, "5055; 5056,x,70000,0"), (5055, 5056))
+        with mock.patch.dict("os.environ", {"ALBION_TRADER_GAME_PORTS": "6000"}):
+            self.assertEqual(game_ports(None), (6000,))
+
+    def test_capture_and_replay_use_configured_port(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            app = App(AppConfig(db_path=d / "m.db", items_path=d / "i.json", capture=False, game_ports=(6000,)))
+            with mock.patch("albion_trader.server.Sniffer") as sn:
+                app.start_capture()
+            self.assertEqual(sn.call_args.kwargs["ports"], (6000,))
+            ev = app.albion.ev
+            ip = pb.ip_udp(pb.packet(pb.event(ev["new_character"], {0: 5, 1: "Bob", 12: [1.0, 1.0]})),
+                           src_port=6000, dst_port=50000)
+            (d / "rec.pcap").write_bytes(pcap_bytes([(1.0, ip), (2.0, ip)]))
+            self.assertTrue(app.api_radar_replay_post({}, {"open": "rec.pcap"})["active"])
+            app.api_radar_replay_post({}, {"seek": 2})
+            self.assertEqual(app.api_radar({})["entities"][0]["name"], "Bob")
+            app.config.game_ports = (5056,)
+            app.api_radar_replay_post({}, {"action": "close"})
+            with self.assertRaises(ApiError) as cm:
+                app.api_radar_replay_post({}, {"open": "rec.pcap"})
+            self.assertIn("UDP 5056", str(cm.exception))
+
+    def test_serve_cli_passes_ports(self):
+        from albion_trader import __main__ as cli
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(cli, "serve") as serve:
+            cli.main(["--data-dir", d, "serve", "--no-capture", "--game-port", "5055"])
+        self.assertEqual(serve.call_args.args[0].game_ports, (5055,))

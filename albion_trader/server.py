@@ -98,6 +98,7 @@ class AppConfig:
     password: str = ""           # пароль для доступа к интерфейсу из сети (HTTP Basic)
     auth_local: bool = False     # требовать пароль и с этого же компьютера
     open_window: bool = False    # открыть окно-компаньон после запуска
+    game_ports: tuple = (5056,)  # UDP-порты игрового сервера (свой сервер может слушать другой)
 
 
 class App:
@@ -185,7 +186,8 @@ class App:
 
     def start_capture(self, open_sockets=None) -> bool:
         kwargs = {"open_sockets": open_sockets} if open_sockets else {}
-        self.sniffer = Sniffer(self.albion, record_path=self.config.record_path, **kwargs)
+        self.sniffer = Sniffer(self.albion, ports=tuple(self.config.game_ports), record_path=self.config.record_path,
+                               **kwargs)
         return self.sniffer.start()
 
     def capture_status(self) -> dict:
@@ -636,7 +638,8 @@ class App:
             if not path:
                 raise ApiError("нет такой записи")
             try:
-                self.replay = RadarReplay(path, self._new_radar, dict(self.albion.op, events=dict(self.albion.ev)))
+                self.replay = RadarReplay(path, self._new_radar, dict(self.albion.op, events=dict(self.albion.ev)),
+                                          ports=tuple(self.config.game_ports))
             except (OSError, CaptureError) as e:
                 raise ApiError(f"не удалось открыть запись: {e}") from e
             self.replay.play()

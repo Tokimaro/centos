@@ -453,7 +453,7 @@ Chrome не найдены, страница откроется в обычно�
 ## Параметры
 
 ```
-python -m albion_trader [--data-dir DIR] serve [--host 127.0.0.1] [--port 8484]
+python -m albion_trader [--data-dir DIR] serve [--host 127.0.0.1] [--port 8484] [--game-port 5056]
                                          [--token TOKEN|auto] [--retention-hours 72]
                                          [--no-capture] [--record FILE.pcap]
                                          [--password PASSWORD] [--tray] [--open-browser] [--window]
@@ -467,6 +467,9 @@ python -m albion_trader check [--url http://127.0.0.1:8484] [--out FILE]
 ```
 
 - `--data-dir` (или `ALBION_TRADER_DATA`) — где лежат база и справочники.
+- `--game-port` (или `ALBION_TRADER_GAME_PORTS=5055,5056`) — UDP-порт игрового
+  сервера, трафик которого читает сборщик. По умолчанию 5056 (официальные серверы);
+  для своего сервера укажите его порт (можно несколько раз).
 - `--host 0.0.0.0` открывает доступ из сети (например, с телефона дома) и
   работает только вместе с `--password` (или `ALBION_TRADER_PASSWORD`): браузер
   спросит пароль, запросы с самого компьютера пароль не требуют. Приём данных

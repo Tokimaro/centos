@@ -49,11 +49,11 @@ def read_pcap_timed(path: str | Path, ports=ALBION_PORTS) -> list[tuple[float, b
 
 class RadarReplay:
     def __init__(self, path: str | Path, make_radar: Callable[[], object], opcodes: dict,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, ports=ALBION_PORTS):
         self.path = Path(path)
-        self.packets = read_pcap_timed(path)
+        self.packets = read_pcap_timed(path, ports)
         if not self.packets:
-            raise CaptureError("в записи нет трафика Albion (UDP 5056)")
+            raise CaptureError(f"в записи нет трафика игры (UDP {', '.join(map(str, ports))})")
         self.make_radar = make_radar
         self.opcodes = opcodes
         self.clock = clock

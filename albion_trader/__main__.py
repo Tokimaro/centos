@@ -41,6 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--record", metavar="FILE.pcap",
                          help="записывать трафик игры в файл для диагностики "
                               "(содержит и ваш чат/ник — не выкладывайте публично)")
+    p_serve.add_argument("--game-port", type=int, action="append", dest="game_ports", metavar="PORT",
+                         help="UDP-порт игрового сервера (по умолчанию 5056; для своего сервера — его порт; "
+                              "можно несколько раз). Также переменная ALBION_TRADER_GAME_PORTS=5056,5055")
     p_serve.add_argument("--tray", action="store_true", help="значок в трее Windows")
     p_serve.add_argument("--open-browser", action="store_true", help="открыть интерфейс в браузере")
     p_serve.add_argument("--window", action="store_true",
@@ -76,6 +79,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean = sub.add_parser("cleanup", help="удалить истёкшие и устаревшие заказы")
     p_clean.add_argument("--retention-hours", type=float, default=72)
     return parser
+
+
+def game_ports(cli: list[int] | None, env: str | None = None) -> tuple[int, ...]:
+    """Порты игрового сервера: из --game-port, иначе из ALBION_TRADER_GAME_PORTS, иначе 5056."""
+    env = os.environ.get("ALBION_TRADER_GAME_PORTS", "") if env is None else env
+    ports = list(cli or []) or [int(p) for p in env.replace(";", ",").split(",") if p.strip().isdigit()]
+    ports = [p for p in ports if 0 < p < 65536]
+    return tuple(dict.fromkeys(ports)) or (5056,)
 
 
 def main(argv=None) -> int:
@@ -115,7 +126,8 @@ def main(argv=None) -> int:
                            tray=getattr(args, "tray", False),
                            open_browser=getattr(args, "open_browser", False),
                            open_window=getattr(args, "window", False),
-                           fetch_reference=getattr(args, "fetch_reference", False))
+                           fetch_reference=getattr(args, "fetch_reference", False),
+                           game_ports=game_ports(getattr(args, "game_ports", None)))
         serve(config, getattr(args, "host", "127.0.0.1"), getattr(args, "port", 8484))
         return 0
     if cmd == "update-items":

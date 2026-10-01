@@ -177,7 +177,8 @@ def check_live(r: Report, url: str) -> bool:
     r.check(_ms(t0) < 1500, f"/api/radar ответил за {_ms(t0)} мс", f"/api/radar медленный: {_ms(t0)} мс", WARN)
     codes = d.get("codes") or []
     if r.check(bool(codes), f"От игры пришли события: разных кодов {len(codes)}",
-               "Событий от игры нет — запущена ли игра, есть ли права администратора у программы?", WARN):
+               "Событий от игры нет — запущена ли игра, есть ли права администратора у программы? "
+               "Если ваш сервер слушает не UDP 5056 — запустите программу с --game-port <порт>", WARN):
         named = sum(1 for c in codes if c.get("name"))
         r.add(INFO, f"Из них известных радару: {named}")
         for s in d.get("suggestions") or []:
