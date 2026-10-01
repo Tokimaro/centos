@@ -72,3 +72,21 @@ class PostRejectedWithBodyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Cp1252ConsoleTest(unittest.TestCase):
+    """Консоль Windows в cp1252: «Отчёт сохранён: …» падал с UnicodeEncodeError."""
+
+    def test_check_commands_print_on_cp1252(self):
+        import io
+        import sys
+        from albion_trader.__main__ import main
+        buf = io.BytesIO()
+        out = io.TextIOWrapper(buf, encoding="cp1252")              # errors="strict", как в Windows
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(sys, "stdout", out), \
+                mock.patch("webbrowser.open"):
+            main(["--data-dir", d, "check", "--url", "http://127.0.0.1:9", "--out", str(Path(d) / "r.txt")])
+            main(["--data-dir", d, "check-radar", "--url", "http://127.0.0.1:9", "--no-browser"])
+            out.flush()
+            self.assertIn(b"?", buf.getvalue())                     # кириллица заменена, не упало
+            out.detach()

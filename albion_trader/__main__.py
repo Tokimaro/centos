@@ -89,7 +89,19 @@ def game_ports(cli: list[int] | None, env: str | None = None) -> tuple[int, ...]
     return tuple(dict.fromkeys(ports)) or (5056,)
 
 
+def _safe_console() -> None:
+    """Старая консоль Windows (cp1252 и т. п.) не умеет кириллицу: печать падала с
+    UnicodeEncodeError. Недопустимые символы заменяем, а не роняем команду."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (ValueError, OSError):   # поток уже закрыт или не текстовый
+                pass
+
+
 def main(argv=None) -> int:
+    _safe_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     data_dir = Path(args.data_dir)
