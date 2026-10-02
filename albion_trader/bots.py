@@ -617,7 +617,9 @@ class Bot(TasksMixin, DungeonMixin):
                 self.pid = pid
             end = win.ends_at(now)
             self.note(f"по расписанию: {TASKS[win.task]} до {end:%H:%M}" + (f" ({win.character})" if win.character else ""))
-            self.deadline = end.timestamp()
+            # Конец окна — через разницу времени (timestamp() в Windows не работает для старых дат).
+            ends = self.clock() + (end - now).total_seconds()
+            self.deadline = ends
             try:
                 self.work(win.task)
             except TaskTimeUp:
@@ -626,7 +628,7 @@ class Bot(TasksMixin, DungeonMixin):
                 self.note(f"ошибка в задаче по расписанию: {e} — жду следующего окна")
                 self.alert(f"schedule:{e}", "Бот: ошибка по расписанию", str(e))
                 self.deadline = None
-                self.wait_idle(max(60.0, end.timestamp() - self.clock()))
+                self.wait_idle(max(60.0, ends - self.clock()))
             finally:
                 self.deadline = None
 
