@@ -30,6 +30,8 @@ from .world import World
 from . import radar as radar_mod
 from .radar import Radar
 from .radar_data import MobTable
+from .bots import BotError, BotManager
+from .locations import normalize_location as _norm_loc
 from .zonemaps import ZoneMaps
 from .alerts import AlertEngine
 from .notify import Notifier
@@ -148,6 +150,9 @@ class App:
         self._res_prices: dict[str, float | None] = {}
         self._res_prices_at = 0.0
         self.radar.attach(self.albion)
+        self.bots = BotManager(Path(config.db_path).with_name("bots.json"), make_radar=self._new_radar,
+                               opcodes=lambda: {**self.albion.op, "events": dict(self.albion.ev)},
+                               price_of=self.bot_price, item_name=lambda i: self.catalog.name(i))
         self.sniffer: Sniffer | None = None
         self.window = CompanionWindow("http://127.0.0.1:8484", Path(config.db_path).parent / "companion-profile")
         self.radar_window = self._radar_window("http://127.0.0.1:8484")
@@ -188,6 +193,9 @@ class App:
         kwargs = {"open_sockets": open_sockets} if open_sockets else {}
         self.sniffer = Sniffer(self.albion, ports=tuple(self.config.game_ports), record_path=self.config.record_path,
                                **kwargs)
+        self.sniffer.taps.append(self.bots.on_packet)
+        if self.bots.config.get("enabled"):
+            self.bots.start_loop()
         return self.sniffer.start()
 
     def capture_status(self) -> dict:
@@ -523,6 +531,33 @@ class App:
         if not base or not tier:
             return None
         return f"T{tier}_{base}" + (f"_LEVEL{enchant}@{enchant}" if enchant else "")
+
+    # --- боты -------------------------------------------------------------
+    def bot_price(self, item_id: str, raw_location: str, side: str) -> float | None:
+        """Лучшая цена на рынке, где стоит бот: продажа — минимальное предложение,
+        покупка — максимальный запрос (за 24 ч). Нет данных о рынке — оценка по всем городам."""
+        now = int(time.time())
+        loc = _norm_loc(raw_location) if raw_location else None
+        kind = "offer" if side == "sell" else "request"
+        agg = "MIN" if side == "sell" else "MAX"
+        with self.conn() as conn:
+            if loc:
+                row = conn.execute(
+                    f"SELECT {agg}(price) FROM orders WHERE item_id = ? AND location = ? AND auction_type = ? "
+                    "AND quality = 1 AND seen_at >= ? AND (expires IS NULL OR expires >= ?)",
+                    (item_id, loc, kind, now - 86400, now)).fetchone()
+                if row and row[0]:
+                    return float(row[0])
+            return self.value_of_factory(conn)(item_id) if side == "sell" else None
+
+    def api_bots(self, _q) -> dict:
+        return self.bots.snapshot()
+
+    def api_bots_post(self, _q, body) -> dict:
+        try:
+            return self.bots.command(body if isinstance(body, dict) else {})
+        except (BotError, ValueError, TypeError) as e:
+            raise ApiError(str(e)) from None
 
     def api_radar(self, _q) -> dict:
         replay = self.replay
@@ -1403,6 +1438,7 @@ def make_handler(app: App):
         "/api/zones": app.api_zones,
         "/api/world": app.api_world,
         "/api/radar": app.api_radar,
+        "/api/bots": app.api_bots,
         "/api/zonemap": app.api_zonemap,
         "/api/radar/history": app.api_radar_history,
         "/api/radar/heat": app.api_radar_heat,
@@ -1438,9 +1474,10 @@ def make_handler(app: App):
         "/api/radar/codes": app.api_radar_codes_post,
         "/api/radar/alert": app.api_radar_alert_post,
         "/api/radar/replay": app.api_radar_replay_post,
+        "/api/bots": app.api_bots_post,
     }
     # Запускают программы на этом компьютере — только для запросов с него же.
-    local_only = {"/api/window", "/api/system", "/api/update-opcodes", "/api/radar/codes"}
+    local_only = {"/api/window", "/api/system", "/api/update-opcodes", "/api/radar/codes", "/api/bots"}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AlbionTrader"
@@ -1681,6 +1718,7 @@ def serve(config: AppConfig, host: str, port: int) -> None:
         pass
     finally:
         stop.set()
+        app.bots.stop_loop()
         if app.sniffer:
             app.sniffer.stop()
         httpd.server_close()

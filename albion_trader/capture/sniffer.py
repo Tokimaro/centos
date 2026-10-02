@@ -140,6 +140,9 @@ class Sniffer:
         self.open_sockets = open_sockets
         self.record_path = record_path
         self._record = None
+        # Дополнительные получатели пакетов игры: (локальный порт, полезная нагрузка UDP).
+        # Локальный порт различает окна игры, запущенные на одном компьютере (боты).
+        self.taps: list[Callable[[int, bytes], None]] = []
         # Движение (самое частое событие) не разбираем вовсе.
         self.parser = PhotonParser(state.on_request, state.on_response, state.on_event,
                                    state.on_encrypted, event_filter=state.accepts_event)
@@ -204,6 +207,15 @@ class Sniffer:
                 self.parser.receive_packet(payload)
             except Exception:  # pragma: no cover - битый пакет не должен ронять захват
                 log.debug("Ошибка разбора пакета", exc_info=True)
+        if self.taps:
+            ihl = (packet[0] & 0x0F) * 4
+            src_port, dst_port = struct.unpack_from(">HH", packet, ihl)
+            local = dst_port if src_port in self.ports else src_port
+            for tap in self.taps:
+                try:
+                    tap(local, payload)
+                except Exception:  # pragma: no cover - ошибка получателя не роняет захват
+                    log.debug("Ошибка получателя пакетов", exc_info=True)
 
     def _is_duplicate(self, packet: bytes, payload: bytes) -> bool:
         ihl = (packet[0] & 0x0F) * 4

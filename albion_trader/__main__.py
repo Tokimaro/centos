@@ -76,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="открыть окно радара и проверить «поверх игры» и оверлей (программа должна работать)")
     p_rc.add_argument("--no-browser", action="store_true", help="не открывать страницу самотеста в браузере")
 
+    p_bc = sub.add_parser("check-bots", help="проверка ботов на этом компьютере (отчёт в data/bots_check.txt)")
+    p_bc.add_argument("--url", default="http://127.0.0.1:8484", help="адрес работающей программы")
+    p_bc.add_argument("--out", help="куда записать отчёт (по умолчанию data/bots_check.txt)")
+    p_bc.add_argument("--focus", action="store_true",
+                      help="переключиться на окно игры и обратно (проверка, что Windows это разрешает)")
+
     p_clean = sub.add_parser("cleanup", help="удалить истёкшие и устаревшие заказы")
     p_clean.add_argument("--retention-hours", type=float, default=72)
     return parser
@@ -226,6 +232,16 @@ def main(argv=None) -> int:
         if not args.no_browser and "Программа не отвечает" not in text:
             import webbrowser
             webbrowser.open(args.url.rstrip("/") + "/radar-selftest.html")
+        if getattr(sys, "frozen", False) and hasattr(os, "startfile"):
+            os.startfile(out)
+        return 1 if "[FAIL]" in text else 0
+    if cmd == "check-bots":
+        from .bot_check import run as run_bot_check
+        logging.basicConfig(level=logging.ERROR)
+        text, out = run_bot_check(data_dir, args.url, args.out, try_focus=args.focus)
+        if sys.stdout is not None:
+            print(text)
+            print(f"Отчёт сохранён: {out}")
         if getattr(sys, "frozen", False) and hasattr(os, "startfile"):
             os.startfile(out)
         return 1 if "[FAIL]" in text else 0

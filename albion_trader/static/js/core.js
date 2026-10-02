@@ -107,6 +107,7 @@ const App = {
     { id: "my", title: "Мои данные" },
     { id: "world", title: "Мир" },
     { id: "tools", title: "Инструменты" },
+    { id: "bots", title: "Боты" },
     { id: "alerts", title: "Оповещения" },
     { id: "status", title: "Статус" },
   ],

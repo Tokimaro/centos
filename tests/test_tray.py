@@ -89,6 +89,14 @@ class LauncherTest(unittest.TestCase):
         self.assertIsNone(self.launcher.serve_port(["--data-dir", "x", "update-items"]))
         self.assertEqual(self.launcher.serve_port(["serve", "--port=9001"]), 9001)
 
+    def test_every_command_is_known_to_launcher(self):
+        """Иначе .exe при уже запущенной программе вместо команды просто откроет браузер."""
+        from albion_trader.__main__ import build_parser
+        sub = next(a for a in build_parser()._actions if a.dest == "cmd")
+        for cmd in sub.choices:
+            port = self.launcher.serve_port(["--data-dir", "x", cmd])
+            self.assertEqual(port, 8484 if cmd == "serve" else None, cmd)
+
     def test_already_running_probe(self):
         import threading
         from http.server import ThreadingHTTPServer

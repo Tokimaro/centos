@@ -289,3 +289,23 @@ body.radar-window #radar-canvas { display: block; width: 100vw; height: 100vh; }
 .radar-more label.col { flex-direction: column; align-items: stretch; gap: 2px; }
 .radar-more textarea { width: 100%; font: inherit; font-size: 12px; }
 .radar-replay .radar-actions { flex-wrap: wrap; }
+
+/* --- боты --- */
+.bots-bar, .bots-row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 6px 0; }
+.bots-row label, .bots-bar label { display: inline-flex; flex-direction: row; align-items: center; gap: 4px; margin: 0; }
+.bots-row input[type=text], .bots-row select, .bots-bar select, .bots-bar input { width: auto; }
+.bots-row label.col { flex-direction: column; align-items: stretch; flex: 1; }
+.bots-row input[type=number], .bots-bar input[type=number] { width: 70px; }
+.bots-list { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.bot-card details { margin: 4px 0; }
+.bot-card summary { cursor: pointer; }
+.bot-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.bot-status { margin-left: auto; }
+.bot-log { font-size: 12px; max-height: 110px; overflow: auto; }
+.bots-macros { display: flex; flex-wrap: wrap; gap: 16px; }
+.bots-macros .col { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 300px; }
+.bots-macros .col > label { display: flex; flex-direction: row; align-items: center; gap: 6px; }
+.bots-macros .col > label > * { flex: 1; }
+.bots-macros textarea { font-family: ui-monospace, Consolas, monospace; }
+.bots-help { margin: 0; font-size: 12px; white-space: pre-wrap; }
+button.danger { border-color: var(--bad); color: var(--bad); }
