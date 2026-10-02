@@ -319,3 +319,11 @@ button.danger { border-color: var(--bad); color: var(--bad); }
 .bot-check li { break-inside: avoid; }
 .bot-group { margin: 6px 0; }
 .bot-group summary { cursor: pointer; color: var(--muted); }
+.bot-auto ol { margin: 6px 0; padding-left: 20px; font-size: 13px; }
+.bot-shot { position: relative; margin-top: 8px; max-width: 100%; }
+.bot-shot img { display: block; width: 100%; cursor: crosshair; border: 1px solid var(--border); border-radius: 4px; }
+.bot-shot .mark { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; pointer-events: none; }
+.bot-shot .mark.found { border: 3px solid #3fd16b; background: rgba(63, 209, 107, 0.25); }
+.bot-shot .mark.found span { position: absolute; left: 14px; top: -4px; white-space: nowrap; font-size: 11px; color: #fff;
+  background: rgba(0, 0, 0, 0.7); padding: 1px 4px; border-radius: 3px; }
+.bot-shot .mark.current { border: 2px dashed #50c8ff; }

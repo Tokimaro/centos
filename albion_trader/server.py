@@ -575,6 +575,10 @@ class App:
     def api_bots(self, _q) -> dict:
         return self.bots.snapshot()
 
+    def api_bots_vision(self, _q) -> dict:
+        """Последний снимок окна игры с найденными точками (картинка — data URL)."""
+        return self.bots.vision or {}
+
     def api_bots_post(self, _q, body) -> dict:
         try:
             return self.bots.command(body if isinstance(body, dict) else {})
@@ -1462,6 +1466,7 @@ def make_handler(app: App):
         "/api/world": app.api_world,
         "/api/radar": app.api_radar,
         "/api/bots": app.api_bots,
+        "/api/bots/vision": app.api_bots_vision,
         "/api/zonemap": app.api_zonemap,
         "/api/radar/history": app.api_radar_history,
         "/api/radar/heat": app.api_radar_heat,
@@ -1501,6 +1506,8 @@ def make_handler(app: App):
     }
     # Запускают программы на этом компьютере — только для запросов с него же.
     local_only = {"/api/window", "/api/system", "/api/update-opcodes", "/api/radar/codes", "/api/bots"}
+    # Снимок экрана с игрой — только на этом компьютере.
+    local_get = {"/api/bots/vision"}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AlbionTrader"
@@ -1584,6 +1591,9 @@ def make_handler(app: App):
                 return
             url = urlparse(self.path)
             if url.path in api:
+                if url.path in local_get and self.client_address[0] not in ("127.0.0.1", "::1"):
+                    self._json(403, {"error": "доступно только с компьютера, где запущена программа"})
+                    return
                 q = {k: v[-1] for k, v in parse_qs(url.query).items()}
                 try:
                     self._json(200, api[url.path](q))

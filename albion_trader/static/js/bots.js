@@ -100,6 +100,28 @@ App.tab({
       <p class="muted">Нужны рынку и сбору добычи. Нажмите «Указать», переключитесь в окно игры и кликните по нужной
         кнопке или полю (окно должно быть открыто). Координаты запоминаются в долях окна — указывайте их в том размере окна,
         в котором работает бот. <span id="bot-points-size"></span></p>
+      <div class="card bot-auto">
+        <b>Автоопределение</b>
+        <ol class="muted">
+          <li>Откройте в игре нужное окно и нажмите «Снимок и распознавание» — бот найдёт кнопки по надписям
+            (распознавание текста Windows 10/11): рынок на вкладке «Продать» — вкладки и поиск; окно заказа — «Заказ на
+            продажу», цену, количество, подтверждение; добыча — «Взять всё»; сундук — «Положить всё».</li>
+          <li>Торговец и сундук без надписей: встаньте вплотную к ним и нажмите «Найти … пробными кликами» — бот кликнет
+            рядом с персонажем и по ответу игры поймёт, где они.</li>
+          <li>Проверьте отметки на снимке: «Применить найденное» или выберите точку и кликните по снимку, чтобы поставить её вручную.</li>
+        </ol>
+        <div class="bots-row">
+          <button type="button" id="auto-snap">Снимок и распознавание</button>
+          <button type="button" id="auto-npc">Найти торговца пробными кликами</button>
+          <button type="button" id="auto-stash">Найти сундук пробными кликами</button>
+        </div>
+        <div class="bots-row">
+          <button type="button" id="auto-apply" disabled>Применить найденное</button>
+          <label>поставить на снимке <select id="auto-pick"><option value="">—</option></select></label>
+          <span class="muted" id="auto-status"></span>
+        </div>
+        <div class="bot-shot" id="auto-shot" hidden><img id="auto-img" alt="снимок окна игры"><div id="auto-marks"></div></div>
+      </div>
       <div id="bot-points"></div>
       <h3>Места</h3>
       <p class="muted">Встаньте в игре в нужном месте (у банка, у торговца рынка) и сохраните его — бот будет ходить туда сам.</p>
@@ -151,6 +173,30 @@ App.tab({
       const name = $("#profile-pick").value;
       if (name && confirm(`Удалить профиль «${name}»?`) && await post({ action: "delete_profile", name })) this.poll();
     });
+    $("#auto-snap", el).addEventListener("click", async (ev) => {
+      ev.target.disabled = true;
+      $("#auto-status").textContent = "снимок и распознавание…";
+      const r = await post({ action: "snapshot" });
+      ev.target.disabled = false;
+      $("#auto-status").textContent = r ? (r.error || `найдено точек: ${r.found.length}`) : "";
+      await this.loadVision();
+      this.poll();
+    });
+    $("#auto-npc", el).addEventListener("click", async () => { await post({ action: "probe_point", name: "market_npc" }); this.poll(); });
+    $("#auto-stash", el).addEventListener("click", async () => { await post({ action: "probe_point", name: "stash_open" }); this.poll(); });
+    $("#auto-apply", el).addEventListener("click", async () => {
+      const found = (this.vision || {}).found || [];
+      const points = Object.fromEntries(found.map((f) => [f.name, [f.x, f.y]]));
+      if (Object.keys(points).length && await post({ action: "apply_points", points })) this.poll();
+    });
+    $("#auto-img", el).addEventListener("click", async (ev) => {
+      const name = $("#auto-pick").value;
+      if (!name) { $("#auto-status").textContent = "выберите, какую точку поставить"; return; }
+      const r = ev.target.getBoundingClientRect();
+      const x = (ev.clientX - r.left) / r.width, y = (ev.clientY - r.top) / r.height;
+      if (await post({ action: "apply_points", points: { [name]: [x, y] } })) { await this.poll(); this.drawMarks(); }
+    });
+    this.loadVision();
     $("#place-save", el).addEventListener("click", async () => {
       if (await post({ action: "save_place", name: $("#place-name").value.trim() })) { $("#place-name").value = ""; this.poll(); }
     });
@@ -393,7 +439,33 @@ App.tab({
     $$("[data-s]", form).forEach((inp) => inp.addEventListener("change", () => this.post({ action: "settings", [inp.dataset.s]: Number(inp.value) })));
   },
 
+  async loadVision() {
+    try { this.vision = await api("/api/bots/vision"); } catch { this.vision = null; }
+    const v = this.vision;
+    $("#auto-shot").hidden = !(v && v.image);
+    $("#auto-apply").disabled = !(v && v.found && v.found.length);
+    if (v && v.image) $("#auto-img").src = v.image;
+    this.drawMarks();
+  },
+
+  drawMarks() {
+    const box = $("#auto-marks");
+    if (!box || !this.data) return;
+    const label = Object.fromEntries(this.data.points.map((p) => [p.name, p.label]));
+    const found = ((this.vision || {}).found || []).map((f) => `<div class="mark found" style="left:${f.x * 100}%;top:${f.y * 100}%"
+      title="${esc(label[f.name])}: «${esc(f.text)}» (${Math.round(f.score * 100)}%${f.approx ? ", примерно" : ""})"><span>${esc(f.approx ? `поле «${f.text}»` : f.text)}</span></div>`);
+    const cur = this.data.points.filter((p) => p.value).map((p) => `<div class="mark current" style="left:${p.value[0] * 100}%;top:${p.value[1] * 100}%"
+      title="сейчас: ${esc(p.label)}"></div>`);
+    const html = cur.join("") + found.join("");
+    if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
+  },
+
   renderExtras(d) {
+    const autoPick = $("#auto-pick");
+    if (autoPick && autoPick.options.length < 2) {
+      autoPick.innerHTML = `<option value="">—</option>` + d.points.map((p) => `<option value="${p.name}">${esc(p.label)}</option>`).join("");
+    }
+    this.drawMarks();
     const check = $("#bot-check");
     const items = d.checklist || [];
     const html = items.map((c) => `<li class="${c.ok ? "good" : c.required ? "bad" : "muted"}">${c.ok ? "✓" : c.required ? "✗" : "•"} ${esc(c.item)}${c.hint ? ` — <span class="muted">${esc(c.hint)}</span>` : ""}</li>`).join("");

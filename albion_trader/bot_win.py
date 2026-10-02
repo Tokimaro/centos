@@ -107,8 +107,8 @@ class GameWindow:
 class WinApi:
     """Ленивая загрузка библиотек Windows (на других системах — недоступно)."""
 
-    def __init__(self, user32=None, kernel32=None, iphlpapi=None):
-        self._user32, self._kernel32, self._iphlpapi = user32, kernel32, iphlpapi
+    def __init__(self, user32=None, kernel32=None, iphlpapi=None, gdi32=None):
+        self._user32, self._kernel32, self._iphlpapi, self._gdi32 = user32, kernel32, iphlpapi, gdi32
 
     @property
     def available(self) -> bool:
@@ -131,6 +131,10 @@ class WinApi:
     @property
     def iphlpapi(self):
         return self._lib("iphlpapi")
+
+    @property
+    def gdi32(self):
+        return self._lib("gdi32")
 
 
 # --- структуры SendInput ------------------------------------------------------
@@ -164,6 +168,16 @@ class _RECT(ctypes.Structure):
     _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
 
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32), ("biHeight", ctypes.c_int32),
+                ("biPlanes", ctypes.c_uint16), ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32), ("biClrImportant", ctypes.c_uint32)]
+
+
+SRCCOPY, CAPTUREBLT = 0x00CC0020, 0x40000000
+
+
 class _LASTINPUTINFO(ctypes.Structure):
     _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
 
@@ -191,6 +205,13 @@ class Desktop:
         self.api = api or WinApi()
         self.sleep = sleep
         self.own_input_at = 0.0      # время последнего своего ввода (time.monotonic)
+        if api is None and IS_WINDOWS:
+            # Настоящие пиксели при масштабе экрана 125–150 %: иначе снимок окна и клики
+            # получают «виртуальные» координаты и промахиваются.
+            try:
+                self.api.user32.SetProcessDPIAware()
+            except (AttributeError, OSError):  # pragma: no cover - старые Windows
+                pass
 
     @property
     def available(self) -> bool:
@@ -369,3 +390,36 @@ class Desktop:
             self.own_input_at = time.monotonic()
             return
         self._send([key_input(vk) for vk in keys] + [key_input(vk, flags=KEYEVENTF_KEYUP) for vk in reversed(keys)])
+
+    # --- снимок окна --------------------------------------------------------
+    def capture(self, win: GameWindow) -> tuple[int, int, bytes]:
+        """Снимок клиентской области окна (как на экране): ширина, высота, пиксели BGRA сверху вниз.
+
+        Окно должно быть видно (игра рисует через DirectX, поэтому снимается экран, а не окно)."""
+        u, g = self.api.user32, self.api.gdi32
+        for fn, res in ((u.GetDC, ctypes.c_void_p), (g.CreateCompatibleDC, ctypes.c_void_p),
+                        (g.CreateCompatibleBitmap, ctypes.c_void_p), (g.SelectObject, ctypes.c_void_p)):
+            try:
+                fn.restype = res          # дескрипторы — 64-битные указатели
+            except (AttributeError, TypeError):
+                pass
+        x, y, w, h = win.rect
+        if w <= 0 or h <= 0:
+            raise OSError("окно игры свёрнуто или нулевого размера")
+        screen = u.GetDC(None)
+        mem = g.CreateCompatibleDC(screen)
+        bmp = g.CreateCompatibleBitmap(screen, w, h)
+        old = g.SelectObject(mem, bmp)
+        try:
+            if not g.BitBlt(mem, 0, 0, w, h, screen, x, y, SRCCOPY | CAPTUREBLT):
+                raise OSError("Windows не дала снять экран")
+            info = _BITMAPINFOHEADER(ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+            buf = ctypes.create_string_buffer(w * h * 4)
+            if not g.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(info), 0):
+                raise OSError("не удалось прочитать снимок экрана")
+            return w, h, buf.raw
+        finally:
+            g.SelectObject(mem, old)
+            g.DeleteObject(bmp)
+            g.DeleteDC(mem)
+            u.ReleaseDC(None, screen)

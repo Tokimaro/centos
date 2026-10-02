@@ -41,6 +41,8 @@ from .bot_core import (MACRO_HELP, POINTS, SKILLS_HELP, TEMPLATES, BotError, Bot
 from .bot_nav import Grid, Router
 from .bot_schedule import SCHEDULE_HELP, current, next_start, parse_schedule
 from .bot_session import Session
+from .bot_vision import LABELS, PROBE_POINTS, OcrError, data_url, find_points, ocr_windows, png_encode, probe_offsets, \
+    scale2x
 from .bot_dungeon import PORTAL_KINDS, DungeonMixin
 from .bot_tasks import DEFAULTS, TasksMixin
 from .bot_win import VK, VK_LBUTTON, Desktop, GameWindow
@@ -112,6 +114,7 @@ class Bot(TasksMixin, DungeonMixin):
         self.started_at = 0.0
         self.stats_base = (0.0, 0.0)             # серебро и слава в окне игры на старте
         self.deaths = 0
+        self.probe_name = ""
         self.avoid_exits: dict = {}              # (зона, x, y) → до какого времени не идти
         # Сторож: когда последний раз что-то менялось (позиция, зона, добыча…).
         self.progress_at = 0.0
@@ -228,7 +231,7 @@ class Bot(TasksMixin, DungeonMixin):
 
     # --- запуск ---------------------------------------------------------
     def start(self, task: str, pid: int) -> None:
-        if task not in TASKS and task != "calibrate":
+        if task not in TASKS and task not in ("calibrate", "probe"):
             raise BotError(f"неизвестная задача «{task}»")
         if self.running:
             self.stop()
@@ -254,6 +257,8 @@ class Bot(TasksMixin, DungeonMixin):
         try:
             if task == "calibrate":
                 self.calibrate()
+            elif task == "probe":
+                self.probe(self.probe_name)
             else:
                 self.work(task)
             self.status = "готово"
@@ -274,7 +279,7 @@ class Bot(TasksMixin, DungeonMixin):
             self.plan = {"zone": "", "target": None, "path": [], "explored": []}
             self.deadline = None
             self.manager.close_session()
-            if task != "calibrate":
+            if task not in ("calibrate", "probe"):
                 self.manager.add_history(self.stats())
 
     def work(self, task: str) -> None:
@@ -591,6 +596,44 @@ class Bot(TasksMixin, DungeonMixin):
                       cal.m[0][0], cal.m[1][0], cal.m[0][1], cal.m[1][1], cal.cx, cal.cy, cal.p))
         return cal
 
+    # --- автоопределение пробными кликами ----------------------------------
+    def probe(self, name: str) -> tuple[float, float]:
+        """Найти торговца / сундук рядом: кликать по кругу около персонажа, пока игра не
+        отправит запрос, отличный от движения (открылось окно)."""
+        label = POINTS[name]
+        self.status = f"ищет: {label}"
+        self.note(f"автоопределение: {label} — пробные клики рядом с персонажем")
+        win, cal = self.window, self.calib
+        aspect = win.rect[2] / max(win.rect[3], 1)
+        start = self.settle()
+        # Что игра шлёт сама, без кликов (пинги и т. п.) — это не признак.
+        idle0 = collections.Counter(self.feed.request_counts)
+        self.wait(2.0)
+        background = {k for k, v in (self.feed.request_counts - idle0).items() if v}
+        for sx, sy in probe_offsets():
+            self.check()
+            before = collections.Counter(self.feed.request_counts)
+            fx, fy = cal.fractions(sx, sy, aspect)
+            if not (0.05 < fx < 0.95 and 0.05 < fy < 0.95):
+                continue
+            self.click_at(fx, fy, jitter=False)
+            self.wait(1.5)
+            new = {k for k, v in (self.feed.request_counts - before).items() if v and k != "move"} - background
+            if new:
+                point = (round(fx, 4), round(fy, 4))
+                with self.manager.lock:
+                    self.manager.config["points"][name] = list(point)
+                    self.manager.config["points_size"] = size_key(win)
+                    self.manager.save()
+                self.note(f"найдено: {label} — точка {point[0]:.3f}, {point[1]:.3f} (игра ответила: {', '.join(sorted(new))})")
+                self.press_key("esc")
+                return point
+            px, py = self.pos()
+            if math.hypot(px - start[0], py - start[1]) > 0.8:
+                self.walk_to(*start, tol=0.6, max_steps=6)
+                self.settle()
+        raise BotError(f"не нашёл «{label}» рядом — встаньте вплотную и повторите или укажите точку на снимке")
+
     # --- расписание -----------------------------------------------------
     def run_schedule(self) -> None:
         try:
@@ -717,6 +760,8 @@ class BotManager:
         self.zonemaps = zonemaps
         self.zone_name = zone_name or (lambda z: z)
         self.notify = notify
+        self.ocr = ocr_windows
+        self.vision: dict | None = None
         self.heat = heat
         self.my_orders = my_orders
         self.session: Session | None = None
@@ -956,7 +1001,8 @@ class BotManager:
     # --- команды из интерфейса ------------------------------------------
     ACTIONS = {"settings", "configure", "start", "stop", "calibrate", "test_click", "save_place", "delete_place",
                "capture_point", "cancel_capture", "delete_point", "save_macro", "delete_macro",
-               "record_start", "record_stop", "save_profile", "load_profile", "delete_profile", "clear_history"}
+               "record_start", "record_stop", "save_profile", "load_profile", "delete_profile", "clear_history",
+               "snapshot", "apply_points", "probe_point"}
 
     def command(self, body: dict) -> dict:
         action = body.get("action")
@@ -964,6 +1010,73 @@ class BotManager:
             raise BotError(f"неизвестная команда «{action}»")
         self.message = ""
         return getattr(self, "_cmd_" + action)(body) or {"ok": True}
+
+    # --- автоопределение по снимку --------------------------------------
+    def _cmd_snapshot(self, body: dict) -> dict:
+        """Снимок окна игры, распознавание надписей, найденные точки интерфейса."""
+        if self.bot.running:
+            raise BotError("остановите бота, чтобы сделать снимок")
+        if self.clock() - self._refreshed > 2.0:
+            self.refresh()
+        pid = self.target()
+        win = self.windows[pid]
+        with self.input_lock:
+            prev = self.desktop.foreground()
+            if not self.desktop.focus(win.hwnd):
+                raise BotError("Windows не дала показать окно игры для снимка")
+            self.desktop.sleep(0.4)            # окно успело перерисоваться поверх остальных
+            try:
+                w, h, pixels = self.desktop.capture(win)
+            except OSError as e:
+                raise BotError(f"не удалось снять окно игры: {e}") from None
+            finally:
+                if prev and prev != win.hwnd and self.config.get("restore_focus"):
+                    self.desktop.focus(prev)
+        vision = {"size": f"{w}x{h}", "image": data_url(png_encode(w, h, pixels)), "found": [], "error": "",
+                  "lang": "", "lines": 0}
+        try:
+            scale = 2 if w <= 2000 else 1
+            sw, sh, spx = scale2x(w, h, pixels) if scale == 2 else (w, h, pixels)
+            ocr = self.ocr(png_encode(sw, sh, spx), str(body.get("lang") or ""))
+            vision["found"] = find_points(ocr["lines"], w, h, scale)
+            vision["lang"], vision["lines"] = ocr.get("lang", ""), len(ocr["lines"])
+        except OcrError as e:
+            vision["error"] = str(e)
+        self.vision = vision
+        found = ", ".join(POINTS[f["name"]] for f in vision["found"]) or "ничего"
+        self.message = f"снимок {w}×{h}: найдено — {found}" if not vision["error"] else f"снимок сделан; {vision['error']}"
+        return {"ok": True, "found": vision["found"], "error": vision["error"]}
+
+    def _cmd_apply_points(self, body: dict) -> None:
+        points = body.get("points") or {}
+        if not isinstance(points, dict) or not points:
+            raise BotError("нет точек для применения")
+        clean = {}
+        for name, v in points.items():
+            if name not in POINTS:
+                raise BotError(f"неизвестная точка «{name}»")
+            try:
+                x, y = float(v[0]), float(v[1])
+            except (TypeError, ValueError, IndexError):
+                raise BotError(f"точка «{name}»: нужны две доли окна") from None
+            if not (0 <= x <= 1 and 0 <= y <= 1):
+                raise BotError(f"точка «{name}»: координаты — доли окна от 0 до 1")
+            clean[name] = [round(x, 4), round(y, 4)]
+        with self.lock:
+            self.config["points"].update(clean)
+            size = (self.vision or {}).get("size")
+            if size:
+                self.config["points_size"] = size
+            self.save()
+        self.message = "применено: " + ", ".join(POINTS[n] for n in clean)
+
+    def _cmd_probe_point(self, body: dict) -> None:
+        name = body.get("name")
+        if name not in PROBE_POINTS:
+            raise BotError("пробными кликами ищутся только торговец рынка и сундук")
+        pid = self._need_window()
+        self.bot.probe_name = name
+        self.bot.start("probe", pid)
 
     def _cmd_settings(self, body: dict) -> None:
         with self.lock:
@@ -1308,4 +1421,5 @@ class BotManager:
                 "checklist": self.checklist(cfg.get("task") or "gather"),
                 "profiles": sorted(cfg.get("profiles") or {}), "history": list(reversed(cfg.get("history") or [])),
                 "schedule_help": SCHEDULE_HELP, "skills_help": SKILLS_HELP,
+                "auto_points": {"text": list(LABELS), "probe": list(PROBE_POINTS)},
                 "macro_help": MACRO_HELP, "keys": sorted(VK)}
