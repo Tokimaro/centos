@@ -159,7 +159,7 @@ class App:
                                opcodes=lambda: {**self.albion.op, "events": dict(self.albion.ev)},
                                price_of=self.bot_price, item_name=lambda i: self.catalog.name(i),
                                zonemaps=self.zonemaps, zone_name=self.zonemaps.zone_name,
-                               notify=self._bot_alert)
+                               notify=self._bot_alert, heat=self._bot_heat, my_orders=self._bot_my_orders)
         self.killboard = KillboardFetcher(self.conn, self.write_lock, self.settings)
         self.albion.on("zone", self._on_zone)
 
@@ -557,6 +557,20 @@ class App:
         """Важное событие бота — через правило оповещений «Бот» (Windows, Telegram, Discord)."""
         with self.write_lock, self.conn() as conn:
             self.alerts.trigger_kind(conn, "bot", key, title, text, {"source": "bot"})
+
+    def _bot_heat(self, zone: str) -> list:
+        with self.conn() as conn:
+            return radar_mod.heat(conn, zone)
+
+    def _bot_my_orders(self, item_id: str, raw_location: str, side: str) -> list:
+        """Ваши активные заказы этого предмета на этом рынке (из трафика) и перебиты ли они."""
+        loc = _norm_loc(raw_location) if raw_location else None
+        kind = "offer" if side == "sell" else "request"
+        with self.conn() as conn:
+            rows = [r for r in mytrades_mod.open_orders(conn)
+                    if r["item_id"] == item_id and r["auction_type"] == kind and (loc is None or r["location"] == loc)]
+            status = self._my_order_status(conn, rows) if rows else {}
+        return [{"price": r["price"], "outbid": bool((status.get(r["id"]) or {}).get("outbid"))} for r in rows]
 
     def api_bots(self, _q) -> dict:
         return self.bots.snapshot()

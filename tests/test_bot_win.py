@@ -342,6 +342,24 @@ class BotsApiTest(unittest.TestCase):
         self.assertIn(50007, self.app.bots.feeds)
         self.app.sniffer.stop()
 
+    def test_bot_heat_and_my_orders(self):
+        now = int(time.time())
+        loc = normalize_location("3005")
+        with self.app.conn() as conn:
+            conn.execute("INSERT INTO radar_nodes(zone, gx, gy, res, tier, enchant, seen, last) "
+                         "VALUES ('0201', 3, -2, 'ore', 4, 1, 7, ?)", (now,))
+            for oid, price, kind in ((1, 900, "offer"), (2, 500, "request")):
+                conn.execute("INSERT INTO my_orders(id, item_id, location, quality, price, amount, auction_type, "
+                             "seen_at, active) VALUES (?, 'T4_BAG', ?, 1, ?, 1, ?, ?, 1)", (oid, loc, price, kind, now))
+            conn.execute("INSERT INTO orders(id, item_id, location, quality, enchant, price, amount, auction_type, "
+                         "seen_at) VALUES (77, 'T4_BAG', ?, 1, 0, 850, 1, 'offer', ?)", (loc, now))
+        cells = self.app._bot_heat("0201")
+        self.assertEqual((cells[0]["res"], cells[0]["tier"], cells[0]["seen"]), ("ore", 4, 7))
+        mine = self.app._bot_my_orders("T4_BAG", "3005", "sell")
+        self.assertEqual(mine, [{"price": 900, "outbid": True}])      # чужое предложение 850 дешевле
+        self.assertEqual(self.app._bot_my_orders("T4_BAG", "3005", "buy")[0]["price"], 500)
+        self.assertEqual(self.app._bot_my_orders("T5_BAG", "3005", "sell"), [])
+
     def test_bot_price(self):
         now = int(time.time())
         with self.app.conn() as conn:

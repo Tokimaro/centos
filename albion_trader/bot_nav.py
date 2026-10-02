@@ -84,10 +84,15 @@ class Router:
         return order[:limit]
 
     def route(self, start: str, goal: str, safety: str = "safe",
-              start_pos: tuple[float, float] | None = None) -> list[tuple[str, float, float, str]]:
+              start_pos: tuple[float, float] | None = None, avoid_exits=(), avoid_zones=()
+              ) -> list[tuple[str, float, float, str]]:
         """Список переходов [(зона, x выхода, y выхода, следующая зона)] от ``start`` до ``goal``.
 
+        ``avoid_exits`` — выходы (зона, x, y), к которым сейчас не идти (там игроки),
+        ``avoid_zones`` — промежуточные зоны, через которые не идти.
         Пустой список — уже на месте. Нет пути — ValueError с понятной причиной."""
+        avoid_exits = {(z, round(x), round(y)) for z, x, y in avoid_exits}
+        avoid_zones = set(avoid_zones)
         if start == goal:
             return []
         if start not in self.index:
@@ -111,9 +116,10 @@ class Router:
                 end = node
                 break
             for x, y, target in self.exits(zone):
-                if target not in self.index:
+                if target not in self.index or (zone, round(x), round(y)) in avoid_exits:
                     continue
-                if target != goal and not zone_allowed(self.index[target].get("type", ""), safety):
+                if target != goal and (target in avoid_zones
+                                       or not zone_allowed(self.index[target].get("type", ""), safety)):
                     continue
                 walk = 0.0 if node is first and start_pos is None else math.hypot(x - ex, y - ey)
                 back = [(bx, by) for bx, by, t in self.exits(target) if t == zone]

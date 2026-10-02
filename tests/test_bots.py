@@ -36,18 +36,19 @@ INDEX = {
 
 
 class FakeZonemaps:
-    def __init__(self, maps=None):
+    def __init__(self, maps=None, index=None):
         self.maps = maps or {}
+        self.idx = index or INDEX
 
     def index(self):
-        return INDEX
+        return self.idx
 
     def get(self, zone, background=True):
         m = self.maps.get(zone)
         return {"status": "ready", **m} if m else {"status": "error"}
 
     def zone_name(self, z):
-        return (INDEX.get(z) or {}).get("name") or z
+        return (self.idx.get(z) or {}).get("name") or z
 
 
 class Clock:
@@ -149,6 +150,8 @@ class FakeGame:
         self.exiting = None       # (pid, когда закончится задержка)
         self.damage_on_exit = 0   # сколько первых попыток выхода собьёт урон
         self.items_per_loot = 0   # предметов в сумку с каждой добычи
+        self.items_per_harvest = 0
+        self.index = INDEX
 
     def add_window(self, pid, name, pos=(0.0, 0.0), zone="0201", rect=(0, 0, 1600, 900)):
         port = 50000 + pid
@@ -203,11 +206,12 @@ class FakeGame:
         self.request(pid, DEFAULT_OPCODES["move"], {1: [float(fx), float(fy)]})
         zone = self.zone[pid]
         name = self.manager.feed_for(pid).character
-        for ex, ey, target, _icon in (INDEX.get(zone) or {}).get("exits", []):
+        for ex, ey, target, _icon in (self.index.get(zone) or {}).get("exits", []):
             if math.hypot(fx - ex, fy - ey) < 2.0:
-                back = next(e for e in INDEX[target]["exits"] if e[2] == zone)
-                inward = -4.0 if back[0] > 0 else 4.0
-                self.join(pid, name, target, (back[0] + inward, back[1]))
+                back = min((e for e in self.index[target]["exits"] if e[2] == zone),
+                           key=lambda e: math.hypot(e[0] - ex, e[1] - ey))
+                n = math.hypot(back[0], back[1]) or 1.0
+                self.join(pid, name, target, (back[0] - 4 * back[0] / n, back[1] - 4 * back[1] / n))
                 return
 
     def add_node(self, pid, nid, x, y, tier=4, type_id=24, size=3, enchant=0):
@@ -299,6 +303,8 @@ class FakeGame:
             if math.hypot(nx - tx, ny - ty) < 1.5 and math.hypot(nx - x0, ny - y0) < 6:
                 self.move_to(pid, nx + 1, ny)
                 if self.harvest_ok:
+                    for _ in range(self.items_per_harvest):
+                        self.event(pid, "inventory_put_item", {0: pid})
                     self.event(pid, "harvestable_change_state", {0: nid, 1: 1})
                     self.event(pid, "harvest_finished", {0: pid})
                     self.event(pid, "harvestable_change_state", {0: nid, 1: 0})
@@ -341,12 +347,12 @@ class FakeGame:
                 self.event(pid, "health_update", {0: mid, 3: float(mob[2])})
 
 
-def make(tmp, prices=None, maps=None):
+def make(tmp, prices=None, maps=None, index=None):
     clock = Clock()
     game = FakeGame()
     desk = FakeDesktop(game)
     prices = prices or {}
-    zm = FakeZonemaps(maps)
+    zm = FakeZonemaps(maps, index)
     alerts = []
     mgr = BotManager(Path(tmp) / "bots.json", make_radar=lambda: Radar(clock=clock), desktop=desk,
                      notify=lambda key, title, text: alerts.append((key, title, text)),
@@ -357,6 +363,7 @@ def make(tmp, prices=None, maps=None):
     mgr.alerts = alerts
     game.manager = mgr
     game.clock = clock
+    game.index = zm.idx
     clock.on_sleep.append(game.tick)
     return mgr, game, desk, clock
 
@@ -364,10 +371,11 @@ def make(tmp, prices=None, maps=None):
 class Base(unittest.TestCase):
     prices = None
     maps = None
+    index = None
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.mgr, self.game, self.desk, self.clock = make(self.tmp.name, self.prices, self.maps)
+        self.mgr, self.game, self.desk, self.clock = make(self.tmp.name, self.prices, self.maps, self.index)
         self.bot = self.mgr.bot
 
     def tearDown(self):
@@ -1306,6 +1314,129 @@ class DungeonServicesTest(DungeonRunTest):
         self.assertIn("добыча сдана в сундук", texts)
         self.assertEqual(self.bot.runs, 1, texts[-5:])         # второй заход дошёл до конца
         self.assertIn("ремонт: готово", texts)
+
+
+class GatherPlusTest(Base):
+    def test_heat_map_leads_to_resources_and_respawn_is_respected(self):
+        self.window(zone="0201")
+        self.bot.calibrate()
+        self.bot.home, self.bot.home_zone = (0.0, 0.0), "0201"
+        self.mgr.heat = lambda zone: [
+            {"x": 45.0, "y": 5.0, "res": "ore", "tier": 4, "enchant": 0, "seen": 9, "last": 0},
+            {"x": -40.0, "y": 0.0, "res": "wood", "tier": 4, "enchant": 0, "seen": 50, "last": 0},
+            {"x": 400.0, "y": 0.0, "res": "ore", "tier": 4, "enchant": 0, "seen": 99, "last": 0}]
+        g = {**DEFAULTS["gather"], "res": ["ore"], "radius": 80}
+        cell = self.bot.heat_target(g)
+        self.assertEqual((cell["x"], cell["y"]), (45.0, 5.0))           # руда в радиусе, не дерево и не далёкая
+        self.bot.heat_visited["0201"] = {(45, 5): self.clock.t}
+        self.assertIsNone(self.bot.heat_target(g))                       # недавно были — узлы не восстановились
+        self.clock.t += 11 * 60
+        self.assertIsNotNone(self.bot.heat_target(g))
+        self.assertIsNone(self.bot.heat_target({**g, "use_heat": False}))
+        # В работе: рядом пусто → идёт к клетке тепловой карты.
+        self.bot.heat_visited.clear()
+        closest = []
+        self.clock.on_sleep.append(lambda: closest.append(math.hypot(self.game.pos[1][0] - 45,
+                                                                     self.game.pos[1][1] - 5)))
+        self.clock.limit = self.clock.t + 60
+        with self.assertRaises(BotStopped):
+            self.bot.gather_session(self.clock.t + 100)
+        self.assertLess(min(closest), 4)
+        self.assertIn((45, 5), self.bot.heat_visited["0201"])
+
+    def test_prefers_node_in_a_cluster(self):
+        self.window()
+        g = {**DEFAULTS["gather"], "res": ["ore"]}
+        self.game.add_node(1, 1, 10, 0)                                   # одиночка ближе
+        for i, (x, y) in enumerate(((-13, 0), (-15, 3), (-16, -3))):      # группа чуть дальше
+            self.game.add_node(1, 10 + i, x, y)
+        self.assertIn(self.bot.pick_node(g).id, (10, 11, 12))
+
+    def test_bag_full_unloads_and_returns(self):
+        self.window(zone="CITYA", pos=(20.0, 20.0))
+        self.mgr.config["points"] = dict(ALL_POINTS)
+        self.mgr.config["places"] = {"склад": {"zone": "CITYA", "x": 0.0, "y": -20.0}}
+        self.game.items_per_harvest = 2
+        for i in range(3):
+            self.game.add_node(1, 900 + i, 30 + 5 * i, 22)
+        self.mgr.command({"action": "configure", "gather": {"res": ["ore"], "bag_slots": 4, "home_place": "склад",
+                                                            "radius": 60}})
+        self.mgr.config["rest_min"] = 0
+        self.clock.limit = self.clock.t + 500
+        self.bot.run("gather")
+        texts = self.texts()
+        self.assertIn("сумка полна — несу домой", texts)
+        self.assertIn("добыча сдана в сундук", texts)
+        self.assertEqual(self.bot.gathered, 3)
+        self.mgr.command({"action": "configure", "gather": {"home_place": ""}})
+        self.bot.items_base = -100
+        with self.assertRaisesRegex(BotError, "место сдачи не задано"):
+            self.bot.unload_gathering(self.mgr.task_config("gather"))
+
+
+class MarketPlusTest(Base):
+    prices = {("T4_BAG", "sell"): 2500, ("T4_BAG", "buy"): 1800}
+
+    def setUp(self):
+        super().setUp()
+        self.window("Trader", zone="CITYA")
+        self.mgr.config["points"] = dict(ALL_POINTS)
+        self.mine = []
+        self.mgr.my_orders = lambda item, loc, side: self.mine
+
+    def test_own_orders_are_not_duplicated(self):
+        m = {**DEFAULTS["market"]}
+        self.mine = [{"price": 2490, "outbid": False}]
+        self.assertFalse(self.bot.place_order("T4_BAG", "sell", 10, 1, "", m))
+        self.assertIn("ваш заказ уже лучший", self.texts()[-1])
+        self.mine = [{"price": 2600, "outbid": True}]
+        self.assertFalse(self.bot.place_order("T4_BAG", "sell", 10, 1, "", m))
+        self.assertIn("переставление выключено", self.texts()[-1])
+        self.assertTrue(self.bot.place_order("T4_BAG", "sell", 10, 1, "", {**m, "relist_outbid": True}))
+        self.assertIn("перебит — ставлю новый", self.texts()[-2])
+        self.mine = [{"price": 2490, "outbid": False}]
+        self.assertTrue(self.bot.place_order("T4_BAG", "sell", 10, 1, "", {**m, "skip_own": False}))
+
+    def test_buy_budget(self):
+        m = {**DEFAULTS["market"], "budget": 4000}
+        self.assertTrue(self.bot.place_order("T4_BAG", "buy", 1, 2, "", m))       # 1801 × 2 = 3602
+        self.assertEqual(self.bot.spent, 3602)
+        with self.assertRaisesRegex(BotError, "бюджет покупок исчерпан"):
+            self.bot.place_order("T4_BAG", "buy", 1, 1, "", m)
+
+
+REROUTE_INDEX = {
+    "CITYA": {"name": "Город А", "type": "PLAYERCITY_SAFEAREA_01", "exits": [[50, 0, "ROAD", "x"]]},
+    "ROAD": {"name": "Дорога", "type": "OPENPVP_YELLOW",
+             "exits": [[-50, 0, "CITYA", "x"], [0, 50, "CITYB", "x"], [50, 0, "CITYB", "x"]]},
+    "CITYB": {"name": "Город Б", "type": "PLAYERCITY_SAFEAREA_02",
+              "exits": [[0, -50, "ROAD", "x"], [-50, 0, "ROAD", "x"]]},
+}
+
+
+class TransportRerouteTest(Base):
+    index = REROUTE_INDEX
+
+    def test_players_on_the_way_force_another_exit(self):
+        self.window("Carrier", zone="CITYA", pos=(0.0, 0.0))
+        self.bot.calibrate()
+        self.game.add_player(1, 77, -20, 32, zone="ROAD", name="Robber")
+        self.bot.route_guard = {**DEFAULTS["transport"], "player_radius": 20}
+        self.bot.travel_to("CITYB", 0.0, 0.0, safety="yellow")
+        self.assertEqual(self.game.zone[1], "CITYB")
+        texts = self.texts()
+        self.assertTrue(any("на пути игроки: Robber" in t for t in texts), texts)
+        self.assertIn(("ROAD", 0, 50), self.bot.avoid_exits)
+        self.assertTrue(any(t == "Бот: игроки на пути" for _k, t, _x in self.mgr.alerts))
+
+    def test_router_avoid_options(self):
+        from albion_trader.bot_nav import Router
+        r = Router(REROUTE_INDEX)
+        self.assertEqual(r.route("ROAD", "CITYB", "yellow", (0, 40))[0][1:3], (0.0, 50.0))
+        self.assertEqual(r.route("ROAD", "CITYB", "yellow", (0, 40), avoid_exits=[("ROAD", 0, 50)])[0][1:3],
+                         (50.0, 0.0))
+        with self.assertRaises(ValueError):
+            r.route("CITYA", "CITYB", "yellow", avoid_zones=["ROAD"])
 
 
 # --- команды и запись -------------------------------------------------------------

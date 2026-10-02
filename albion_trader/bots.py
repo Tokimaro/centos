@@ -72,6 +72,10 @@ def size_key(win: GameWindow) -> str:
 
 
 # --- бот -----------------------------------------------------------------------
+class RouteDanger(Exception):
+    """На пути игроки — перестроить маршрут."""
+
+
 class Bot(TasksMixin, DungeonMixin):
     def __init__(self, manager: BotManager):
         self.manager = manager
@@ -89,6 +93,11 @@ class Bot(TasksMixin, DungeonMixin):
         self.bad_portals: set = set()
         self.start_dungeon_state()
         self.rng = random.Random()
+        self.heat_visited: dict = {}
+        self.items_base = 0
+        self.spent = 0.0
+        self.route_guard: dict | None = None     # настройки угроз в пути (перевозка)
+        self.avoid_exits: dict = {}              # (зона, x, y) → до какого времени не идти
         # Сторож: когда последний раз что-то менялось (позиция, зона, добыча…).
         self.progress_at = 0.0
         self._progress_sig = None
@@ -244,6 +253,8 @@ class Bot(TasksMixin, DungeonMixin):
             self.calibrate()
         self.home, self.home_zone = self.pos(), self.feed.zone
         self.fails_in_row = 0
+        self.items_base = self.feed.items_put
+        self.route_guard = None
         self.note(f"старт: {TASKS[task]}")
         if task == "transport":
             self.transport()
@@ -394,6 +405,10 @@ class Bot(TasksMixin, DungeonMixin):
             self.check()
             if self.feed.zone != zone:
                 return False          # ушли в другую зону (выход по дороге)
+            if self.route_guard is not None and getattr(self, "travelling", False):
+                threats = self.threats(self.route_guard)
+                if threats:
+                    raise RouteDanger(threats)
             px, py = self.pos()
             dx, dy = x - px, y - py
             dist = math.hypot(dx, dy)
@@ -442,7 +457,8 @@ class Bot(TasksMixin, DungeonMixin):
 
     def travel_to(self, zone: str, x: float | None = None, y: float | None = None, safety: str = "safe") -> None:
         """Дойти до точки (x, y) в зоне ``zone``, при необходимости через другие зоны
-        (без точки — только войти в зону)."""
+        (без точки — только войти в зону). С ``route_guard`` (перевозка) игроки на пути
+        к выходу заставляют убежать и перестроить маршрут через другой выход."""
         router = self.manager.router()
         for _ in range(80):
             self.check()
@@ -459,17 +475,38 @@ class Bot(TasksMixin, DungeonMixin):
                     if self.feed.zone != zone:
                         continue
                 return
+            now = self.clock()
+            avoid = [k for k, until in self.avoid_exits.items() if until > now]
             try:
-                hops = router.route(cur, zone, safety, self.pos())
+                hops = router.route(cur, zone, safety, self.pos(), avoid_exits=avoid)
             except ValueError as e:
+                if avoid:               # обхода нет — ждать и идти прежним путём
+                    self.note("обхода нет — пережидаю и иду прежним путём")
+                    self.wait_idle(self.rng.uniform(20, 40))
+                    self.avoid_exits.clear()
+                    continue
                 raise BotError(str(e)) from None
             _z, ex, ey, nxt = hops[0]
             self.status = f"в пути: {router.name(nxt)} (осталось переходов: {len(hops)})"
-            for _walk in range(3):        # дойти до выхода (с повтором, если не дошли)
-                self.walk_path(ex, ey, tol=1.5)
-                px, py = self.pos()
-                if self.feed.zone != cur or math.hypot(ex - px, ey - py) <= 5:
-                    break
+            try:
+                self.travelling = True
+                for _walk in range(3):        # дойти до выхода (с повтором, если не дошли)
+                    self.walk_path(ex, ey, tol=1.5)
+                    px, py = self.pos()
+                    if self.feed.zone != cur or math.hypot(ex - px, ey - py) <= 5:
+                        break
+            except RouteDanger as danger:
+                threats = danger.args[0]
+                guard = self.route_guard or {}
+                self.avoid_exits[(cur, round(ex), round(ey))] = now + float(guard.get("avoid_min") or 15) * 60
+                what = ", ".join(t.text() for t in threats[:3])
+                self.note(f"на пути игроки: {what} — ищу обход")
+                self.alert(f"route:{cur}:{int(now // 600)}", "Бот: игроки на пути", what)
+                self.travelling = False
+                self.avoid_players(guard)
+                continue
+            finally:
+                self.travelling = False
             if self.feed.zone == cur and not self.wait_zone(cur, 6):
                 for _try in range(3):     # встать точно на выход
                     px, py = self.pos()
@@ -577,6 +614,8 @@ class BotManager:
                  item_name: Callable[[str], str] = lambda i: i,
                  zonemaps=None, zone_name: Callable[[str], str] | None = None,
                  notify: Callable[[str, str, str], None] = lambda *_a: None,
+                 heat: Callable[[str], list] = lambda _z: [],
+                 my_orders: Callable[[str, str, str], list] = lambda *_a: [],
                  clock: Callable[[], float] = time.time,
                  sleep: Callable[[float, threading.Event], bool] = _event_sleep):
         self.config_path = Path(config_path)
@@ -588,6 +627,8 @@ class BotManager:
         self.zonemaps = zonemaps
         self.zone_name = zone_name or (lambda z: z)
         self.notify = notify
+        self.heat = heat
+        self.my_orders = my_orders
         self.session: Session | None = None
         self.clock = clock
         self.sleep = sleep
