@@ -144,7 +144,11 @@ class DungeonMixin:
         и направлениям, где рядом тоже не были."""
         px, py = self.pos()
         grid = self.manager.zone_grid(self.feed.zone)
-        exits = self.exits_around()
+        exits = [(e.x, e.y) for e in self.exits_around()]
+        try:                                   # и обычные выходы зоны — не уйти в соседнюю
+            exits += [(x, y) for x, y, _t in self.manager.router().exits(self.feed.zone)]
+        except BotError:
+            pass
         failed = getattr(self, "explore_failed", set())
         best, best_score = None, -1e9
         for i in range(12):
@@ -152,7 +156,7 @@ class DungeonMixin:
             tx, ty = px + step * math.cos(ang), py + step * math.sin(ang)
             if grid is not None and not grid.free_at(tx, ty):
                 continue
-            if any(math.hypot(e.x - tx, e.y - ty) < 8 for e in exits):
+            if any(math.hypot(ex - tx, ey - ty) < 12 for ex, ey in exits):
                 continue
             cell = (int(tx // EXPLORE_CELL), int(ty // EXPLORE_CELL))
             if cell in failed:

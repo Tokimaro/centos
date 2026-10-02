@@ -1439,6 +1439,146 @@ class TransportRerouteTest(Base):
             r.route("CITYA", "CITYB", "yellow", avoid_zones=["ROAD"])
 
 
+class ScheduleTest(unittest.TestCase):
+    def test_parse_and_windows(self):
+        import datetime as dt
+        from albion_trader.bot_schedule import current, next_start, parse_days, parse_schedule
+        tasks = bots_mod.TASKS
+        self.assertEqual(parse_days("*"), frozenset(range(7)))
+        self.assertEqual(parse_days("пн-пт"), frozenset(range(5)))
+        self.assertEqual(parse_days("сб,вс"), frozenset({5, 6}))
+        self.assertEqual(parse_days("пт-пн"), frozenset({4, 5, 6, 0}))
+        ws = parse_schedule("""# комментарий
+пн-пт 08:00-12:00 gather
+* 22:00-02:00 market Trader
+сб 10:00-24:00 dungeon_run Hero  # конец суток""", tasks)
+        self.assertEqual([(w.task, w.character) for w in ws], [("gather", ""), ("market", "Trader"), ("dungeon_run", "Hero")])
+        mon = dt.datetime(2026, 10, 5, 9, 30)          # понедельник
+        self.assertEqual(current(ws, mon).task, "gather")
+        self.assertEqual(current(ws, mon.replace(hour=23)).task, "market")
+        self.assertEqual(current(ws, dt.datetime(2026, 10, 6, 1, 0)).task, "market")      # после полуночи
+        self.assertIsNone(current(ws, mon.replace(hour=13)))
+        self.assertEqual(ws[1].ends_at(mon.replace(hour=23)), dt.datetime(2026, 10, 6, 2, 0))
+        self.assertEqual(ws[2].ends_at(dt.datetime(2026, 10, 10, 12, 0)), dt.datetime(2026, 10, 11, 0, 0))
+        self.assertEqual(next_start(ws, mon.replace(hour=13)), mon.replace(hour=22, minute=0))
+        self.assertIsNone(next_start([], mon))
+        for text, msg in (("пн 08:00 gather", "время"), ("xx 08:00-09:00 gather", "дни"),
+                          ("* 08:00-09:00 fly", "неизвестная задача"), ("* 25:00-26:00 gather", "вне суток"),
+                          ("* 08:00-08:00 gather", "совпадают"), ("пн", "нужно")):
+            with self.assertRaisesRegex(ValueError, msg):
+                parse_schedule(text, tasks)
+
+
+class ScheduleRunTest(Base):
+    def schedule_now(self, minutes, task="wander", who=""):
+        import datetime as dt
+        now = dt.datetime.fromtimestamp(self.clock.t)
+        end = now + dt.timedelta(minutes=minutes)
+        self.mgr.config["schedule"] = f"* {now:%H:%M}-{end:%H:%M} {task} {who}".strip()
+
+    def test_runs_task_in_window_and_switches_character(self):
+        self.window("Alice")
+        self.game.add_window(2, "Bob", (0.0, 0.0))
+        self.bot.calibrate()
+        self.schedule_now(5, "wander", "Bob")
+        self.mgr.config["rest_min"] = 0
+        self.clock.limit = self.clock.t + 15 * 60
+        self.bot.pid = 1
+        self.bot.run("schedule")
+        texts = self.texts()
+        self.assertTrue(any(t.startswith("по расписанию: Прогулка до") and "(Bob)" in t for t in texts), texts[:5])
+        self.assertIn("окно расписания закончилось", texts)
+        self.assertEqual(self.bot.pid, 2)
+        self.assertTrue(self.bot.status.startswith("по расписанию: ждёт") or self.bot.status == "остановлен")
+
+    def test_errors_wait_for_next_window(self):
+        self.window()
+        self.schedule_now(3, "market")                  # без предметов — ошибка задачи
+        self.clock.limit = self.clock.t + 6 * 60
+        self.bot.run("schedule")
+        self.assertTrue(any("ошибка в задаче по расписанию" in t for t in self.texts()))
+        self.mgr.config["schedule"] = ""
+        self.bot.run("schedule")
+        self.assertIn("расписание пустое", self.texts()[-1])
+        self.mgr.config["schedule"] = "zz"
+        self.bot.run("schedule")
+        self.assertIn("расписание, строка 1", self.texts()[-1])
+        self.schedule_now(3, "wander", "Nobody")
+        self.clock.limit = self.clock.t + 120
+        self.bot.stop_event.clear()
+        self.bot.run("schedule")
+        self.assertTrue(any("«Nobody» не найдено" in t for t in self.texts()))
+        with self.assertRaisesRegex(BotError, "строка 1"):
+            self.mgr.command({"action": "settings", "schedule": "bad line"})
+
+
+class ProfilesStatsChecklistTest(Base):
+    def test_profiles(self):
+        self.mgr.command({"action": "configure", "gather": {"tier_min": 6}})
+        self.mgr.command({"action": "save_profile", "name": "фарм"})
+        self.mgr.command({"action": "configure", "gather": {"tier_min": 2}})
+        self.mgr.command({"action": "load_profile", "name": "фарм"})
+        self.assertEqual(self.mgr.task_config("gather")["tier_min"], 6)
+        self.assertEqual(self.mgr.snapshot()["profiles"], ["фарм"])
+        self.mgr.command({"action": "delete_profile", "name": "фарм"})
+        self.assertEqual(self.mgr.snapshot()["profiles"], [])
+        with self.assertRaisesRegex(BotError, "нет такого профиля"):
+            self.mgr.command({"action": "load_profile", "name": "фарм"})
+        with self.assertRaisesRegex(BotError, "имя профиля"):
+            self.mgr.command({"action": "save_profile", "name": ""})
+
+    def test_stats_and_history(self):
+        self.window()
+        self.game.event(1, "update_money", {1: 1_000_0000})        # 1000 серебра
+        self.bot.calibrate()
+        self.clock.limit = self.clock.t + 120
+        self.mgr.config["rest_min"] = 0
+        start_events = [lambda: None]
+
+        def earn():
+            if not start_events[1:] and self.clock.t > self.clock.limit - 60:
+                start_events.append(1)
+                self.game.event(1, "update_money", {1: 1_500_0000})
+                self.game.event(1, "update_fame", {1: 0, 2: 2000_0000})
+        self.clock.on_sleep.append(earn)
+        self.bot.run("wander")
+        h = self.mgr.config["history"][-1]
+        self.assertEqual((h["task"], h["silver"], h["fame"]), ("wander", 500, 2000))
+        self.assertAlmostEqual(h["minutes"], 2.0, delta=0.2)
+        self.assertGreater(h["silver_hour"], 10_000)
+        self.assertEqual(self.mgr.snapshot()["history"][0]["task"], "wander")
+        self.mgr.command({"action": "clear_history"})
+        self.assertEqual(self.mgr.config["history"], [])
+
+    def test_checklist_blocks_start(self):
+        self.window(zone="CITYA")
+        self.mgr.config["task"] = "market"
+        items = {c["item"]: c for c in self.mgr.snapshot()["checklist"]}
+        self.assertFalse(items["Рынок: список предметов"]["ok"])
+        self.assertIn("укажите точки", items["Рынок: точки интерфейса"]["hint"])
+        with self.assertRaisesRegex(BotError, "не готово к запуску: Рынок: список предметов"):
+            self.mgr.command({"action": "start", "task": "market"})
+        self.mgr.config["points"] = dict(ALL_POINTS)
+        self.mgr.command({"action": "configure", "market": {"items": "T4_BAG"}})
+        self.assertTrue(all(c["ok"] for c in self.mgr.checklist("market") if c["required"]))
+        dr = {c["item"]: c for c in self.mgr.checklist("dungeon_run")}
+        self.assertFalse(dr["Данжи: сундук в городе"]["ok"])
+        self.assertFalse(dr["Данж: клавиша быстрого выхода"]["required"])
+        self.mgr.command({"action": "configure", "dungeon": {"home_place": "нет", "skills": "zz", "repair_every": 2}})
+        dr = {c["item"]: c for c in self.mgr.checklist("dungeon_run")}
+        self.assertFalse(dr["Данж: умения"]["ok"])
+        self.assertFalse(dr["Данжи: место «нет»"]["ok"])
+        self.assertFalse(dr["Ремонт: макрос"]["ok"])
+        tr = {c["item"]: c for c in self.mgr.checklist("transport")}
+        self.assertFalse(tr["Перевозка: место погрузки"]["ok"])
+        self.mgr.config["schedule"] = "zz"
+        sc = {c["item"]: c for c in self.mgr.checklist("schedule")}
+        self.assertIn("строка 1", sc["Расписание"]["hint"])
+        self.mgr.command({"action": "configure", "gather": {"bag_slots": 10}})
+        ga = {c["item"]: c for c in self.mgr.checklist("gather")}
+        self.assertFalse(ga["Сбор: куда сдавать при полной сумке"]["ok"])
+
+
 # --- команды и запись -------------------------------------------------------------
 class CommandTest(Base):
     def test_settings_saved_and_reloaded(self):

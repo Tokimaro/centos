@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import collections
+import datetime as dt
 import json
 import logging
 import math
@@ -35,9 +36,10 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
-from .bot_core import (MACRO_HELP, POINTS, TEMPLATES, BotError, BotStopped, Calibration, ClientFeed, fill,
-                       parse_macro, solve_calibration)
+from .bot_core import (MACRO_HELP, POINTS, SKILLS_HELP, TEMPLATES, BotError, BotStopped, Calibration, ClientFeed,
+                       fill, parse_macro, parse_skills, solve_calibration, split_items)
 from .bot_nav import Grid, Router
+from .bot_schedule import SCHEDULE_HELP, current, next_start, parse_schedule
 from .bot_session import Session
 from .bot_dungeon import PORTAL_KINDS, DungeonMixin
 from .bot_tasks import DEFAULTS, TasksMixin
@@ -55,16 +57,17 @@ CLEAR_TRIES = [(1.0, 0.0), (0.6, 0.0), (1.0, 0.5), (1.0, -0.5), (0.8, 1.0), (0.8
 ZONE_WAIT = 20.0          # сколько ждать загрузки следующей зоны, с
 
 TASKS = {"gather": "Сбор ресурсов", "market": "Рынок", "transport": "Перевозка между городами",
-         "dungeon_run": "Данжи по кругу из города", "dungeon": "Пройти этот данж", "wander": "Прогулка"}
+         "dungeon_run": "Данжи по кругу из города", "dungeon": "Пройти этот данж", "wander": "Прогулка",
+         "schedule": "По расписанию"}
 SAFETY_NAMES = {"safe": "только безопасные (синие)", "yellow": "с жёлтыми", "red": "с красными",
                 "black": "любые, включая чёрные"}
 DEFAULT_CONFIG = {"enabled": False, "stop_key": "f12", "pause_when_active": True, "user_idle": 3.0,
                   "restore_focus": True, "input": "focus", "task": "gather", "work_min": 25, "rest_min": 5,
-                  "watchdog_min": 10, "record": False,
+                  "watchdog_min": 10, "record": False, "schedule": "", "profiles": {}, "history": [],
                   "calib": {}, "points": {}, "points_size": "", "places": {}, "macros": {},
                   **{k: dict(v) for k, v in DEFAULTS.items()}}
 SETTINGS = ("enabled", "stop_key", "pause_when_active", "user_idle", "restore_focus", "input", "task",
-            "work_min", "rest_min", "watchdog_min", "record")
+            "work_min", "rest_min", "watchdog_min", "record", "schedule")
 
 
 def size_key(win: GameWindow) -> str:
@@ -74,6 +77,14 @@ def size_key(win: GameWindow) -> str:
 # --- бот -----------------------------------------------------------------------
 class RouteDanger(Exception):
     """На пути игроки — перестроить маршрут."""
+
+
+class TaskTimeUp(Exception):
+    """Окно расписания закончилось — пора к следующей задаче."""
+
+
+PROFILE_KEYS = ("task", "work_min", "rest_min", "input", *DEFAULTS)
+MAX_HISTORY = 50
 
 
 class Bot(TasksMixin, DungeonMixin):
@@ -97,6 +108,10 @@ class Bot(TasksMixin, DungeonMixin):
         self.items_base = 0
         self.spent = 0.0
         self.route_guard: dict | None = None     # настройки угроз в пути (перевозка)
+        self.deadline: float | None = None       # конец окна расписания
+        self.started_at = 0.0
+        self.stats_base = (0.0, 0.0)             # серебро и слава в окне игры на старте
+        self.deaths = 0
         self.avoid_exits: dict = {}              # (зона, x, y) → до какого времени не идти
         # Сторож: когда последний раз что-то менялось (позиция, зона, добыча…).
         self.progress_at = 0.0
@@ -150,8 +165,12 @@ class Bot(TasksMixin, DungeonMixin):
             log.debug("Не удалось отправить оповещение бота", exc_info=True)
 
     def wait(self, seconds: float) -> None:
+        if self.deadline is not None:
+            seconds = min(seconds, max(0.0, self.deadline - self.clock()) + 0.01)
         if self.manager.sleep(max(0.0, seconds), self.stop_event):
             raise BotStopped()
+        if self.deadline is not None and self.clock() >= self.deadline:
+            raise TaskTimeUp()
         self.watch_progress()
 
     def wait_idle(self, seconds: float) -> None:
@@ -204,6 +223,8 @@ class Bot(TasksMixin, DungeonMixin):
     def check(self) -> None:
         if self.stop_event.is_set():
             raise BotStopped()
+        if self.deadline is not None and self.clock() >= self.deadline:
+            raise TaskTimeUp()
 
     # --- запуск ---------------------------------------------------------
     def start(self, task: str, pid: int) -> None:
@@ -224,6 +245,11 @@ class Bot(TasksMixin, DungeonMixin):
     def run(self, task: str) -> None:
         self.task = task
         self.status = "запуск"
+        self.started_at = self.clock()
+        self.gathered = self.orders = self.trips = self.kills = self.loots = self.runs = 0
+        self.spent = 0.0
+        feed = self.manager.feed_for(self.pid)
+        self.stats_base = (feed.silver_gained, feed.fame_gained) if feed else (0.0, 0.0)
         self.manager.open_session(task)
         try:
             if task == "calibrate":
@@ -236,6 +262,8 @@ class Bot(TasksMixin, DungeonMixin):
             self.note("остановлен")
         except BotError as e:
             self.status = "ошибка"
+            if "погиб" in str(e):
+                self.deaths += 1
             self.note(f"ошибка: {e}")
             self.alert(f"error:{e}", "Бот остановлен", str(e))
         except Exception as e:  # pragma: no cover - неожиданная ошибка не должна молча убить бота
@@ -244,7 +272,10 @@ class Bot(TasksMixin, DungeonMixin):
             log.exception("Сбой бота")
         finally:
             self.plan = {"zone": "", "target": None, "path": [], "explored": []}
+            self.deadline = None
             self.manager.close_session()
+            if task != "calibrate":
+                self.manager.add_history(self.stats())
 
     def work(self, task: str) -> None:
         needs_moves = task != "market" or bool(self.task_cfg("market").get("place"))
@@ -264,6 +295,9 @@ class Bot(TasksMixin, DungeonMixin):
             return
         if task == "dungeon_run":
             self.dungeon_run()
+            return
+        if task == "schedule":
+            self.run_schedule()
             return
         cfg = self.manager.config
         limit = int(self.task_cfg("market").get("orders") or 0) if task == "market" else 0
@@ -557,10 +591,64 @@ class Bot(TasksMixin, DungeonMixin):
                       cal.m[0][0], cal.m[1][0], cal.m[0][1], cal.m[1][1], cal.cx, cal.cy, cal.p))
         return cal
 
+    # --- расписание -----------------------------------------------------
+    def run_schedule(self) -> None:
+        try:
+            windows = parse_schedule(self.manager.config.get("schedule") or "", TASKS.keys() - {"schedule"})
+        except ValueError as e:
+            raise BotError(str(e)) from None
+        if not windows:
+            raise BotError("расписание пустое — заполните его на вкладке «Боты»")
+        while True:
+            self.check()
+            now = dt.datetime.fromtimestamp(self.clock())
+            win = current(windows, now)
+            if win is None:
+                nxt = next_start(windows, now)
+                self.status = f"по расписанию: ждёт до {nxt:%a %H:%M}" if nxt else "по расписанию: ждёт"
+                self.wait_idle(60)
+                continue
+            if win.character:
+                pid = self.manager.window_of(win.character)
+                if pid is None:
+                    self.note(f"окно с персонажем «{win.character}» не найдено — жду")
+                    self.wait_idle(60)
+                    continue
+                self.pid = pid
+            end = win.ends_at(now)
+            self.note(f"по расписанию: {TASKS[win.task]} до {end:%H:%M}" + (f" ({win.character})" if win.character else ""))
+            self.deadline = end.timestamp()
+            try:
+                self.work(win.task)
+            except TaskTimeUp:
+                self.note("окно расписания закончилось")
+            except BotError as e:
+                self.note(f"ошибка в задаче по расписанию: {e} — жду следующего окна")
+                self.alert(f"schedule:{e}", "Бот: ошибка по расписанию", str(e))
+                self.deadline = None
+                self.wait_idle(max(60.0, end.timestamp() - self.clock()))
+            finally:
+                self.deadline = None
+
+    # --- статистика -------------------------------------------------------
+    def stats(self) -> dict:
+        feed = self.manager.feed_for(self.pid)
+        silver = (feed.silver_gained - self.stats_base[0]) if feed else 0.0
+        fame = (feed.fame_gained - self.stats_base[1]) if feed else 0.0
+        minutes = max(0.0, (self.clock() - self.started_at) / 60) if self.started_at else 0.0
+        hours = max(minutes / 60, 1e-9)
+        return {"task": self.task, "status": self.status, "start": round(self.started_at), "minutes": round(minutes, 1),
+                "gathered": self.gathered, "orders": self.orders, "trips": self.trips, "kills": self.kills,
+                "loots": self.loots, "runs": self.runs, "deaths": self.deaths, "silver": round(silver),
+                "fame": round(fame), "silver_hour": round(silver / hours) if minutes >= 1 else None,
+                "fame_hour": round(fame / hours) if minutes >= 1 else None,
+                "min_per_run": round(minutes / self.runs, 1) if self.runs else None}
+
     def snapshot(self) -> dict:
         return {"task": self.task, "status": self.status, "running": self.running,
                 "stats": {"gathered": self.gathered, "orders": self.orders, "trips": self.trips,
                           "kills": self.kills, "loots": self.loots, "runs": self.runs, "floors": len(self.floors)},
+                "session": self.stats() if self.started_at else None,
                 "log": list(self.log)[-50:]}
 
 
@@ -866,7 +954,7 @@ class BotManager:
     # --- команды из интерфейса ------------------------------------------
     ACTIONS = {"settings", "configure", "start", "stop", "calibrate", "test_click", "save_place", "delete_place",
                "capture_point", "cancel_capture", "delete_point", "save_macro", "delete_macro",
-               "record_start", "record_stop"}
+               "record_start", "record_stop", "save_profile", "load_profile", "delete_profile", "clear_history"}
 
     def command(self, body: dict) -> dict:
         action = body.get("action")
@@ -893,6 +981,12 @@ class BotManager:
                     v = max(0.0, min(120.0, float(v)))
                 elif k == "record":
                     v = bool(v)
+                elif k == "schedule":
+                    v = str(v or "")[:5000]
+                    try:
+                        parse_schedule(v, TASKS.keys() - {"schedule"})
+                    except ValueError as e:
+                        raise BotError(str(e)) from None
                 elif k == "input" and v not in ("focus", "background"):
                     raise BotError("режим ввода: focus или background")
                 elif k == "task" and v not in TASKS:
@@ -929,7 +1023,165 @@ class BotManager:
         with self.lock:
             self.config["task"] = task
             self.save()
-        self.bot.start(task, self._need_window())
+        pid = self._need_window()
+        missing = [c["item"] + (f" — {c['hint']}" if c.get("hint") else "")
+                   for c in self.checklist(task) if c["required"] and not c["ok"]]
+        if missing:
+            raise BotError("не готово к запуску: " + "; ".join(missing))
+        self.bot.start(task, pid)
+
+    # --- профили, история ---------------------------------------------------
+    def _cmd_save_profile(self, body: dict) -> None:
+        name = (body.get("name") or "").strip()
+        if not name or len(name) > 60:
+            raise BotError("укажите имя профиля")
+        with self.lock:
+            self.config["profiles"][name] = json.loads(json.dumps({k: self.config.get(k) for k in PROFILE_KEYS}))
+            self.save()
+        self.message = f"профиль «{name}» сохранён"
+
+    def _cmd_load_profile(self, body: dict) -> None:
+        prof = self.config["profiles"].get(body.get("name") or "")
+        if prof is None:
+            raise BotError("нет такого профиля")
+        if self.bot.running:
+            raise BotError("остановите бота, чтобы сменить профиль")
+        with self.lock:
+            for k, v in prof.items():
+                if k in DEFAULTS and isinstance(v, dict):
+                    self.config[k] = {**DEFAULTS[k], **{kk: vv for kk, vv in v.items() if kk in DEFAULTS[k]}}
+                elif k in PROFILE_KEYS:
+                    self.config[k] = v
+            self.save()
+        self.message = f"профиль «{body.get('name')}» загружен"
+
+    def _cmd_delete_profile(self, body: dict) -> None:
+        with self.lock:
+            self.config["profiles"].pop(body.get("name") or "", None)
+            self.save()
+
+    def _cmd_clear_history(self, _body: dict) -> None:
+        with self.lock:
+            self.config["history"] = []
+            self.save()
+
+    def add_history(self, entry: dict) -> None:
+        with self.lock:
+            self.config["history"] = (self.config.get("history") or [])[-(MAX_HISTORY - 1):] + [entry]
+            self.save()
+
+    def window_of(self, character: str) -> int | None:
+        if self.clock() - self._refreshed > 2.0:
+            self.refresh()
+        for pid in self.windows:
+            if self.character_of(pid).lower() == character.lower():
+                return pid
+        return None
+
+    # --- чек-лист перед запуском -------------------------------------------
+    def checklist(self, task: str) -> list[dict]:
+        """Что нужно для задачи: [{item, ok, hint, required}]. Обязательные пункты блокируют запуск."""
+        cfg = self.config
+        points = cfg["points"]
+        macros = cfg["macros"]
+        places = cfg["places"]
+        out: list[dict] = []
+
+        def add(item, ok, hint="", required=True):
+            out.append({"item": item, "ok": bool(ok), "hint": "" if ok else hint, "required": required})
+
+        def place(name, title):
+            if name:
+                add(f"{title}: место «{name}»", name in places, "место удалено — сохраните его заново")
+
+        def macro(name, title):
+            if name:
+                add(f"{title}: макрос «{name}»", name in macros, "макрос удалён — запишите его заново")
+
+        def need_points(names, title):
+            missing = [POINTS[n] for n in names if n not in points]
+            add(title, not missing, "укажите точки: " + ", ".join(missing))
+
+        add("Бот включён", cfg.get("enabled"), "галочка «включить бота»")
+        game = self.windows
+        add("Окно игры найдено", bool(game), "запустите игру")
+        if game:
+            try:
+                pid = self.bot.pid if self.bot.running else self.target()
+            except BotError:
+                pid = None
+            feed = self.feed_for(pid)
+            add("Персонаж известен", bool(self.character_of(pid)), "смените зону в игре")
+            add("Трафик игры идёт", bool(feed and self.clock() - feed.last_packet_at < 60),
+                "игра свёрнута или не тот порт сервера (--game-port)")
+            win = self.windows.get(pid)
+            calibrated = bool(win and (cfg["calib"].get(size_key(win)) or {}).get("measured"))
+            add("Калибровка для этого размера окна", calibrated, "сделается сама при запуске", required=False)
+            if cfg["points"] and cfg.get("points_size") and win and cfg["points_size"] != size_key(win):
+                add("Точки интерфейса для этого размера окна", False,
+                    f"указаны в окне {cfg['points_size']}, сейчас {size_key(win)} — укажите заново", required=False)
+        if task in ("gather", "wander"):
+            g = self.task_config("gather")
+            if int(g.get("bag_slots") or 0):
+                add("Сбор: куда сдавать при полной сумке", g.get("home_place"), "выберите место")
+                place(g.get("home_place"), "Сбор")
+                if not g.get("deposit_macro"):
+                    need_points(("stash_open", "stash_deposit"), "Сбор: точки сундука")
+                macro(g.get("deposit_macro"), "Сбор")
+        elif task == "market":
+            m = self.task_config("market")
+            add("Рынок: список предметов", split_items(m.get("items")), "задайте предметы")
+            place(m.get("place"), "Рынок")
+            if m.get("macro"):
+                macro(m.get("macro"), "Рынок")
+            else:
+                side = "sell" if m.get("side", "sell") == "sell" else "buy"
+                need_points(("market_npc", f"{side}_tab", "search", "first_item", f"{side}_order", "price", "qty",
+                             "confirm"), "Рынок: точки интерфейса")
+        elif task == "transport":
+            t = self.task_config("transport")
+            add("Перевозка: место погрузки", t.get("load_place"), "выберите место")
+            add("Перевозка: место разгрузки", t.get("unload_place"), "выберите место")
+            place(t.get("load_place"), "Перевозка")
+            place(t.get("unload_place"), "Перевозка")
+            macro(t.get("load_macro"), "Погрузка")
+            if t.get("unload") == "market_sell":
+                add("Перевозка: что продавать", split_items(t.get("sell_items")), "задайте предметы")
+                need_points(("market_npc", "sell_tab", "search", "first_item", "sell_order", "price", "qty",
+                             "confirm"), "Перевозка: точки рынка")
+            else:
+                macro(t.get("unload_macro"), "Разгрузка")
+        elif task in ("dungeon", "dungeon_run"):
+            d = self.task_config("dungeon")
+            try:
+                parse_skills(d.get("skills"))
+                ok_skills = True
+            except ValueError:
+                ok_skills = False
+            add("Данж: умения", ok_skills, "исправьте строку умений")
+            if d.get("loot_bags") or d.get("open_chests"):
+                need_points(("loot_all",), "Данж: кнопка «Взять всё»")
+            add("Данж: клавиша быстрого выхода", d.get("exit_key"), "без неё — выход пешком по этажам",
+                required=False)
+            if task == "dungeon_run":
+                add("Данжи: сундук в городе", d.get("home_place"), "выберите место")
+                place(d.get("home_place"), "Данжи")
+                if d.get("deposit_macro"):
+                    macro(d.get("deposit_macro"), "Сдача добычи")
+                else:
+                    need_points(("stash_open", "stash_deposit"), "Данжи: точки сундука")
+                for kind, title in (("repair", "Ремонт"), ("restock", "Докупка")):
+                    if int(d.get(f"{kind}_every") or 0):
+                        add(f"{title}: макрос", d.get(f"{kind}_macro"), "выберите макрос")
+                        macro(d.get(f"{kind}_macro"), title)
+                        place(d.get(f"{kind}_place"), title)
+        elif task == "schedule":
+            try:
+                windows = parse_schedule(cfg.get("schedule") or "", TASKS.keys() - {"schedule"})
+                add("Расписание", windows, "расписание пустое")
+            except ValueError as e:
+                add("Расписание", False, str(e))
+        return out
 
     def _cmd_calibrate(self, _body: dict) -> None:
         self.bot.start("calibrate", self._need_window())
@@ -1051,4 +1303,7 @@ class BotManager:
                 "templates": TEMPLATES, "macros": cfg["macros"],
                 "recording": {"point": rec.point, "text": rec.text()} if rec else None,
                 "message": self.message, "tasks": TASKS, "safety": SAFETY_NAMES, "portal_kinds": PORTAL_KINDS,
+                "checklist": self.checklist(cfg.get("task") or "gather"),
+                "profiles": sorted(cfg.get("profiles") or {}), "history": list(reversed(cfg.get("history") or [])),
+                "schedule_help": SCHEDULE_HELP, "skills_help": SKILLS_HELP,
                 "macro_help": MACRO_HELP, "keys": sorted(VK)}

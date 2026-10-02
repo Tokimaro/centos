@@ -315,3 +315,7 @@ body.radar-window #radar-canvas { display: block; width: 100vw; height: 100vh; }
 .bots-macros textarea { font-family: ui-monospace, Consolas, monospace; }
 .bots-help { margin: 0; font-size: 12px; white-space: pre-wrap; }
 button.danger { border-color: var(--bad); color: var(--bad); }
+.bot-check { list-style: none; padding: 0; margin: 6px 0; font-size: 13px; columns: 2; }
+.bot-check li { break-inside: avoid; }
+.bot-group { margin: 6px 0; }
+.bot-group summary { cursor: pointer; color: var(--muted); }

@@ -45,6 +45,9 @@ const BOT_HELP = {
     Здоровье ниже порога — зелье, ещё ниже — отход к точке появления на этаже. Персонаж погиб — бот останавливается.`,
   dungeon: `Пройти данж, в котором стоит персонаж: этажи, мобы, добыча, босс и финальный сундук. Игроки рядом — выход из
     данжа тем же путём. Настройки — те же, что у «Данжи по кругу».`,
+  schedule: `Бот работает по расписанию: в каждом окне времени — своя задача (с её настройками) и, если указан,
+    свой персонаж (бот переключится на его окно). Вне окон бот ждёт. Окно закончилось — задача прерывается, начинается
+    следующая. Ошибка в задаче не останавливает расписание: бот ждёт следующего окна и присылает оповещение.`,
   wander: `Бот просто гуляет по округе от точки старта (радиус — как у сбора), чтобы мир выглядел живым.`,
 };
 
@@ -79,9 +82,19 @@ App.tab({
           <button type="button" id="bot-stop" class="danger">■ Стоп</button>
           <span id="bot-status" class="bot-status"></span>
         </div>
-        <details class="bot-help" open><summary>Как это работает</summary><div id="bot-help"></div></details>
+        <ul class="bot-check" id="bot-check"></ul>
+        <details class="bot-help"><summary>Как это работает</summary><div id="bot-help"></div></details>
         <div id="bot-form"></div>
         <div class="bot-log muted" id="bot-log"></div>
+      </div>
+      <div class="card">
+        <div class="bots-row"><b>Профили настроек</b>
+          <select id="profile-pick"></select>
+          <button type="button" id="profile-load">Загрузить</button>
+          <button type="button" id="profile-delete">Удалить</button>
+          <input type="text" id="profile-name" maxlength="60" placeholder="имя нового профиля">
+          <button type="button" id="profile-save">Сохранить текущие</button></div>
+        <div id="bot-stats"></div>
       </div>
       <h3>Точки интерфейса игры</h3>
       <p class="muted">Нужны рынку и сбору добычи. Нажмите «Указать», переключитесь в окно игры и кликните по нужной
@@ -128,6 +141,16 @@ App.tab({
     }));
     $("#bot-start", el).addEventListener("click", async () => { await post({ action: "start", task: this.task }); this.poll(); });
     $("#bot-stop", el).addEventListener("click", async () => { await post({ action: "stop" }); this.poll(); });
+    $("#profile-save", el).addEventListener("click", async () => {
+      if (await post({ action: "save_profile", name: $("#profile-name").value.trim() })) { $("#profile-name").value = ""; this.poll(); }
+    });
+    $("#profile-load", el).addEventListener("click", async () => {
+      if ($("#profile-pick").value && await post({ action: "load_profile", name: $("#profile-pick").value })) { this.formKey = ""; this.task = null; this.poll(); }
+    });
+    $("#profile-delete", el).addEventListener("click", async () => {
+      const name = $("#profile-pick").value;
+      if (name && confirm(`Удалить профиль «${name}»?`) && await post({ action: "delete_profile", name })) this.poll();
+    });
     $("#place-save", el).addEventListener("click", async () => {
       if (await post({ action: "save_place", name: $("#place-name").value.trim() })) { $("#place-name").value = ""; this.poll(); }
     });
@@ -205,6 +228,7 @@ App.tab({
     this.renderPoints(d);
     this.renderPlaces(d);
     this.renderMacros(d);
+    this.renderExtras(d);
   },
 
   renderGame(d) {
@@ -278,6 +302,7 @@ App.tab({
     const macro = (k, t, empty) => `<label>${t} <select data-c="${k}">${opt("", empty, c[k])}${Object.keys(d.macros).sort()
       .map((m) => opt(m, m, c[k])).join("")}</select></label>`;
     const area = (k, t, ph) => `<label class="col">${t}<textarea data-c="${k}" rows="2" placeholder="${esc(ph)}">${esc(c[k] || "")}</textarea></label>`;
+    const group = (title, body, open = false) => `<details class="bot-group"${open ? " open" : ""}><summary>${title}</summary>${body}</details>`;
     const session = `<div class="bots-row"><label>работа, мин <input type="number" data-s="work_min" value="${s.work_min}" min="1" max="1440"></label>
       <label>отдых, мин <input type="number" data-s="rest_min" value="${s.rest_min}" min="0" max="1440"></label></div>`;
     let html = "";
@@ -285,7 +310,11 @@ App.tab({
       html = `<div class="bots-row">${BOT_RES.map(([r, n]) => `<label><input type="checkbox" data-res="${r}"${(c.res || []).includes(r) ? " checked" : ""}> ${n}</label>`).join("")}</div>
         <div class="bots-row">${num("tier_min", "тир от", 1, 8)}${num("tier_max", "до", 1, 8)}${num("enchant_min", "зачарование от", 0, 4)}
           ${num("radius", "радиус от старта, м", 10, 500, 5)}${num("avoid_mobs", "обходить мобов, м", 0, 50, 1, "0 — не обходить")}
-          ${num("max_nodes", "узлов за запуск", 0, 10000, 1, "0 — без ограничения; потом бот гуляет")}${chk("avoid_players", "уходить от враждебных игроков")}</div>${session}`;
+          ${num("max_nodes", "узлов за запуск", 0, 10000, 1, "0 — без ограничения; потом бот гуляет")}${chk("avoid_players", "уходить от враждебных игроков")}</div>
+        ${group("Где искать и куда сдавать", `<div class="bots-row">${chk("use_heat", "идти туда, где ресурсы бывают (тепловая карта радара)")}
+          ${num("respawn_min", "не возвращаться раньше, мин", 1, 240, 1, "время восстановления узлов")}</div>
+          <div class="bots-row">${num("bag_slots", "сумка полна после предметов", 0, 500, 1, "0 — не следить (перегруз ловится всегда)")}
+          ${place("home_place", "куда сдавать", "— не сдавать —")}${macro("deposit_macro", "как сдавать", "готовый шаблон (сундук)")}</div>`)}${session}`;
     } else if (task === "wander") {
       html = `<div class="bots-row">${num("radius", "радиус прогулки от старта, м", 10, 500, 5)}</div>${session}`;
     } else if (task === "market") {
@@ -295,7 +324,10 @@ App.tab({
         <div class="bots-row">${area("items", "Предметы (id через пробел или с новой строки)", "T4_BAG T5_2H_BOW")}</div>
         <div class="bots-row">${num("undercut", "шаг цены", 0, 1e9, 1, "продажа — на столько дешевле лучшей, покупка — дороже")}${num("qty", "кол-во", 1, 9999)}
           ${num("interval_min", "пауза между заказами, мин от", 0.1, 600, 0.1)}${num("interval_max", "до", 0.1, 600, 0.1)}
-          ${num("orders", "заказов всего", 0, 10000, 1, "0 — без ограничения")}</div>${session}`;
+          ${num("orders", "заказов всего", 0, 10000, 1, "0 — без ограничения")}</div>
+        ${group("Свои заказы и бюджет", `<div class="bots-row">${chk("skip_own", "не дублировать свой лучший заказ")}
+          ${chk("relist_outbid", "перебитый заказ — поставить новый")}${num("budget", "бюджет покупок, серебро", 0, 1e12, 1000, "0 — без ограничения")}</div>
+          <p class="muted">Свои заказы программа видит, когда в игре открыта вкладка «Мои заказы» рынка.</p>`)}${session}`;
     } else if (task === "transport") {
       html = `<div class="bots-row">${place("load_place", "погрузка (город А)", "— выберите место —")}${macro("load_macro", "макрос погрузки", "без макроса")}</div>
         <div class="bots-row">${place("unload_place", "разгрузка (город Б)", "— выберите место —")}
@@ -304,7 +336,10 @@ App.tab({
         <div class="bots-row">${area("sell_items", "Что продавать в городе Б (если «выставить на продажу»)", "T4_ORE T5_ORE")}</div>
         <div class="bots-row">${num("undercut", "шаг цены", 0, 1e9)}${num("qty", "кол-во в заказе", 1, 9999)}
           <label>зоны по пути <select data-c="safety">${Object.entries(d.safety).map(([k, t]) => opt(k, t, c.safety)).join("")}</select></label>
-          ${txt("mount_key", "клавиша маунта", "a")}${chk("round_trip", "туда и обратно")}${num("trips", "рейсов", 0, 1000, 1, "0 — без ограничения")}</div>`;
+          ${txt("mount_key", "клавиша маунта", "a")}${chk("round_trip", "туда и обратно")}${num("trips", "рейсов", 0, 1000, 1, "0 — без ограничения")}</div>
+        ${group("Игроки на пути", `<div class="bots-row">${chk("avoid_players", "объезжать игроков")}${num("player_radius", "ближе, м", 10, 150, 5)}
+          ${num("avoid_min", "не ходить к тому выходу, мин", 1, 120)}${txt("escape_key", "клавиша зелья побега", "3")}</div>
+          <div class="bots-row">${txt("friends", "свои (не угроза)", "Имя1, Имя2")}${num("danger_ip", "опасная сила снаряжения", 0, 2000, 50, "0 — не учитывать")}</div>`)}`;
     } else if (task === "dungeon" || task === "dungeon_run") {
       const kinds = Object.entries(d.portal_kinds).map(([k, t]) =>
         `<label><input type="checkbox" data-kind="${k}"${(c.portal_kinds || []).includes(k) ? " checked" : ""}> ${esc(t)}</label>`).join("");
@@ -318,11 +353,28 @@ App.tab({
         <div class="bots-row">${txt("exit_key", "клавиша быстрого выхода", "a")}
           ${num("exit_channel", "задержка выхода, с", 1, 60, 1, "урон сбивает выход: бот сначала добивает мобов рядом")}
           <span class="muted">быстрый выход переносит к входному порталу; не задана — выход пешком по этажам</span></div>
-        <div class="bots-row">${txt("skills", "умения", "q:3 w:10 e:20")}${num("attack_range", "дальность атаки, м", 3, 40)}</div>
+        <div class="bots-row"><label class="col">Умения <input type="text" data-c="skills" value="${esc(c.skills || "")}" placeholder="q:3 w:10@open e:20@boss 2:30@hp<40@self"></label>
+          ${num("attack_range", "дальность атаки, м", 3, 40)}</div>
+        <pre class="muted bots-help">${esc(d.skills_help)}</pre>
         <div class="bots-row">${txt("potion_key", "клавиша зелья", "2")}${num("potion_hp", "пить при HP ниже, %", 1, 99)}
-          ${num("retreat_hp", "отходить при HP ниже, %", 0, 99)}</div>
+          ${num("retreat_hp", "отходить при HP ниже, %", 0, 99)}${chk("retreat_exit", "при этом — быстрый выход")}</div>
         <div class="bots-row">${chk("loot_bags", "собирать добычу с мобов")}${chk("open_chests", "открывать сундуки")}
-          ${num("chest_wait", "открытие сундука, с", 1, 60)}${num("explore_min", "искать новое, мин", 0.5, 60, 0.5)}${num("max_min", "всего, мин", 1, 600)}</div>`;
+          ${num("chest_wait", "открытие сундука, с", 1, 60)}${num("explore_min", "искать новое, мин", 0.5, 60, 0.5)}${num("max_min", "всего, мин", 1, 600)}</div>
+        ${group("Бой без лишнего риска", `<div class="bots-row">${num("max_pack", "не брать групп больше", 0, 20, 1, "0 — без ограничения")}
+          ${num("rest_hp", "отдыхать между группами при HP ниже, %", 0, 99)}${num("max_mob_tier", "мобы не выше тира", 0, 8, 1, "0 — любые")}
+          ${chk("skip_elite", "пропускать элитных (кроме босса)")}</div>
+          <div class="bots-row">${chk("kite", "отступать (дальний бой)")}${num("kite_dist", "если моб ближе, м", 1, 15)}</div>`)}
+        ${group("Угрозы и побег", `<div class="bots-row">${txt("friends", "свои (не угроза)", "Имя1, Имя2")}
+          ${num("danger_ip", "опасная сила снаряжения", 0, 2000, 50, "0 — не учитывать")}</div>
+          <div class="bots-row">${txt("escape_key", "клавиша зелья побега", "3")}${txt("mount_key", "клавиша маунта (побег в открытом мире)", "a")}</div>`)}
+        ${task === "dungeon_run" ? group("Порталы, сумка, ремонт и докупка", `<div class="bots-row">${num("portal_enchant_min", "зачарование портала от", 0, 4)}
+          ${num("portal_enchant_max", "до", 0, 4)}${num("bag_slots", "сумка полна после предметов", 0, 500, 1, "0 — не следить (перегруз ловится всегда)")}</div>
+          <div class="bots-row">${place("repair_place", "ремонт: где", "— на месте —")}${macro("repair_macro", "макрос", "— нет —")}${num("repair_every", "каждые N данжей", 0, 100)}</div>
+          <div class="bots-row">${place("restock_place", "докупка: где", "— на месте —")}${macro("restock_macro", "макрос", "— нет —")}${num("restock_every", "каждые N данжей", 0, 100)}</div>`) : ""}`;
+    } else if (task === "schedule") {
+      html = `<div class="bots-row"><label class="col">Расписание<textarea data-sched rows="6" spellcheck="false">${esc(s.schedule || "")}</textarea></label></div>
+        <pre class="muted bots-help">${esc(d.schedule_help)}</pre>
+        <p class="muted">Настройки каждой задачи — те, что заданы на её вкладке выше.</p>`;
     }
     form.innerHTML = html;
     const send = (patch) => this.post({ action: "configure", [sect]: patch });
@@ -335,7 +387,34 @@ App.tab({
     $$("[data-kind]", form).forEach((inp) => inp.addEventListener("change", () => {
       send({ portal_kinds: $$("[data-kind]", form).filter((x) => x.checked).map((x) => x.dataset.kind) });
     }));
+    $$("[data-sched]", form).forEach((inp) => inp.addEventListener("change", async () => {
+      if (await this.post({ action: "settings", schedule: inp.value }, "расписание сохранено")) this.formKey = "";
+    }));
     $$("[data-s]", form).forEach((inp) => inp.addEventListener("change", () => this.post({ action: "settings", [inp.dataset.s]: Number(inp.value) })));
+  },
+
+  renderExtras(d) {
+    const check = $("#bot-check");
+    const items = d.checklist || [];
+    const html = items.map((c) => `<li class="${c.ok ? "good" : c.required ? "bad" : "muted"}">${c.ok ? "✓" : c.required ? "✗" : "•"} ${esc(c.item)}${c.hint ? ` — <span class="muted">${esc(c.hint)}</span>` : ""}</li>`).join("");
+    if (check.dataset.html !== html) { check.dataset.html = html; check.innerHTML = html; }
+    const pick = $("#profile-pick");
+    const plist = (d.profiles || []).join("\n");
+    if (pick.dataset.list !== plist) {
+      pick.dataset.list = plist;
+      pick.innerHTML = (d.profiles || []).length ? d.profiles.map((p) => `<option>${esc(p)}</option>`).join("") : `<option value="">— нет —</option>`;
+    }
+    const s = d.bot.session;
+    const hours = (v) => (v == null ? "—" : fmt(v));
+    const cur = s ? `<p><b>Текущий запуск</b> (${esc(d.tasks[s.task] || s.task)}, ${fmt1(s.minutes)} мин): серебро ${fmt(s.silver)} (${hours(s.silver_hour)}/ч),
+      слава ${fmt(s.fame)} (${hours(s.fame_hour)}/ч)${s.runs ? `, данжей ${s.runs} (${fmt1(s.min_per_run)} мин на данж)` : ""}${s.deaths ? `, гибелей ${s.deaths}` : ""}</p>` : "";
+    const rows = (d.history || []).slice(0, 15).map((h) => `<tr><td>${dateTime(h.start)}</td><td>${esc(d.tasks[h.task] || h.task)}</td>
+      <td>${fmt1(h.minutes)}</td><td>${fmt(h.silver)}</td><td>${hours(h.silver_hour)}</td><td>${fmt(h.fame)}</td>
+      <td>${h.runs || h.gathered || h.orders || h.trips || "—"}</td><td>${h.deaths || ""}</td><td class="muted">${esc(h.status)}</td></tr>`).join("");
+    const st = cur + (rows ? `<table class="bot-points"><tr><th>Начало</th><th>Задача</th><th>мин</th><th>серебро</th><th>в час</th><th>слава</th>
+      <th>итог</th><th>гибели</th><th>статус</th></tr>${rows}</table>` : `<p class="muted">Запусков пока не было.</p>`);
+    const box = $("#bot-stats");
+    if (box.dataset.html !== st) { box.dataset.html = st; box.innerHTML = st; }
   },
 
   renderPoints(d) {

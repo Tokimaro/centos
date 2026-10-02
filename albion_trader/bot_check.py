@@ -92,6 +92,13 @@ def check_live(r: Report, url: str, fetch=radar_check._json) -> bool:
     bot = d.get("bot") or {}
     if bot.get("status") == "ошибка" and bot.get("log"):
         r.add(WARN, f"Последняя ошибка бота — {bot['log'][-1]['text']}")
+    checklist = d.get("checklist") or []
+    if checklist:
+        task = (d.get("settings") or {}).get("task") or ""
+        title = (d.get("tasks") or {}).get(task, task)
+        for c in checklist:
+            text = f"Задача «{title}»: {c['item']}" + (f" — {c['hint']}" if c.get("hint") else "")
+            r.add(OK if c["ok"] else (WARN if c["required"] else INFO), text)
     places = d.get("places") or []
     r.add(INFO, "Сохранённые места: " + (", ".join(f"{p['name']} ({p.get('zone_name') or p['zone']})"
                                                     for p in places) or "нет"))

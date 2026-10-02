@@ -28,7 +28,10 @@ SNAP = {"enabled": True, "macros": {"open": "click 0.5 0.4", "order": "click @se
         "places": [{"name": "банк", "zone": "0000", "zone_name": "Thetford"}],
         "points": [{"name": "search", "label": "Поле поиска", "value": [0.3, 0.2]},
                    {"name": "price", "label": "Поле цены", "value": None}],
-        "points_size": "1280x720"}
+        "points_size": "1280x720",
+        "settings": {"task": "market"}, "tasks": {"market": "Рынок"},
+        "checklist": [{"item": "Рынок: список предметов", "ok": False, "hint": "задайте предметы", "required": True},
+                      {"item": "Бот включён", "ok": True, "hint": "", "required": True}]}
 
 
 class BotCheckTest(unittest.TestCase):
@@ -78,7 +81,8 @@ class BotCheckTest(unittest.TestCase):
         for s_ in ("Бот включён", "Alice: трафик идёт, зона Thetford", "Калибровка для окна 1600x900 есть",
                    "Окон игры: 2", "Последняя ошибка бота — ошибка: окно игры закрыто", "банк (Thetford)",
                    "Не указано точек интерфейса: 1 из 2", "указывались в окне 1280x720",
-                   "Макрос «open»: шагов 1 (без expect", "Макрос «order»: шагов 2", "Макрос «broken» с ошибкой: строка 1"):
+                   "Макрос «open»: шагов 1 (без expect", "Макрос «order»: шагов 2", "Макрос «broken» с ошибкой: строка 1",
+                   "Задача «Рынок»: Рынок: список предметов — задайте предметы", "Задача «Рынок»: Бот включён"):
             self.assertIn(s_, t)
         self.assertEqual(r.counts["FAIL"], 1)
         r = Report()
