@@ -139,6 +139,7 @@ class App:
             world_mod.init(conn)
             radar_mod.init(conn)
             self.alerts.ensure_rule(conn, "radar_hostile", "Радар: враждебный игрок рядом")
+            self.alerts.ensure_rule(conn, "bot", "Бот: гибель, остановка, игроки")
             self.alerts.ensure_rule(conn, "world_event", "События мира")
         self.world = World(self.conn, self.write_lock,
                            alert=lambda conn, key, title, text, payload:
@@ -157,7 +158,8 @@ class App:
         self.bots = BotManager(Path(config.db_path).with_name("bots.json"), make_radar=self._new_radar,
                                opcodes=lambda: {**self.albion.op, "events": dict(self.albion.ev)},
                                price_of=self.bot_price, item_name=lambda i: self.catalog.name(i),
-                               zonemaps=self.zonemaps, zone_name=self.zonemaps.zone_name)
+                               zonemaps=self.zonemaps, zone_name=self.zonemaps.zone_name,
+                               notify=self._bot_alert)
         self.killboard = KillboardFetcher(self.conn, self.write_lock, self.settings)
         self.albion.on("zone", self._on_zone)
 
@@ -551,6 +553,11 @@ class App:
                     return float(row[0])
             return self.value_of_factory(conn)(item_id) if side == "sell" else None
 
+    def _bot_alert(self, key: str, title: str, text: str) -> None:
+        """Важное событие бота — через правило оповещений «Бот» (Windows, Telegram, Discord)."""
+        with self.write_lock, self.conn() as conn:
+            self.alerts.trigger_kind(conn, "bot", key, title, text, {"source": "bot"})
+
     def api_bots(self, _q) -> dict:
         return self.bots.snapshot()
 
@@ -594,6 +601,7 @@ class App:
         if any(e["kind"] == "mob" for e in snap["entities"]) and self.config.capture:
             self.mobs.download_async()      # справочник мобов — при первой встрече с мобом
         snap["autocodes"] = bool(self.settings().get("radar_autocodes"))
+        snap["bot"] = None if replay else self.bots.overlay()
         if snap["autocodes"] and snap["suggestions"]:
             self._apply_codes({s["name"]: s["code"] for s in snap["suggestions"]})
         return snap

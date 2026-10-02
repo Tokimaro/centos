@@ -131,6 +131,7 @@ function ruleSummary(r) {
     case "outbid": return "ваш заказ на рынке больше не лучший";
     case "world_event": return "нападение бандитов, фестивали";
     case "radar_hostile": return "враждебный игрок подошёл ближе заданного на вкладке «Радар»";
+    case "bot": return "бот остановился, персонаж погиб, рядом игроки, данж пройден";
     default: return "";
   }
 }

@@ -82,6 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_bc.add_argument("--focus", action="store_true",
                       help="переключиться на окно игры и обратно (проверка, что Windows это разрешает)")
 
+    p_bs = sub.add_parser("bot-session", help="сводка по записанной сессии бота (data/bot_sessions)")
+    p_bs.add_argument("folder", nargs="?", help="папка сессии; по умолчанию — последняя")
+
     p_clean = sub.add_parser("cleanup", help="удалить истёкшие и устаревшие заказы")
     p_clean.add_argument("--retention-hours", type=float, default=72)
     return parser
@@ -235,6 +238,24 @@ def main(argv=None) -> int:
         if getattr(sys, "frozen", False) and hasattr(os, "startfile"):
             os.startfile(out)
         return 1 if "[FAIL]" in text else 0
+    if cmd == "bot-session":
+        from .bot_core import ClientFeed
+        from .bot_session import summarize
+        from .capture.albion import load_opcodes
+        from .radar import Radar
+        folder = Path(args.folder) if args.folder else None
+        if folder is None:
+            sessions = sorted((Path(data_dir) / "bot_sessions").glob("*/"), key=lambda p: p.name)
+            if not sessions:
+                print("Записей сессий нет: включите «записывать сессии» во вкладке «Боты».")
+                return 1
+            folder = sessions[-1]
+        if not (folder / "traffic.bin").exists():
+            print(f"В {folder} нет записи сессии бота (traffic.bin).")
+            return 1
+        codes = load_opcodes(Path(data_dir) / "opcodes.json")
+        print(summarize(folder, lambda: ClientFeed(lambda: Radar(Path(data_dir) / "radar.json"), codes)))
+        return 0
     if cmd == "check-bots":
         from .bot_check import run as run_bot_check
         logging.basicConfig(level=logging.ERROR)

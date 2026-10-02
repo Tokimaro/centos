@@ -573,6 +573,7 @@ class RadarView {
     const ents = this.data.entities.filter((e) => radarVisible(e, o, me));
     if (o.trails) this.drawTrails(ctx, at, ents);
     if (o.route) this.drawRoute(ctx, at, ents, me);
+    if (this.data.bot && this.data.bot.zone === me.zone) this.drawBot(ctx, at, this.data.bot, me);
     // Сначала дальние; игроки поверх остального.
     ents.sort((a, b) => (a.kind === "player") - (b.kind === "player") || b.dist - a.dist);
     const offscreen = [];
@@ -732,6 +733,34 @@ class RadarView {
     ctx.stroke(); ctx.setLineDash([]);
     ctx.font = "bold 10px system-ui, sans-serif";
     path.forEach((n, i) => { const [x, y] = at(n.x, n.y); drawText(ctx, String(i + 1), x - 12, y - 10, "#ffe678"); });
+    ctx.restore();
+  }
+
+  // Бот: разведанные клетки, путь по схеме зоны и текущая цель.
+  drawBot(ctx, at, bot, me) {
+    ctx.save();
+    ctx.fillStyle = "rgba(80,200,255,0.10)";
+    for (const [x, y, size] of bot.explored || []) {
+      const a = at(x, y), b = at(x + size, y), c = at(x + size, y + size), d = at(x, y + size);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.lineTo(d[0], d[1]);
+      ctx.closePath(); ctx.fill();
+    }
+    const path = bot.path || [];
+    if (path.length) {
+      ctx.setLineDash([3, 4]); ctx.lineWidth = 2; ctx.strokeStyle = "rgba(80,200,255,0.9)";
+      ctx.beginPath();
+      const [sx, sy] = at(me.x, me.y); ctx.moveTo(sx, sy);
+      path.forEach(([x, y]) => { const [px, py] = at(x, y); ctx.lineTo(px, py); });
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (bot.target) {
+      const [tx, ty] = at(bot.target[0], bot.target[1]);
+      ctx.strokeStyle = "#50c8ff"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(tx - 6, ty - 6); ctx.lineTo(tx + 6, ty + 6); ctx.moveTo(tx + 6, ty - 6); ctx.lineTo(tx - 6, ty + 6);
+      ctx.stroke();
+      ctx.font = "bold 11px system-ui, sans-serif";
+      if (bot.status) drawText(ctx, `бот: ${bot.status}`, tx, ty - 10, "#50c8ff");
+    }
     ctx.restore();
   }
 

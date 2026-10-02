@@ -47,6 +47,8 @@ class ClientFeed:
                                    event_filter=self.state.accepts_event)
         self.requests = 0
         self.request_log: collections.deque = collections.deque(maxlen=30)
+        self.request_counts: collections.Counter = collections.Counter()
+        self.hits = 0                # сколько раз своё здоровье уменьшилось (урон)
         self.last_packet_at = 0.0
         self.harvests = 0
         self.hp: float | None = None
@@ -64,6 +66,8 @@ class ClientFeed:
             return
         h = p.get(hkey)
         if isinstance(h, (int, float)) and not isinstance(h, bool):
+            if self.hp is None or h < self.hp:
+                self.hits += 1
             self.hp = float(h)
         m = p.get(mkey) if mkey is not None else None
         if isinstance(m, (int, float)) and not isinstance(m, bool) and m > 0:
@@ -72,7 +76,9 @@ class ClientFeed:
     def _on_request(self, code: int, params: dict) -> None:
         self.requests += 1
         real = self.state._code(params, code)
-        self.request_log.append((self.clock(), self.state._op_names.get(real) or str(real)))
+        name = self.state._op_names.get(real) or str(real)
+        self.request_log.append((self.clock(), name))
+        self.request_counts[name] += 1
         self.state.on_request(code, params)
 
     def feed(self, payload: bytes) -> None:

@@ -16,10 +16,9 @@ from unittest import mock
 from albion_trader import radar as radar_mod
 from albion_trader import window
 from albion_trader.capture import opcodes as opcodes_mod
-from albion_trader.capture import photon
 from albion_trader.capture.albion import EVENT_MOVE, AlbionState
 from albion_trader.capture.sniffer import CaptureError
-from albion_trader.radar import (DEPLETED_KEEP, ENCOUNTER_GAP, STALE_AFTER, Entity, Radar, as_position, describe,
+from albion_trader.radar import (DEPLETED_KEEP, ENCOUNTER_GAP, STALE_AFTER, Radar, as_position, describe,
                                  find_position, resource_kind)
 from albion_trader.radar_data import (CodeGuesser, MobTable, compact_mobs, guess_event, player_power,
                                       pretty_mob)
@@ -708,7 +707,6 @@ class Win32CallsTest(unittest.TestCase):
     """Вызовы Windows для окна радара — через подменённый ctypes (проверяются флаги и прозрачность)."""
 
     def fake_ctypes(self, titles):
-        import sys
         user32 = mock.Mock()
         user32.IsWindowVisible.return_value = True
         user32.GetWindowTextLengthW.return_value = 40

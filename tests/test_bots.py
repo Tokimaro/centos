@@ -144,6 +144,10 @@ class FakeGame:
         self.opened = None
         self.next_id = 5000
         self.my_hp = None
+        self.clock = None
+        self.exit_map = {}        # зона данжа → (куда выводит быстрый выход, позиция)
+        self.exiting = None       # (pid, когда закончится задержка)
+        self.damage_on_exit = 0   # сколько первых попыток выхода собьёт урон
 
     def add_window(self, pid, name, pos=(0.0, 0.0), zone="0201", rect=(0, 0, 1600, 900)):
         port = 50000 + pid
@@ -299,8 +303,27 @@ class FakeGame:
                 return
         self.move_to(pid, tx, ty)
 
+    def tick(self):
+        """Время идёт: быстрый выход завершается (или его сбивает урон)."""
+        if not self.exiting:
+            return
+        pid, until = self.exiting
+        if self.damage_on_exit:
+            self.damage_on_exit -= 1
+            self.exiting = None
+            self.my_hp = (self.my_hp or 1000.0) - 50
+            self.event(pid, "health_update", {0: pid, 3: float(self.my_hp)})
+            return
+        if self.clock() >= until:
+            self.exiting = None
+            target, pos = self.exit_map[self.zone[pid]]
+            self.join(pid, self.manager.feed_for(pid).character, target, pos)
+
     def key(self, pid, combo):
         self.request(pid, 99, {})
+        if combo == "a" and self.zone[pid] in self.exit_map:
+            self.exiting = (pid, self.clock() + 10)
+            return
         mid = self.attacking
         if mid in self.mobs and combo in ("q", "w", "e"):
             mob = self.mobs[mid]
@@ -321,12 +344,17 @@ def make(tmp, prices=None, maps=None):
     desk = FakeDesktop(game)
     prices = prices or {}
     zm = FakeZonemaps(maps)
+    alerts = []
     mgr = BotManager(Path(tmp) / "bots.json", make_radar=lambda: Radar(clock=clock), desktop=desk,
+                     notify=lambda key, title, text: alerts.append((key, title, text)),
                      price_of=lambda item, loc, side: prices.get((item, side)),
                      item_name=lambda i: {"T4_BAG": "Сумка адепта"}.get(i, i),
                      zonemaps=zm, zone_name=zm.zone_name, clock=clock, sleep=clock.sleep)
     mgr.config["enabled"] = True
+    mgr.alerts = alerts
     game.manager = mgr
+    game.clock = clock
+    clock.on_sleep.append(game.tick)
     return mgr, game, desk, clock
 
 
@@ -932,6 +960,154 @@ class DungeonRunTest(Base):
         self.assertEqual([portal_kind(n) for n in ("RANDOMDUNGEON_SOLO_X", "CORRUPTED_SOLO", "HELLGATE_2V2",
                                                    "ROADS_AVALON", "RANDOMDUNGEON_GROUP", "", "вход в данж")],
                          ["solo", "corrupted", "hellgate", "avalon", "group", "unknown", "unknown"])
+
+
+class QuickExitTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.window("Hero", zone="CITYA", pos=(0.0, 0.0))
+        self.mgr.config["points"] = dict(ALL_POINTS)
+        self.mgr.config["places"] = {"сундук": {"zone": "CITYA", "x": 0.0, "y": 10.0}}
+        self.bot.calibrate()
+        g = self.game
+        g.add_link(1, 700, 20, 30, "ROAD", "DNG1", 0.0, 0.0, "new_random_dungeon_exit", "RANDOMDUNGEON_SOLO_X")
+        g.add_link(1, 711, 30, 10, "DNG1", "DNG2", 0.0, 0.0)
+        g.add_mob(1, 802, 14, 0, zone="DNG2", name="T4_MOB_BOSS")
+        g.exit_map = {"DNG1": ("ROAD", (24.0, 30.0)), "DNG2": ("ROAD", (24.0, 30.0))}
+        self.mgr.command({"action": "configure", "dungeon": {
+            "home_place": "сундук", "skills": "q:1 w:2", "explore_min": 0.5, "runs": 1, "exit_key": "a",
+            "exit_channel": 10, "safety": "yellow", "search_zones": 2, "search_min": 2}})
+
+    def test_run_uses_quick_exit(self):
+        self.bot.run("dungeon_run")
+        self.assertEqual(self.bot.status, "готово", self.texts()[-4:])
+        self.assertIn("быстрый выход: «Дорога»", self.texts())
+        self.assertFalse(any("вышел из данжа" in t for t in self.texts()))     # пешком не шёл
+        self.assertIn((1, "a"), self.desk.keys)
+        self.assertEqual(self.game.zone[1], "CITYA")
+        self.assertTrue(any(t == "Бот: данж пройден" for _k, t, _x in self.mgr.alerts))
+
+    def test_damage_interrupts_then_retry_after_fighting(self):
+        self.game.join(1, "Hero", "DNG1", (0.0, 0.0))
+        self.game.add_mob(1, 803, 5, 5, zone="DNG1")
+        self.game.damage_on_exit = 1
+        self.bot.start_dungeon_state()
+        d = self.mgr.task_config("dungeon")
+        self.assertTrue(self.bot.quick_exit(d, self.bot.skills_of(d)))
+        self.assertIn("быстрый выход сбит уроном — ещё раз", self.texts())
+        self.assertNotIn(803, self.game.mobs)                    # моб рядом добит перед выходом
+        self.assertEqual(self.game.zone[1], "ROAD")
+
+    def test_falls_back_to_walking_out(self):
+        self.game.add_link(1, 710, 0, -6, "DNG1", "ROAD", 24.0, 30.0)
+        self.game.exit_map = {}                                  # клавиша не работает
+        self.game.join(1, "Hero", "DNG1", (0.0, 0.0))
+        self.bot.start_dungeon_state()
+        self.bot.floors = [("DNG1", (0.0, 0.0))]
+        self.bot.exit_dungeon(self.mgr.task_config("dungeon"))
+        self.assertEqual(self.texts().count("быстрый выход не сработал"), 3)
+        self.assertEqual(self.game.zone[1], "ROAD")
+        self.assertTrue(any("вышел из данжа" in t for t in self.texts()))
+        self.assertFalse(self.bot.quick_exit({"exit_key": ""}))
+
+
+class WatchdogTest(Base):
+    def test_stuck_bot_tries_to_recover_then_stops_with_alert(self):
+        self.window()
+        self.bot.calibrate()
+        self.mgr.config["watchdog_min"] = 1
+        self.game.ignore_clicks = True
+        self.bot.run("wander")
+        self.assertEqual(self.bot.status, "ошибка")
+        self.assertIn("нет прогресса 1 мин", self.texts()[-1])
+        self.assertGreaterEqual(self.texts().count("нет прогресса 1 мин — пробую выбраться"), 2)
+        self.assertTrue(any(t == "Бот остановлен" for _k, t, _x in self.mgr.alerts))
+
+    def test_idle_waits_are_not_stuck(self):
+        self.window()
+        self.mgr.config["watchdog_min"] = 1
+        self.bot.progress_at = self.clock.t
+        self.bot._progress_sig = None
+        self.bot.watch_progress()
+        self.bot.wait_idle(300)                 # 5 минут отдыха — не зависание
+        self.assertEqual(self.bot.stuck_tries, 0)
+        self.mgr.config["watchdog_min"] = 0     # выключен
+        self.clock.t += 10_000
+        self.bot.watch_progress()
+        self.assertEqual(self.bot.stuck_tries, 0)
+
+
+class SessionAndOverlayTest(Base):
+    def test_session_is_recorded_and_summarized(self):
+        from albion_trader.bot_session import read_log, read_traffic, summarize
+        self.window(zone="CITYA")
+        self.mgr.config["record"] = True
+        self.game.add_link(1, 700, 20, 30, "CITYA", "ROAD", 0.0, 0.0, "new_random_dungeon_exit", "RANDOMDUNGEON_SOLO")
+        self.bot.run("calibrate")
+        self.assertIsNone(self.mgr.session)
+        folders = list((Path(self.tmp.name) / "bot_sessions").iterdir())
+        self.assertEqual(len(folders), 1)
+        self.assertTrue(folders[0].name.endswith("-calibrate"))
+        self.game.move_to(1, 1, 1)               # после сессии трафик не пишется
+        packets = list(read_traffic(folders[0] / "traffic.bin"))
+        self.assertTrue(packets)
+        self.assertTrue(all(port == 50001 for _t, port, _p in packets))
+        actions = read_log(folders[0] / "log.jsonl")
+        self.assertEqual(actions[0]["a"], "start")
+        self.assertEqual(sum(1 for a in actions if a["a"] == "click"), 4)
+        self.assertTrue(any(a["a"] == "note" and "калибровка готова" in a["text"] for a in actions))
+        # Сводка видит пакеты, клики и журнал (зона уже известна до записи — смен зон нет).
+        text = summarize(folders[0], lambda: ClientFeed(lambda: Radar(clock=self.clock)))
+        for s in ("Сессия бота:", "move", "click 4", "калибровка готова"):
+            self.assertIn(s, text)
+
+    def test_summary_shows_zones_and_unknown_codes(self):
+        from albion_trader.bot_session import Session, summarize
+        s = Session(Path(self.tmp.name), "test", clock=self.clock)
+        s.packet(50001, pb.packet(pb.response(DEFAULT_OPCODES["join"], {0: 1, 2: "A", 8: "3004", 9: [1.0, 1.0]})))
+        s.packet(50001, pb.packet(pb.event(4242, {0: 9, 1: [5.0, 5.0], 3: "MYSTERY"})))
+        s.packet(50001, b"\x00\x01")           # мусор не мешает
+        s.close()
+        text = summarize(s.dir, lambda: ClientFeed(lambda: Radar(clock=self.clock)))
+        self.assertIn("3004", text)
+        self.assertIn("4242:", text)
+        self.assertIn("(пусто)", text)
+        again = Session(Path(self.tmp.name), "test", clock=self.clock)       # то же время — другая папка
+        self.assertNotEqual(again.dir, s.dir)
+        again.close()
+
+    def test_cli_bot_session(self):
+        from albion_trader.__main__ import main
+        from unittest import mock
+        with mock.patch("builtins.print") as out:
+            self.assertEqual(main(["--data-dir", self.tmp.name, "bot-session"]), 1)
+        self.assertIn("Записей сессий нет", out.call_args[0][0])
+        self.window()
+        self.mgr.config["record"] = True
+        self.bot.run("calibrate")
+        with mock.patch("builtins.print") as out:
+            self.assertEqual(main(["--data-dir", self.tmp.name, "bot-session"]), 0)
+        self.assertIn("Сессия бота", out.call_args[0][0])
+        with mock.patch("builtins.print") as out:
+            self.assertEqual(main(["--data-dir", self.tmp.name, "bot-session", self.tmp.name]), 1)
+
+    def test_plan_and_overlay(self):
+        self.window()
+        self.bot.calibrate()
+        self.assertIsNone(self.mgr.overlay())           # бот не работает — на радаре ничего
+        self.bot.walk_to(30, 0)
+        self.assertEqual(self.bot.plan["target"], [30, 0])
+        self.assertEqual(self.bot.plan["zone"], "0201")
+        visited = set()
+        self.bot.mark_visited(visited)
+        self.assertEqual(len(self.bot.plan["explored"]), 1)
+        started = threading.Event()
+        self.bot.thread = threading.Thread(target=lambda: (started.set(), self.bot.stop_event.wait(5)))
+        self.bot.thread.start()
+        started.wait(1)
+        ov = self.mgr.overlay()
+        self.assertEqual((ov["zone"], ov["target"]), ("0201", [30, 0]))
+        self.bot.stop()
 
 
 # --- команды и запись -------------------------------------------------------------

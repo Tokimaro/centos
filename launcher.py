@@ -48,7 +48,7 @@ def build_args(argv: list) -> list:
 def serve_port(args: list) -> int | None:
     """Порт, если запускается сервер (``serve`` или без команды), иначе None."""
     commands = {"serve", "replay", "update-items", "update-opcodes", "update-maps", "cleanup", "check",
-                "check-radar", "check-bots"}
+                "check-radar", "check-bots", "bot-session"}
     cmd = next((a for a in args if a in commands), "serve")
     if cmd != "serve":
         return None

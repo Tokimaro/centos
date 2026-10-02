@@ -27,6 +27,7 @@ DEFAULTS = {
                 "retreat_hp": 20, "loot_bags": True, "open_chests": True, "chest_wait": 8,
                 "explore_min": 4, "max_min": 40, "max_floors": 8,
                 # Цикл из города: где сдавать добычу, где искать порталы, от кого уходить.
+                "exit_key": "", "exit_channel": 10,
                 "home_place": "", "deposit_macro": "", "safety": "yellow", "search_zones": 4,
                 "search_min": 8, "portal_kinds": ["solo"], "avoid_players": True, "player_radius": 45,
                 "runs": 0},
@@ -176,7 +177,7 @@ class TasksMixin:
             lo = float(m.get("interval_min") or 1)
             hi = max(lo, float(m.get("interval_max") or lo))
             self.status = "ждёт до следующего заказа"
-            self.wait(self.rng.uniform(lo, hi) * 60)
+            self.wait_idle(self.rng.uniform(lo, hi) * 60)
 
     # --- перевозка ----------------------------------------------------------
     def transport(self) -> None:

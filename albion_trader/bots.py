@@ -38,6 +38,7 @@ from typing import Callable
 from .bot_core import (MACRO_HELP, POINTS, TEMPLATES, BotError, BotStopped, Calibration, ClientFeed, fill,
                        parse_macro, solve_calibration)
 from .bot_nav import Grid, Router
+from .bot_session import Session
 from .bot_dungeon import PORTAL_KINDS, DungeonMixin
 from .bot_tasks import DEFAULTS, TasksMixin
 from .bot_win import VK, VK_LBUTTON, Desktop, GameWindow
@@ -59,10 +60,11 @@ SAFETY_NAMES = {"safe": "только безопасные (синие)", "yello
                 "black": "любые, включая чёрные"}
 DEFAULT_CONFIG = {"enabled": False, "stop_key": "f12", "pause_when_active": True, "user_idle": 3.0,
                   "restore_focus": True, "input": "focus", "task": "gather", "work_min": 25, "rest_min": 5,
+                  "watchdog_min": 10, "record": False,
                   "calib": {}, "points": {}, "points_size": "", "places": {}, "macros": {},
                   **{k: dict(v) for k, v in DEFAULTS.items()}}
 SETTINGS = ("enabled", "stop_key", "pause_when_active", "user_idle", "restore_focus", "input", "task",
-            "work_min", "rest_min")
+            "work_min", "rest_min", "watchdog_min", "record")
 
 
 def size_key(win: GameWindow) -> str:
@@ -87,6 +89,14 @@ class Bot(TasksMixin, DungeonMixin):
         self.bad_portals: set = set()
         self.start_dungeon_state()
         self.rng = random.Random()
+        # Сторож: когда последний раз что-то менялось (позиция, зона, добыча…).
+        self.progress_at = 0.0
+        self._progress_sig = None
+        self.stuck_tries = 0
+        self.recovering = False
+        self.idle = False              # законное ожидание (отдых, пауза рынка) — не зависание
+        # Что бот сейчас делает — для отображения на радаре.
+        self.plan: dict = {"zone": "", "target": None, "path": [], "explored": []}
 
     # --- окружение ------------------------------------------------------
     @property
@@ -121,10 +131,66 @@ class Bot(TasksMixin, DungeonMixin):
     def note(self, text: str) -> None:
         self.log.append({"ts": self.clock(), "text": text})
         log.info("Бот: %s", text)
+        self.manager.record({"a": "note", "text": text})
+
+    def alert(self, key: str, title: str, text: str) -> None:
+        """Важное событие — в оповещения программы (Windows, Telegram, Discord)."""
+        try:
+            self.manager.notify(key, title, text)
+        except Exception:  # pragma: no cover - оповещение не должно ронять бота
+            log.debug("Не удалось отправить оповещение бота", exc_info=True)
 
     def wait(self, seconds: float) -> None:
         if self.manager.sleep(max(0.0, seconds), self.stop_event):
             raise BotStopped()
+        self.watch_progress()
+
+    def wait_idle(self, seconds: float) -> None:
+        """Ожидание, которое не считается зависанием (отдых, пауза между заказами)."""
+        self.idle = True
+        try:
+            self.wait(seconds)
+        finally:
+            self.idle = False
+            self.progress_at = self.clock()
+
+    # --- сторож от зависаний ----------------------------------------------
+    def watch_progress(self) -> None:
+        feed = self.manager.feed_for(self.pid)
+        if feed is None:
+            return
+        me = feed.me
+        sig = (me.get("zone"), int(me.get("x", 0) // 5), int(me.get("y", 0) // 5), self.gathered, self.orders,
+               self.trips, self.kills, self.loots, self.runs)
+        now = self.clock()
+        if sig != self._progress_sig or self.idle:
+            self._progress_sig, self.progress_at = sig, now
+            if not self.idle:
+                self.stuck_tries = 0
+            return
+        limit = float(self.manager.config.get("watchdog_min") or 0) * 60
+        if not limit or self.recovering or now - self.progress_at < limit:
+            return
+        self.recovering = True
+        try:
+            self.stuck_tries += 1
+            if self.stuck_tries > 2:
+                raise BotError(f"нет прогресса {limit / 60:.0f} мин даже после попыток выбраться — бот остановлен")
+            self.note(f"нет прогресса {limit / 60:.0f} мин — пробую выбраться")
+            self.recover()
+        finally:
+            self.recovering = False
+            self.progress_at = self.clock()
+
+    def recover(self) -> None:
+        """Выбраться из тупика: в данже — быстрый выход, иначе шаги в разные стороны."""
+        d = self.task_cfg("dungeon")
+        if self.floors and d.get("exit_key") and self.quick_exit(d):
+            return
+        for _ in range(3):
+            ang = self.rng.uniform(0, 2 * math.pi)
+            self.click_world(10 * math.cos(ang), 10 * math.sin(ang))
+            self.wait(2.0)
 
     def check(self) -> None:
         if self.stop_event.is_set():
@@ -139,6 +205,7 @@ class Bot(TasksMixin, DungeonMixin):
             self.thread.join(5)
         self.stop_event.clear()
         self.pid, self.task = pid, task
+        self.progress_at, self._progress_sig, self.stuck_tries = self.clock(), None, 0
         self.thread = threading.Thread(target=self.run, args=(task,), daemon=True, name="bot")
         self.thread.start()
 
@@ -148,6 +215,7 @@ class Bot(TasksMixin, DungeonMixin):
     def run(self, task: str) -> None:
         self.task = task
         self.status = "запуск"
+        self.manager.open_session(task)
         try:
             if task == "calibrate":
                 self.calibrate()
@@ -160,10 +228,14 @@ class Bot(TasksMixin, DungeonMixin):
         except BotError as e:
             self.status = "ошибка"
             self.note(f"ошибка: {e}")
+            self.alert(f"error:{e}", "Бот остановлен", str(e))
         except Exception as e:  # pragma: no cover - неожиданная ошибка не должна молча убить бота
             self.status = "ошибка"
             self.note(f"сбой: {e}")
             log.exception("Сбой бота")
+        finally:
+            self.plan = {"zone": "", "target": None, "path": [], "explored": []}
+            self.manager.close_session()
 
     def work(self, task: str) -> None:
         needs_moves = task != "market" or bool(self.task_cfg("market").get("place"))
@@ -197,7 +269,7 @@ class Bot(TasksMixin, DungeonMixin):
             if rest:
                 self.status = f"отдых {rest / 60:.0f} мин"
                 self.note(self.status)
-                self.wait(rest)
+                self.wait_idle(rest)
 
     # --- ввод -----------------------------------------------------------
     def act(self, fn: Callable[[Desktop, GameWindow, bool], None]) -> None:
@@ -205,9 +277,11 @@ class Bot(TasksMixin, DungeonMixin):
 
     def click_at(self, fx: float, fy: float, button: str = "left") -> None:
         jx, jy = self.rng.uniform(-0.004, 0.004), self.rng.uniform(-0.004, 0.004)
+        self.manager.record({"a": "click", "x": round(fx + jx, 4), "y": round(fy + jy, 4), "b": button})
         self.act(lambda d, w, bg: d.click(w, fx + jx, fy + jy, button, background=bg))
 
     def press_key(self, combo: str) -> None:
+        self.manager.record({"a": "key", "k": combo})
         self.act(lambda d, w, bg: d.press(w, combo, background=bg))
 
     def plan_click(self, dx: float, dy: float, step: float) -> tuple[float, float, float, float]:
@@ -273,6 +347,7 @@ class Bot(TasksMixin, DungeonMixin):
                 self.wait(self.rng.uniform(0.15, 0.35))
             elif cmd == "type":
                 text_ = fill(step[1], values)
+                self.manager.record({"a": "type", "text": text_})
                 self.act(lambda d, w, bg, t=text_: d.type_text(w, t, background=bg))
             elif cmd == "key":
                 self.press_key(step[1])
@@ -312,6 +387,9 @@ class Bot(TasksMixin, DungeonMixin):
             max_steps = int(math.hypot(x - px, y - py) / 4) + 20
         stuck = 0
         zone = self.feed.zone
+        if self.plan.get("zone") != zone:
+            self.plan = {"zone": zone, "target": None, "path": [], "explored": []}
+        self.plan["target"] = [round(x, 1), round(y, 1)]
         for _ in range(max_steps):
             self.check()
             if self.feed.zone != zone:
@@ -346,6 +424,7 @@ class Bot(TasksMixin, DungeonMixin):
             pts = grid.path(self.pos(), (x, y))
             if pts:
                 zone = self.feed.zone
+                self.plan = {**self.plan, "zone": zone, "path": [[round(a, 1), round(b, 1)] for a, b in pts]}
                 for wx, wy in pts[:-1]:
                     self.walk_to(wx, wy, tol=3.0)
                     if self.feed.zone != zone:
@@ -492,6 +571,7 @@ class BotManager:
                  price_of: Callable[[str, str, str], float | None] = lambda *_a: None,
                  item_name: Callable[[str], str] = lambda i: i,
                  zonemaps=None, zone_name: Callable[[str], str] | None = None,
+                 notify: Callable[[str, str, str], None] = lambda *_a: None,
                  clock: Callable[[], float] = time.time,
                  sleep: Callable[[float, threading.Event], bool] = _event_sleep):
         self.config_path = Path(config_path)
@@ -502,6 +582,8 @@ class BotManager:
         self.item_name = item_name
         self.zonemaps = zonemaps
         self.zone_name = zone_name or (lambda z: z)
+        self.notify = notify
+        self.session: Session | None = None
         self.clock = clock
         self.sleep = sleep
         self.lock = threading.RLock()
@@ -565,6 +647,36 @@ class BotManager:
             feed.feed(payload)
         except Exception:  # pragma: no cover - битый пакет не роняет захват
             log.debug("Ошибка разбора пакета бота", exc_info=True)
+        session = self.session
+        if session is not None:
+            win = self.windows.get(self.bot.pid)
+            if win is not None and local_port in win.ports:
+                session.packet(local_port, payload)
+
+    # --- запись сессий --------------------------------------------------
+    def open_session(self, task: str) -> None:
+        if not self.config.get("record") or self.session is not None:
+            return
+        try:
+            self.session = Session(self.config_path.parent / "bot_sessions", task, self.clock)
+            log.info("Запись сессии бота: %s", self.session.dir)
+        except OSError as e:
+            log.warning("Не удалось начать запись сессии бота: %s", e)
+
+    def close_session(self) -> None:
+        session, self.session = self.session, None
+        if session is not None:
+            session.close()
+
+    def record(self, entry: dict) -> None:
+        if self.session is not None:
+            self.session.log(entry)
+
+    def overlay(self) -> dict | None:
+        """Что делает бот — для карты радара: зона, цель, путь, разведанные клетки."""
+        if not self.bot.running:
+            return None
+        return {**self.bot.plan, "status": self.bot.status, "task": self.bot.task}
 
     def feed_for(self, pid: int | None) -> ClientFeed | None:
         win = self.windows.get(pid) if pid is not None else None
@@ -731,6 +843,10 @@ class BotManager:
                     v = max(0.0, min(60.0, float(v)))
                 elif k in ("work_min", "rest_min"):
                     v = max(0.0, min(24 * 60.0, float(v)))
+                elif k == "watchdog_min":
+                    v = max(0.0, min(120.0, float(v)))
+                elif k == "record":
+                    v = bool(v)
                 elif k == "input" and v not in ("focus", "background"):
                     raise BotError("режим ввода: focus или background")
                 elif k == "task" and v not in TASKS:

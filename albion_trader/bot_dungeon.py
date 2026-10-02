@@ -84,6 +84,7 @@ class DungeonMixin:
         names = ", ".join(e.name or "игрок" for e in near[:3])
         self.status = f"уходит от игроков: {names}"
         self.note(self.status)
+        self.alert(f"players:{names}:{int(self.clock() // 600)}", "Бот: рядом игроки", self.status)
         if target:
             self.walk_to(*target, tol=4, max_steps=12)
         self.wait(self.rng.uniform(1, 3))
@@ -138,7 +139,12 @@ class DungeonMixin:
 
     def mark_visited(self, visited: set) -> None:
         px, py = self.pos()
-        visited.add((int(px // EXPLORE_CELL), int(py // EXPLORE_CELL)))
+        cell = (int(px // EXPLORE_CELL), int(py // EXPLORE_CELL))
+        if cell not in visited:
+            visited.add(cell)
+            if self.plan.get("zone") == self.feed.zone:
+                self.plan["explored"] = [[c[0] * EXPLORE_CELL, c[1] * EXPLORE_CELL, EXPLORE_CELL]
+                                         for c in list(visited)[-400:]]
 
     # --- бой и добыча ----------------------------------------------------
     def heal(self, d: dict) -> None:
@@ -156,7 +162,7 @@ class DungeonMixin:
                 self.walk_to(*self.home, tol=3)
             start = self.clock()
             while (self.feed.hp_pct or 100) < 90 and self.clock() - start < 90:
-                self.wait(2)
+                self.wait_idle(2)
 
     def is_boss(self, mob) -> bool:
         radar = self.feed.radar
@@ -277,7 +283,10 @@ class DungeonMixin:
                 return "moved"
             if self.clock() - started > float(d.get("max_min") or 40) * 60:
                 return "time"
-            if d.get("avoid_players") and self.players_near(float(d.get("player_radius") or 45)):
+            near = self.players_near(float(d.get("player_radius") or 45)) if d.get("avoid_players") else []
+            if near:
+                names = ", ".join(e.name or "игрок" for e in near[:3])
+                self.alert(f"players:{names}:{int(self.clock() // 600)}", "Бот: игроки в данже", names)
                 return "players"
             self.mark_visited(visited)
             self.heal(d)
@@ -351,6 +360,52 @@ class DungeonMixin:
         self.floors = []
         self.note(f"вышел из данжа в «{self.manager.zone_name(self.feed.zone)}»")
 
+    def quick_exit(self, d: dict, skills: list | None = None) -> bool:
+        """Быстрый выход из данжа клавишей (к входному порталу в открытом мире).
+
+        Выход идёт с задержкой, урон его сбивает: перед нажатием бот добивает мобов
+        рядом (если есть умения), во время задержки следит за своим здоровьем. True —
+        вышли (сменилась зона)."""
+        key = d.get("exit_key")
+        if not key:
+            return False
+        channel = float(d.get("exit_channel") or 10)
+        start_zone = self.feed.zone
+        done: set = set()
+        for attempt in range(3):
+            self.check()
+            if skills:
+                while True:
+                    px, py = self.pos()
+                    near = [m for m in self.feed.entities("mob") if m.id not in done
+                            and (m.health is None or m.health > 0) and math.hypot(m.x - px, m.y - py) < 12]
+                    if not near:
+                        break
+                    self.fight(min(near, key=lambda m: math.hypot(m.x - px, m.y - py)), d, skills, done)
+            hits0 = self.feed.hits
+            self.status = "быстрый выход"
+            self.press_key(key)
+            t0 = self.clock()
+            interrupted = False
+            while self.clock() - t0 < channel + 8:
+                self.wait(0.5)
+                if self.feed.zone != start_zone:
+                    self.wait(1.5)
+                    self.floors = []
+                    self.note(f"быстрый выход: «{self.manager.zone_name(self.feed.zone)}»")
+                    return True
+                if self.feed.hits != hits0:
+                    interrupted = True
+                    break
+            self.note("быстрый выход сбит уроном — ещё раз" if interrupted else "быстрый выход не сработал")
+        return False
+
+    def exit_dungeon(self, d: dict, skills: list | None = None) -> None:
+        """Выйти из данжа: быстрым выходом, а если не вышло — пешком по этажам."""
+        if self.quick_exit(d, skills):
+            return
+        self.leave_dungeon()
+
     def dungeon(self) -> None:
         """Пройти данж, в котором стоит персонаж."""
         d = self.task_cfg("dungeon")
@@ -358,7 +413,7 @@ class DungeonMixin:
         result = self.clear_dungeon(d, skills)
         if result == "players":
             self.note("рядом игроки — выхожу из данжа")
-            self.leave_dungeon()
+            self.exit_dungeon(d)
         elif result == "time":
             self.note("время на данж вышло")
         else:
@@ -455,7 +510,8 @@ class DungeonMixin:
                 self.note("в данже игроки — ухожу, ищу другой данж")
             elif result == "time":
                 self.note("время на данж вышло — выхожу")
-            self.leave_dungeon()
+            # При игроках рядом — без боя: выход сразу (бой задержал бы уход).
+            self.exit_dungeon(d, None if result == "players" else skills)
             if result == "players":
                 continue
             self.status = "домой"
@@ -463,5 +519,7 @@ class DungeonMixin:
             self.deposit(d)
             self.runs += 1
             self.note(f"данж {self.runs} пройден: убито {self.kills}, добыча {self.loots}")
+            self.alert(f"run:{self.runs}", "Бот: данж пройден",
+                       f"данжей: {self.runs}, убито: {self.kills}, добыча: {self.loots}")
             if limit and self.runs >= limit:
                 return
