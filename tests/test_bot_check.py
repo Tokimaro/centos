@@ -20,15 +20,15 @@ def text(r):
     return "\n".join(r.lines)
 
 
-SNAP = {"enabled": True, "macros": {"open": "click 0.5 0.4", "order": "click 0.1 0.1\nexpect 2000",
+SNAP = {"enabled": True, "macros": {"open": "click 0.5 0.4", "order": "click @search\nexpect 2000",
                                     "broken": "click 9 9"},
-        "windows": [
-            {"pid": 1, "character": "Alice", "traffic": True, "zone": "0201", "resources": 3,
-             "config": {"calib": {"measured": True, "cx": 0.48, "cy": 0.55}}, "bot": {"status": "сбор"}},
-            {"pid": 2, "character": "", "traffic": False},
-            {"pid": 3, "character": "Bob", "traffic": False, "config": {"calib": None},
-             "bot": {"status": "ошибка", "log": [{"text": "ошибка: окно игры закрыто"}]}},
-        ]}
+        "game": {"character": "Alice", "traffic": True, "zone": "0201", "zone_name": "Thetford", "size": "1600x900",
+                 "calibrated": True, "windows": 2},
+        "bot": {"status": "ошибка", "log": [{"text": "ошибка: окно игры закрыто"}]},
+        "places": [{"name": "банк", "zone": "0000", "zone_name": "Thetford"}],
+        "points": [{"name": "search", "label": "Поле поиска", "value": [0.3, 0.2]},
+                   {"name": "price", "label": "Поле цены", "value": None}],
+        "points_size": "1280x720"}
 
 
 class BotCheckTest(unittest.TestCase):
@@ -75,16 +75,23 @@ class BotCheckTest(unittest.TestCase):
         r = Report()
         self.assertTrue(bot_check.check_live(r, "http://x", fetch=lambda url: SNAP))
         t = text(r)
-        for s in ("Боты включены", "Alice: трафик идёт, зона 0201", "Alice: калибровка есть (персонаж в точке 0.48, 0.55",
-                  "окно 2: персонаж неизвестен", "Bob: нет трафика", "Bob: нет калибровки",
-                  "Bob: последняя ошибка бота — ошибка: окно игры закрыто", "Макрос «open»: шагов 1 (без expect",
-                  "Макрос «order»: шагов 2", "Макрос «broken» с ошибкой: строка 1"):
-            self.assertIn(s, t)
+        for s_ in ("Бот включён", "Alice: трафик идёт, зона Thetford", "Калибровка для окна 1600x900 есть",
+                   "Окон игры: 2", "Последняя ошибка бота — ошибка: окно игры закрыто", "банк (Thetford)",
+                   "Не указано точек интерфейса: 1 из 2", "указывались в окне 1280x720",
+                   "Макрос «open»: шагов 1 (без expect", "Макрос «order»: шагов 2", "Макрос «broken» с ошибкой: строка 1"):
+            self.assertIn(s_, t)
         self.assertEqual(r.counts["FAIL"], 1)
         r = Report()
-        bot_check.check_live(r, "http://x", fetch=lambda url: {"enabled": False, "windows": [], "macros": {}})
-        self.assertIn("Боты выключены", text(r))
-        self.assertIn("Макросов рынка нет", text(r))
+        bot_check.check_live(r, "http://x", fetch=lambda url: {
+            "enabled": False, "game": {"character": "", "size": "800x600", "calibrated": False},
+            "points": [{"name": "a", "label": "A", "value": [0.1, 0.1]}], "macros": {}, "places": []})
+        t = text(r)
+        for s_ in ("Бот выключен", "Персонаж неизвестен", "Нет калибровки для окна 800x600",
+                   "Все точки интерфейса указаны", "Сохранённые места: нет"):
+            self.assertIn(s_, t)
+        r = Report()
+        bot_check.check_live(r, "http://x", fetch=lambda url: {"enabled": True, "game": None})
+        self.assertIn("Окно игры не найдено", text(r))
         r = Report()
         self.assertFalse(bot_check.check_live(r, "http://127.0.0.1:1"))
         self.assertIn("Программа не отвечает", text(r))

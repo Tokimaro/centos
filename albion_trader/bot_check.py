@@ -64,37 +64,51 @@ def check_windows(r: Report, desktop: Desktop) -> list:
 
 
 def check_live(r: Report, url: str, fetch=radar_check._json) -> bool:
-    r.section("Программа и боты")
+    r.section("Программа и бот")
     try:
         d = fetch(url + "/api/bots")
     except Exception as e:  # noqa: BLE001 - любая ошибка = программа недоступна
         r.add(WARN, f"Программа не отвечает на {url} ({e}) — запустите Albion Trader и повторите")
         return False
     if not d.get("enabled"):
-        r.add(WARN, "Боты выключены — включите их во вкладке «Боты», затем смените зону в каждом окне")
+        r.add(WARN, "Бот выключен — включите его во вкладке «Боты», затем смените зону в игре")
     else:
-        r.add(OK, "Боты включены")
-    for w in d.get("windows") or []:
-        who = w.get("character") or f"окно {w['pid']}"
-        if not w.get("character"):
-            r.add(WARN, f"{who}: персонаж неизвестен — смените зону в этом окне, чтобы бот увидел вход")
-            continue
-        r.check(bool(w.get("traffic")), f"{who}: трафик идёт, зона {w.get('zone') or '—'}, ресурсов рядом: "
-                f"{w.get('resources', 0)}", f"{who}: нет трафика последние 30 с — окно свёрнуто, игра на паузе "
-                "или порт сервера не тот (--game-port)", bad=WARN)
-        cal = (w.get("config") or {}).get("calib") or {}
-        r.check(bool(cal.get("measured")), f"{who}: калибровка есть (персонаж в точке "
-                f"{cal.get('cx', 0.5):.2f}, {cal.get('cy', 0.5):.2f} окна)",
-                f"{who}: нет калибровки — нажмите «Калибровка» на открытом месте", bad=WARN)
-        bot = w.get("bot") or {}
-        if bot.get("status") == "ошибка" and bot.get("log"):
-            r.add(WARN, f"{who}: последняя ошибка бота — {bot['log'][-1]['text']}")
-    macros = d.get("macros") or {}
-    if not macros:
-        r.add(INFO, "Макросов рынка нет — для торговли запишите их во вкладке «Боты»")
-    for name, text in sorted(macros.items()):
+        r.add(OK, "Бот включён")
+    g = d.get("game")
+    if not g:
+        r.add(WARN, "Окно игры не найдено программой")
+    else:
+        who = g.get("character") or "персонаж"
+        if not g.get("character"):
+            r.add(WARN, "Персонаж неизвестен — смените зону в игре, чтобы бот увидел вход")
+        else:
+            r.check(bool(g.get("traffic")), f"{who}: трафик идёт, зона {g.get('zone_name') or g.get('zone') or '—'}",
+                    f"{who}: нет трафика последние 30 с — окно свёрнуто, игра на паузе или порт сервера не тот "
+                    "(--game-port)", bad=WARN)
+        r.check(bool(g.get("calibrated")), f"Калибровка для окна {g.get('size')} есть",
+                f"Нет калибровки для окна {g.get('size')} — нажмите «Калибровка» на открытом месте", bad=WARN)
+        if g.get("windows", 1) > 1:
+            r.add(INFO, f"Окон игры: {g['windows']} — бот работает с тем, что активно при запуске")
+    bot = d.get("bot") or {}
+    if bot.get("status") == "ошибка" and bot.get("log"):
+        r.add(WARN, f"Последняя ошибка бота — {bot['log'][-1]['text']}")
+    places = d.get("places") or []
+    r.add(INFO, "Сохранённые места: " + (", ".join(f"{p['name']} ({p.get('zone_name') or p['zone']})"
+                                                    for p in places) or "нет"))
+    points = {p["name"]: p for p in d.get("points") or []}
+    missing = [p["label"] for p in points.values() if not p.get("value")]
+    if not missing:
+        r.add(OK, "Все точки интерфейса указаны")
+    else:
+        r.add(INFO, f"Не указано точек интерфейса: {len(missing)} из {len(points)} (нужны для рынка и добычи)")
+    size = g.get("size") if g else ""
+    if d.get("points_size") and size and d["points_size"] != size:
+        r.add(WARN, f"Точки интерфейса указывались в окне {d['points_size']}, а сейчас окно {size} — "
+                    "укажите их заново")
+    values = {n: p["value"] for n, p in points.items() if p.get("value")}
+    for name, text in sorted((d.get("macros") or {}).items()):
         try:
-            steps = parse_macro(text)
+            steps = parse_macro(text, values)
             r.add(OK, f"Макрос «{name}»: шагов {len(steps)}"
                       + ("" if any(s[0] == "expect" for s in steps) else " (без expect — ошибки не будут замечены)"))
         except ValueError as e:

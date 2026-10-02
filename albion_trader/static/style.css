@@ -296,12 +296,18 @@ body.radar-window #radar-canvas { display: block; width: 100vw; height: 100vh; }
 .bots-row input[type=text], .bots-row select, .bots-bar select, .bots-bar input { width: auto; }
 .bots-row label.col { flex-direction: column; align-items: stretch; flex: 1; }
 .bots-row input[type=number], .bots-bar input[type=number] { width: 70px; }
-.bots-list { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
-.bot-card details { margin: 4px 0; }
-.bot-card summary { cursor: pointer; }
+#tab-bots .card { margin-bottom: 10px; }
+.bot-tasks { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 6px; }
+.bot-task { display: inline-flex; flex-direction: row; align-items: center; gap: 4px; font-size: 14px; color: var(--text); margin: 0; }
+.bot-help { margin: 6px 0; font-size: 13px; }
+.bot-help summary, .bots-macros-box summary { cursor: pointer; }
+.bots-macros-box summary h3 { display: inline; }
+.bot-help ol { margin: 4px 0; padding-left: 20px; }
+.bot-points { border-collapse: collapse; font-size: 13px; }
+.bot-points td { padding: 3px 10px 3px 0; }
 .bot-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
 .bot-status { margin-left: auto; }
-.bot-log { font-size: 12px; max-height: 110px; overflow: auto; }
+.bot-log { font-size: 12px; max-height: 160px; overflow: auto; margin-top: 6px; }
 .bots-macros { display: flex; flex-wrap: wrap; gap: 16px; }
 .bots-macros .col { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 300px; }
 .bots-macros .col > label { display: flex; flex-direction: row; align-items: center; gap: 6px; }

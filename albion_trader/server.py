@@ -150,13 +150,14 @@ class App:
         self._res_prices: dict[str, float | None] = {}
         self._res_prices_at = 0.0
         self.radar.attach(self.albion)
-        self.bots = BotManager(Path(config.db_path).with_name("bots.json"), make_radar=self._new_radar,
-                               opcodes=lambda: {**self.albion.op, "events": dict(self.albion.ev)},
-                               price_of=self.bot_price, item_name=lambda i: self.catalog.name(i))
         self.sniffer: Sniffer | None = None
         self.window = CompanionWindow("http://127.0.0.1:8484", Path(config.db_path).parent / "companion-profile")
         self.radar_window = self._radar_window("http://127.0.0.1:8484")
         self.zonemaps = ZoneMaps(Path(config.db_path).parent / "zonemaps", name_of=self.zone_name)
+        self.bots = BotManager(Path(config.db_path).with_name("bots.json"), make_radar=self._new_radar,
+                               opcodes=lambda: {**self.albion.op, "events": dict(self.albion.ev)},
+                               price_of=self.bot_price, item_name=lambda i: self.catalog.name(i),
+                               zonemaps=self.zonemaps, zone_name=self.zonemaps.zone_name)
         self.killboard = KillboardFetcher(self.conn, self.write_lock, self.settings)
         self.albion.on("zone", self._on_zone)
 

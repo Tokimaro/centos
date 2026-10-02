@@ -1,44 +1,98 @@
 "use strict";
-// Вкладка «Боты»: окна игры на этом компьютере, сбор ресурсов и рынок для «живости»
-// своего сервера, макросы рынка (запись кликов и правка).
+// Вкладка «Боты»: один бот для окна игры — сбор ресурсов, рынок, перевозка между
+// городами, данж. Здесь же калибровка, места, точки интерфейса игры и свои макросы.
 
 const BOT_RES = [["wood", "дерево"], ["rock", "камень"], ["fiber", "волокно"], ["hide", "шкура"], ["ore", "руда"]];
+
+const BOT_HELP = {
+  gather: `Бот ищет на радаре своего окна ближайший подходящий ресурс в радиусе от точки старта, подходит
+    к нему короткими шагами (не задевая чужие узлы), кликает по узлу и ждёт, пока тот не истощится. Ресурсов нет —
+    гуляет по округе. Рядом враждебный игрок — отходит к точке старта. Три узла подряд не собираются (полная сумка,
+    нет инструмента) — останавливается.`,
+  market: `<ol>
+    <li><b>Где стоять.</b> Встаньте вплотную к торговцу рынка и нажмите «Запомнить место» (например, «рынок Тетфорд»).
+      Выберите его ниже — бот сам дойдёт туда, даже из другой зоны. Если место не выбрано, бот работает там, где стоит.</li>
+    <li><b>Точки интерфейса.</b> В разделе «Точки интерфейса» один раз покажите кликом в окне игры: торговца, вкладку
+      «Продать» или «Купить», поле поиска, первый предмет в результатах, кнопку «Заказ на продажу/покупку», поля цены и
+      количества, кнопку подтверждения. Делайте это в том же размере окна, в котором будет работать бот.</li>
+    <li><b>Что делает бот.</b> Для каждого заказа: берёт случайный предмет из списка, узнаёт лучшую цену <i>этого</i>
+      рынка из данных, которые программа собрала (откройте рынок в игре хоть раз, чтобы цены появились), ставит цену на
+      «шаг» дешевле лучшей продажи или дороже лучшей покупки, затем кликает по точкам: торговец → вкладка → поиск →
+      вводит название → первый предмет → «Заказ» → цена → количество → подтверждение → Esc. После подтверждения бот
+      проверяет, что игра отправила запрос серверу, иначе останавливается с ошибкой.</li>
+    <li><b>Ритм.</b> Между заказами — случайная пауза в заданных пределах; после «работы» — «отдых».</li></ol>
+    Если в вашем клиенте шаги другие, запишите свой макрос (ниже, «Свои макросы») и выберите его вместо готового.`,
+  transport: `Бот возит ресурсы между городами: идёт к <b>месту погрузки</b> (город А), выполняет макрос погрузки
+    (например, открыть банк и забрать вещи — запишите его кликами), садится на маунта (клавиша), идёт к <b>месту
+    разгрузки</b> (город Б) по маршруту через зоны допустимой опасности и там выполняет макрос разгрузки или
+    выставляет предметы из списка на продажу по ценам рынка Б. «Туда и обратно» — повторять рейсы. Маршрут строится по
+    выходам зон из справочника игры, путь внутри зоны — в обход построек и воды по схеме зоны.`,
+  dungeon: `Зайдите в данж и запустите бота у входа. Бот бьёт ближайших мобов (клик по мобу и умения по перезарядке),
+    после боя собирает добычу и открывает сундуки (кнопка «Взять всё» из точек интерфейса), затем идёт туда, где ещё не
+    был. Здоровье ниже порога — зелье; ещё ниже — отход к входу до восстановления. Ничего нового за заданное время —
+    данж пройден. Умения: «клавиша:перезарядка», например <code>q:3 w:10 e:20</code>.`,
+  wander: `Бот просто гуляет по округе от точки старта (радиус — как у сбора), чтобы мир выглядел живым.`,
+};
 
 App.tab({
   id: "bots", group: "bots", title: "Боты",
   init(el) {
     el.innerHTML = `
-      <p class="muted intro">Боты управляют окнами игры на этом компьютере: собирают ресурсы рядом и выставляют заказы
-        на рынке, чтобы ваш сервер выглядел живым. Нужны права администратора: и для чтения трафика, и для кликов
-        в окне игры. Каждому окну — свой персонаж. <b>Только для своего сервера</b>: на официальных серверах за ботов банят.</p>
+      <p class="muted intro">Бот управляет окном игры на этом компьютере (активным при запуске) и видит мир через её
+        трафик. Работает один бот за раз. Нужны права администратора. <b>Только для своего сервера</b>: на официальных
+        серверах за ботов банят.</p>
       <div class="bots-bar">
-        <label><input type="checkbox" id="bots-enabled"> включить ботов</label>
-        <label title="Нажатие останавливает всех ботов">остановка <select id="bots-stop-key"></select></label>
-        <label title="Пока вы двигаете мышью или печатаете, боты ждут"><input type="checkbox" id="bots-pause"> ждать, пока я за компьютером</label>
-        <label>пауза после моего ввода, с <input type="number" id="bots-idle" min="0" max="60" step="0.5"></label>
-        <label title="После клика бота вернуть активное окно и курсор как было"><input type="checkbox" id="bots-restore"> возвращать окно и курсор</label>
-        <button type="button" id="bots-stop-all" class="danger">Остановить всех</button>
+        <label><input type="checkbox" data-set="enabled"> включить бота</label>
+        <label title="Нажатие останавливает бота">остановка <select data-set="stop_key"></select></label>
+        <label title="Пока вы двигаете мышью или печатаете, бот ждёт"><input type="checkbox" data-set="pause_when_active"> ждать, пока я за компьютером</label>
+        <label>пауза после моего ввода, с <input type="number" data-set="user_idle" min="0" max="60" step="0.5"></label>
+        <label title="После клика бота вернуть активное окно и курсор"><input type="checkbox" data-set="restore_focus"> возвращать окно и курсор</label>
+        <label title="С переключением окна — надёжно; без переключения — не отнимает мышь, но не все клиенты принимают">ввод
+          <select data-set="input"><option value="focus">с переключением окна</option><option value="background">без переключения (эксп.)</option></select></label>
       </div>
-      <p class="bad" id="bots-msg" hidden></p>
-      <div id="bots-list" class="bots-list"></div>
-      <h3>Макросы рынка</h3>
-      <div class="bots-macros">
-        <div class="col">
-          <label>Макрос <select id="macro-pick"></select></label>
-          <label>Имя <input type="text" id="macro-name" maxlength="60" placeholder="например, открыть рынок"></label>
-          <textarea id="macro-text" rows="10" spellcheck="false"></textarea>
-          <div class="bots-row">
-            <button type="button" id="macro-save">Сохранить</button>
-            <button type="button" id="macro-delete">Удалить</button>
-            <label>Записать клики в окне <select id="macro-window"></select></label>
-            <button type="button" id="macro-rec">● Запись</button>
-          </div>
-          <span class="muted" id="macro-hint"></span>
+      <p id="bots-msg" hidden></p>
+      <div class="card bot-game" id="bot-game"></div>
+      <div class="card">
+        <div class="bot-tasks" id="bot-tasks"></div>
+        <div class="bots-row">
+          <button type="button" id="bot-start">▶ Старт</button>
+          <button type="button" id="bot-stop" class="danger">■ Стоп</button>
+          <span id="bot-status" class="bot-status"></span>
         </div>
-        <pre class="muted bots-help" id="macro-help"></pre>
-      </div>`;
-    this.cards = {};
+        <details class="bot-help" open><summary>Как это работает</summary><div id="bot-help"></div></details>
+        <div id="bot-form"></div>
+        <div class="bot-log muted" id="bot-log"></div>
+      </div>
+      <h3>Точки интерфейса игры</h3>
+      <p class="muted">Нужны рынку и сбору добычи. Нажмите «Указать», переключитесь в окно игры и кликните по нужной
+        кнопке или полю (окно должно быть открыто). Координаты запоминаются в долях окна — указывайте их в том размере окна,
+        в котором работает бот. <span id="bot-points-size"></span></p>
+      <div id="bot-points"></div>
+      <h3>Места</h3>
+      <p class="muted">Встаньте в игре в нужном месте (у банка, у торговца рынка) и сохраните его — бот будет ходить туда сам.</p>
+      <div class="bots-row"><input type="text" id="place-name" maxlength="60" placeholder="например, банк Тетфорд">
+        <button type="button" id="place-save">Запомнить место</button></div>
+      <div id="bot-places"></div>
+      <details class="bots-macros-box"><summary><h3>Свои макросы</h3></summary>
+        <div class="bots-macros">
+          <div class="col">
+            <label>Макрос <select id="macro-pick"></select></label>
+            <label>Имя <input type="text" id="macro-name" maxlength="60" placeholder="например, погрузка в банке"></label>
+            <textarea id="macro-text" rows="10" spellcheck="false"></textarea>
+            <div class="bots-row">
+              <button type="button" id="macro-save">Сохранить</button>
+              <button type="button" id="macro-delete">Удалить</button>
+              <button type="button" id="macro-rec">● Запись кликов</button>
+              <label>шаблон <select id="macro-template"><option value="">—</option></select></label>
+            </div>
+            <span class="muted" id="macro-hint"></span>
+          </div>
+          <pre class="muted bots-help" id="macro-help"></pre>
+        </div>
+      </details>`;
     this.picked = "";
+    this.task = null;
+    this.formKey = "";
     const post = async (body, okText) => {
       try {
         const r = await apiPost("/api/bots", body);
@@ -47,23 +101,30 @@ App.tab({
       } catch (e) { this.message(e.message, true); return null; }
     };
     this.post = post;
-    const settings = () => post({
-      action: "settings", enabled: $("#bots-enabled").checked, stop_key: $("#bots-stop-key").value,
-      pause_when_active: $("#bots-pause").checked, user_idle: Number($("#bots-idle").value),
-      restore_focus: $("#bots-restore").checked,
-    }).then(() => this.poll());
-    ["#bots-enabled", "#bots-stop-key", "#bots-pause", "#bots-idle", "#bots-restore"]
-      .forEach((s) => $(s, el).addEventListener("change", settings));
-    $("#bots-stop-all", el).addEventListener("click", () => post({ action: "stop_all" }, "все боты остановлены"));
+    $$("[data-set]", el).forEach((inp) => inp.addEventListener("change", async () => {
+      const v = inp.type === "checkbox" ? inp.checked : inp.type === "number" ? Number(inp.value) : inp.value;
+      await post({ action: "settings", [inp.dataset.set]: v });
+      this.poll();
+    }));
+    $("#bot-start", el).addEventListener("click", async () => { await post({ action: "start", task: this.task }); this.poll(); });
+    $("#bot-stop", el).addEventListener("click", async () => { await post({ action: "stop" }); this.poll(); });
+    $("#place-save", el).addEventListener("click", async () => {
+      if (await post({ action: "save_place", name: $("#place-name").value.trim() })) { $("#place-name").value = ""; this.poll(); }
+    });
     $("#macro-pick", el).addEventListener("change", (ev) => {
       this.picked = ev.target.value;
       $("#macro-name").value = this.picked;
       $("#macro-text").value = (this.data.macros || {})[this.picked] || "";
     });
+    $("#macro-template", el).addEventListener("change", (ev) => {
+      if (ev.target.value) $("#macro-text").value = this.data.templates[ev.target.value];
+      ev.target.value = "";
+    });
     $("#macro-save", el).addEventListener("click", async () => {
       const name = $("#macro-name").value.trim();
       if (await post({ action: "save_macro", name, text: $("#macro-text").value }, `макрос «${name}» сохранён`)) {
         this.picked = name;
+        this.formKey = "";
         this.poll();
       }
     });
@@ -71,23 +132,22 @@ App.tab({
       const name = $("#macro-name").value.trim();
       if (name && confirm(`Удалить макрос «${name}»?`) && await post({ action: "delete_macro", name })) {
         this.picked = "";
-        $("#macro-name").value = "";
-        $("#macro-text").value = "";
+        $("#macro-name").value = $("#macro-text").value = "";
+        this.formKey = "";
         this.poll();
       }
     });
     $("#macro-rec", el).addEventListener("click", async () => {
-      if (this.data.recording != null) {
+      const rec = this.data.recording;
+      if (rec && !rec.point) {
         const r = await post({ action: "record_stop" });
         if (r) {
           const t = $("#macro-text");
           t.value = (t.value.trim() ? t.value.trimEnd() + "\n" : "") + r.text;
-          $("#macro-hint").textContent = "Запись добавлена в текст — допишите type/key/expect и сохраните.";
+          $("#macro-hint").textContent = "Записано — допишите type/key/expect и сохраните.";
         }
-      } else if ($("#macro-window").value) {
-        if (await post({ action: "record_start", pid: Number($("#macro-window").value) })) {
-          $("#macro-hint").textContent = "Идёт запись: кликайте в окне игры, затем нажмите «Стоп».";
-        }
+      } else if (await post({ action: "record_start" })) {
+        $("#macro-hint").textContent = "Идёт запись: кликайте в окне игры, затем нажмите «Стоп».";
       }
       this.poll();
     });
@@ -95,7 +155,7 @@ App.tab({
   },
   show() {
     clearInterval(this.timer);
-    this.timer = setInterval(() => { if (App.current === this && !document.hidden) this.poll(); }, 2000);
+    this.timer = setInterval(() => { if (App.current === this && !document.hidden) this.poll(); }, 1500);
   },
 
   message(text, bad) {
@@ -109,16 +169,178 @@ App.tab({
     let d;
     try { d = await api("/api/bots"); } catch (e) { this.message(e.message, true); return; }
     this.data = d;
-    const keep = (sel, v) => { const x = $(sel); if (x && document.activeElement !== x) { if (x.type === "checkbox") x.checked = !!v; else x.value = v; } };
-    const keySel = $("#bots-stop-key");
-    if (!keySel.options.length) keySel.innerHTML = d.keys.filter((k) => k.length > 1 || /[a-z]/.test(k)).map((k) => `<option value="${k}">${k.toUpperCase()}</option>`).join("");
-    keep("#bots-enabled", d.enabled);
-    keep("#bots-stop-key", d.settings.stop_key);
-    keep("#bots-pause", d.settings.pause_when_active);
-    keep("#bots-idle", d.settings.user_idle);
-    keep("#bots-restore", d.settings.restore_focus);
+    const keySel = $("[data-set=stop_key]");
+    if (!keySel.options.length) {
+      keySel.innerHTML = d.keys.filter((k) => k.length > 1).map((k) => `<option value="${k}">${k.toUpperCase()}</option>`).join("");
+    }
+    $$("[data-set]").forEach((x) => {
+      if (document.activeElement === x) return;
+      const v = d.settings[x.dataset.set];
+      if (x.type === "checkbox") x.checked = !!v; else x.value = v;
+    });
+    if (d.message) this.message(d.message, false);
+    if (this.task === null) this.task = d.settings.task || "gather";
+    this.renderGame(d);
+    this.renderTasks(d);
+    this.renderPoints(d);
+    this.renderPlaces(d);
+    this.renderMacros(d);
+  },
+
+  renderGame(d) {
+    const box = $("#bot-game");
+    if (!d.supported) { box.innerHTML = `<span class="muted">Бот работает только в Windows — там, где запущена игра.</span>`; return; }
+    if (!d.enabled) { box.innerHTML = `<span class="muted">Включите бота галочкой выше — программа начнёт следить за окном игры.</span>`; return; }
+    const g = d.game;
+    if (!g) { box.innerHTML = `<span class="muted">Окно игры не найдено. Запустите Albion Online.</span>`; return; }
+    const c = g.counts || {};
+    const html = `<div class="bot-head"><b>${esc(g.character || "персонаж неизвестен — смените зону в игре")}</b>
+        <span class="muted">${esc([g.zone_name || g.zone, g.pos && `(${g.pos[0]}, ${g.pos[1]})`, g.hp != null && `HP ${g.hp}%`,
+          g.traffic ? `ресурсов ${c.resource || 0} · мобов ${c.mob || 0} · добычи ${c.loot || 0} · игроков ${c.player || 0}` : "нет трафика",
+          g.windows > 1 && `окон игры: ${g.windows} (бот берёт активное)`].filter(Boolean).join(" · "))}</span></div>
+      <div class="bots-row">
+        <button type="button" data-a="calibrate" title="Встаньте на открытое место: бот кликнет 4 раза рядом с персонажем">Калибровка</button>
+        <span class="${g.calibrated ? "good" : "bad"}">${g.calibrated ? `откалиброван для окна ${esc(g.size)}` : `нужна калибровка для окна ${esc(g.size)}`}</span>
+        <button type="button" data-a="test_click" title="Клик чуть ниже персонажа — проверка, что клики доходят до игры">Пробный клик</button>
+      </div>`;
+    if (box.dataset.html !== html) {
+      box.dataset.html = html;
+      box.innerHTML = html;
+      $$("[data-a]", box).forEach((b) => b.addEventListener("click", async () => { await this.post({ action: b.dataset.a }); this.poll(); }));
+    }
+  },
+
+  renderTasks(d) {
+    const tasks = $("#bot-tasks");
+    if (!tasks.dataset.ready) {
+      tasks.dataset.ready = 1;
+      tasks.innerHTML = Object.entries(d.tasks).map(([k, t]) =>
+        `<label class="bot-task"><input type="radio" name="bot-task" value="${k}"> ${esc(t)}</label>`).join("");
+      $$("input", tasks).forEach((r) => r.addEventListener("change", () => {
+        this.task = r.value;
+        this.formKey = "";
+        this.post({ action: "settings", task: r.value });
+        this.renderTasks(this.data);
+      }));
+    }
+    $$("input", tasks).forEach((r) => { r.checked = r.value === this.task; r.disabled = d.bot.running; });
+    const b = d.bot;
+    const st = b.stats;
+    const stats = [st.gathered && `собрано ${st.gathered}`, st.orders && `заказов ${st.orders}`, st.trips && `рейсов ${st.trips}`,
+      st.kills && `убито ${st.kills}`, st.loots && `добыча ${st.loots}`].filter(Boolean).join(" · ");
+    const status = $("#bot-status");
+    status.textContent = (b.running && b.task ? `${d.tasks[b.task] || b.task}: ` : "") + b.status + (stats ? ` · ${stats}` : "");
+    status.className = "bot-status " + (b.status === "ошибка" ? "bad" : b.running ? "good" : "muted");
+    $("#bot-start").disabled = $("#bot-stop").disabled = false;
+    $("#bot-help").innerHTML = BOT_HELP[this.task] || "";
+    $("#bot-log").innerHTML = b.log.slice(-10).reverse()
+      .map((x) => `<div>${new Date(x.ts * 1000).toLocaleTimeString("ru-RU")} — ${esc(x.text)}</div>`).join("");
+    const key = this.task + "|" + JSON.stringify(d.places.map((p) => p.name)) + "|" + Object.keys(d.macros).join(",");
+    if (this.formKey !== key) {
+      this.formKey = key;
+      this.renderForm(d);
+    }
+  },
+
+  renderForm(d) {
+    const form = $("#bot-form");
+    const task = this.task;
+    const sect = task === "wander" ? "gather" : task;
+    const c = d.tasks_config[sect] || {};
+    const s = d.settings;
+    const opt = (v, t, cur) => `<option value="${esc(v)}"${String(cur) === String(v) ? " selected" : ""}>${esc(t)}</option>`;
+    const num = (k, t, min, max, step = 1, title = "") => `<label${title ? ` title="${esc(title)}"` : ""}>${t} <input type="number" data-c="${k}" value="${c[k] ?? ""}" min="${min}" max="${max}" step="${step}"></label>`;
+    const txt = (k, t, ph = "") => `<label>${t} <input type="text" data-c="${k}" value="${esc(c[k] ?? "")}" placeholder="${esc(ph)}"></label>`;
+    const chk = (k, t) => `<label><input type="checkbox" data-c="${k}"${c[k] ? " checked" : ""}> ${t}</label>`;
+    const place = (k, t, empty) => `<label>${t} <select data-c="${k}">${opt("", empty, c[k])}${d.places.map((p) =>
+      opt(p.name, `${p.name} (${p.zone_name || p.zone})`, c[k])).join("")}</select></label>`;
+    const macro = (k, t, empty) => `<label>${t} <select data-c="${k}">${opt("", empty, c[k])}${Object.keys(d.macros).sort()
+      .map((m) => opt(m, m, c[k])).join("")}</select></label>`;
+    const area = (k, t, ph) => `<label class="col">${t}<textarea data-c="${k}" rows="2" placeholder="${esc(ph)}">${esc(c[k] || "")}</textarea></label>`;
+    const session = `<div class="bots-row"><label>работа, мин <input type="number" data-s="work_min" value="${s.work_min}" min="1" max="1440"></label>
+      <label>отдых, мин <input type="number" data-s="rest_min" value="${s.rest_min}" min="0" max="1440"></label></div>`;
+    let html = "";
+    if (task === "gather") {
+      html = `<div class="bots-row">${BOT_RES.map(([r, n]) => `<label><input type="checkbox" data-res="${r}"${(c.res || []).includes(r) ? " checked" : ""}> ${n}</label>`).join("")}</div>
+        <div class="bots-row">${num("tier_min", "тир от", 1, 8)}${num("tier_max", "до", 1, 8)}${num("enchant_min", "зачарование от", 0, 4)}
+          ${num("radius", "радиус от старта, м", 10, 500, 5)}${num("avoid_mobs", "обходить мобов, м", 0, 50, 1, "0 — не обходить")}
+          ${num("max_nodes", "узлов за запуск", 0, 10000, 1, "0 — без ограничения; потом бот гуляет")}${chk("avoid_players", "уходить от враждебных игроков")}</div>${session}`;
+    } else if (task === "wander") {
+      html = `<div class="bots-row">${num("radius", "радиус прогулки от старта, м", 10, 500, 5)}</div>${session}`;
+    } else if (task === "market") {
+      html = `<div class="bots-row">${place("place", "где стоять", "там, где персонаж сейчас")}
+          <label>заказы <select data-c="side">${opt("sell", "на продажу", c.side)}${opt("buy", "на покупку", c.side)}</select></label>
+          ${macro("macro", "действия", "готовый шаблон по точкам")}</div>
+        <div class="bots-row">${area("items", "Предметы (id через пробел или с новой строки)", "T4_BAG T5_2H_BOW")}</div>
+        <div class="bots-row">${num("undercut", "шаг цены", 0, 1e9, 1, "продажа — на столько дешевле лучшей, покупка — дороже")}${num("qty", "кол-во", 1, 9999)}
+          ${num("interval_min", "пауза между заказами, мин от", 0.1, 600, 0.1)}${num("interval_max", "до", 0.1, 600, 0.1)}
+          ${num("orders", "заказов всего", 0, 10000, 1, "0 — без ограничения")}</div>${session}`;
+    } else if (task === "transport") {
+      html = `<div class="bots-row">${place("load_place", "погрузка (город А)", "— выберите место —")}${macro("load_macro", "макрос погрузки", "без макроса")}</div>
+        <div class="bots-row">${place("unload_place", "разгрузка (город Б)", "— выберите место —")}
+          <label>в городе Б <select data-c="unload">${opt("macro", "выполнить макрос", c.unload)}${opt("market_sell", "выставить на продажу", c.unload)}</select></label>
+          ${macro("unload_macro", "макрос разгрузки", "без макроса")}</div>
+        <div class="bots-row">${area("sell_items", "Что продавать в городе Б (если «выставить на продажу»)", "T4_ORE T5_ORE")}</div>
+        <div class="bots-row">${num("undercut", "шаг цены", 0, 1e9)}${num("qty", "кол-во в заказе", 1, 9999)}
+          <label>зоны по пути <select data-c="safety">${Object.entries(d.safety).map(([k, t]) => opt(k, t, c.safety)).join("")}</select></label>
+          ${txt("mount_key", "клавиша маунта", "a")}${chk("round_trip", "туда и обратно")}${num("trips", "рейсов", 0, 1000, 1, "0 — без ограничения")}</div>`;
+    } else if (task === "dungeon") {
+      html = `<div class="bots-row">${txt("skills", "умения", "q:3 w:10 e:20")}${num("attack_range", "дальность атаки, м", 3, 40)}</div>
+        <div class="bots-row">${txt("potion_key", "клавиша зелья", "2")}${num("potion_hp", "пить при HP ниже, %", 1, 99)}
+          ${num("retreat_hp", "отходить при HP ниже, %", 0, 99)}</div>
+        <div class="bots-row">${chk("loot_bags", "собирать добычу с мобов")}${chk("open_chests", "открывать сундуки")}
+          ${num("chest_wait", "открытие сундука, с", 1, 60)}${num("explore_min", "искать новое, мин", 0.5, 60, 0.5)}${num("max_min", "всего, мин", 1, 600)}</div>`;
+    }
+    form.innerHTML = html;
+    const send = (patch) => this.post({ action: "configure", [sect]: patch });
+    $$("[data-c]", form).forEach((inp) => inp.addEventListener("change", () => {
+      send({ [inp.dataset.c]: inp.type === "checkbox" ? inp.checked : inp.type === "number" ? Number(inp.value) : inp.value });
+    }));
+    $$("[data-res]", form).forEach((inp) => inp.addEventListener("change", () => {
+      send({ res: $$("[data-res]", form).filter((x) => x.checked).map((x) => x.dataset.res) });
+    }));
+    $$("[data-s]", form).forEach((inp) => inp.addEventListener("change", () => this.post({ action: "settings", [inp.dataset.s]: Number(inp.value) })));
+  },
+
+  renderPoints(d) {
+    const rec = d.recording;
+    const g = d.game;
+    $("#bot-points-size").textContent = d.points_size ? `Указаны в окне ${d.points_size}` +
+      (g && g.size && g.size !== d.points_size ? ` — сейчас окно ${g.size}, укажите заново.` : ".") : "";
+    const html = `<table class="bot-points">${d.points.map((p) => `<tr><td>${esc(p.label)}</td>
+      <td class="muted">${rec && rec.point === p.name ? "<b>кликните в окне игры…</b>" : p.value ? `${p.value[0].toFixed(3)}, ${p.value[1].toFixed(3)}` : "не указана"}</td>
+      <td>${rec && rec.point === p.name ? `<button type="button" data-cancel>Отмена</button>` : `<button type="button" data-cap="${p.name}">Указать</button>`}
+        ${p.value ? `<button type="button" data-del="${p.name}" title="Забыть точку">×</button>` : ""}</td></tr>`).join("")}</table>`;
+    const box = $("#bot-points");
+    if (box.dataset.html === html) return;
+    box.dataset.html = html;
+    box.innerHTML = html;
+    $$("[data-cap]", box).forEach((b) => b.addEventListener("click", async () => { await this.post({ action: "capture_point", name: b.dataset.cap }); this.poll(); }));
+    $$("[data-del]", box).forEach((b) => b.addEventListener("click", async () => { await this.post({ action: "delete_point", name: b.dataset.del }); this.poll(); }));
+    $$("[data-cancel]", box).forEach((b) => b.addEventListener("click", async () => { await this.post({ action: "cancel_capture" }); this.poll(); }));
+  },
+
+  renderPlaces(d) {
+    const html = d.places.length ? `<table class="bot-points">${d.places.map((p) => `<tr><td><b>${esc(p.name)}</b></td>
+      <td class="muted">${esc(p.zone_name || p.zone)} (${Math.round(p.x)}, ${Math.round(p.y)})</td>
+      <td><button type="button" data-delp="${esc(p.name)}" title="Удалить место">×</button></td></tr>`).join("")}</table>`
+      : `<p class="muted">Мест пока нет.</p>`;
+    const box = $("#bot-places");
+    if (box.dataset.html === html) return;
+    box.dataset.html = html;
+    box.innerHTML = html;
+    $$("[data-delp]", box).forEach((b) => b.addEventListener("click", async () => {
+      if (confirm(`Удалить место «${b.dataset.delp}»?`)) { await this.post({ action: "delete_place", name: b.dataset.delp }); this.formKey = ""; this.poll(); }
+    }));
+  },
+
+  renderMacros(d) {
     $("#macro-help").textContent = d.macro_help;
-    if (d.message) this.message(d.message, true);
+    const tpl = $("#macro-template");
+    if (tpl.options.length < 2) {
+      tpl.innerHTML = `<option value="">—</option>` + Object.keys(d.templates).map((k) =>
+        `<option value="${k}">${{ market_sell: "рынок: продажа", market_buy: "рынок: покупка", loot_all: "взять всё" }[k] || k}</option>`).join("");
+    }
     const macros = Object.keys(d.macros).sort();
     const pick = $("#macro-pick");
     if (pick.dataset.list !== macros.join("\n")) {
@@ -126,131 +348,7 @@ App.tab({
       pick.innerHTML = `<option value="">— новый —</option>` + macros.map((m) => `<option>${esc(m)}</option>`).join("");
     }
     pick.value = this.picked;
-    const winSel = $("#macro-window");
-    const winOpts = d.windows.map((w) => `<option value="${w.pid}">${esc(w.character || `окно ${w.pid}`)}</option>`).join("");
-    if (winSel.dataset.html !== winOpts) { winSel.dataset.html = winOpts; winSel.innerHTML = winOpts; }
-    $("#macro-rec").textContent = d.recording != null ? "■ Стоп" : "● Запись";
-    this.renderWindows(d, macros);
-  },
-
-  renderWindows(d, macros) {
-    const list = $("#bots-list");
-    if (!d.supported) {
-      list.innerHTML = `<p class="muted">Боты работают только в Windows — там, где запущены окна игры.</p>`;
-      return;
-    }
-    if (!d.enabled) {
-      list.innerHTML = `<p class="muted">Включите ботов галочкой выше — программа начнёт искать окна игры и разбирать их трафик.</p>`;
-      this.cards = {};
-      return;
-    }
-    if (!d.windows.length) {
-      list.innerHTML = `<p class="muted">Окна игры не найдены. Запустите клиенты Albion Online (несколько окон — несколько ботов).</p>`;
-      this.cards = {};
-      return;
-    }
-    const pids = d.windows.map((w) => String(w.pid));
-    for (const pid of Object.keys(this.cards)) if (!pids.includes(pid)) { this.cards[pid].remove(); delete this.cards[pid]; }
-    if (!list.querySelector(".bot-card")) list.innerHTML = "";
-    for (const w of d.windows) {
-      const key = `${w.pid}:${w.character}:${macros.join(",")}`;
-      let card = this.cards[w.pid];
-      if (!card || card.dataset.key !== key) {
-        const fresh = this.card(w, macros);
-        fresh.dataset.key = key;
-        if (card) card.replaceWith(fresh); else list.appendChild(fresh);
-        card = this.cards[w.pid] = fresh;
-      }
-      this.update(card, w);
-    }
-  },
-
-  card(w, macros) {
-    const c = w.config || { gather: {}, market: {} };
-    const g = c.gather || {}, m = c.market || {};
-    const el = document.createElement("div");
-    el.className = "card bot-card";
-    const opt = (v, t, cur) => `<option value="${v}"${String(cur) === String(v) ? " selected" : ""}>${esc(t)}</option>`;
-    const macroSel = (k) => `<select data-m="${k}">${opt("", "—", m[k])}${macros.map((x) => opt(x, x, m[k])).join("")}</select>`;
-    const num = (path, v, min, max, step = 1) => `<input type="number" data-k="${path}" value="${v ?? ""}" min="${min}" max="${max}" step="${step}">`;
-    el.innerHTML = `
-      <div class="bot-head"><b>${esc(w.character || "персонаж неизвестен")}</b>
-        <span class="muted bot-where"></span><span class="bot-status"></span></div>
-      ${w.character ? `
-      <div class="bots-row">
-        <label>Задача <select data-k="task">${Object.entries(this.data.tasks).map(([k, t]) => opt(k, t, c.task)).join("")}</select></label>
-        <label title="С переключением окна — надёжно; сообщениями окну — без переключения, но не всегда работает">Ввод
-          <select data-k="input">${opt("focus", "с переключением окна", c.input)}${opt("background", "без переключения (эксп.)", c.input)}</select></label>
-        <label>работа, мин ${num("work_min", c.work_min, 1, 600)}</label>
-        <label>отдых, мин ${num("rest_min", c.rest_min, 0, 600)}</label>
-      </div>
-      <details><summary>Сбор ресурсов</summary>
-        <div class="bots-row">${BOT_RES.map(([r, n]) => `<label><input type="checkbox" data-res="${r}"${(g.res || []).includes(r) ? " checked" : ""}> ${n}</label>`).join("")}</div>
-        <div class="bots-row">
-          <label>тир от ${num("gather.tier_min", g.tier_min, 1, 8)}</label><label>до ${num("gather.tier_max", g.tier_max, 1, 8)}</label>
-          <label>зачарование от ${num("gather.enchant_min", g.enchant_min, 0, 4)}</label>
-          <label>радиус от старта, м ${num("gather.radius", g.radius, 10, 500, 5)}</label>
-          <label title="0 — не обходить">обходить мобов, м ${num("gather.avoid_mobs", g.avoid_mobs, 0, 50)}</label>
-          <label title="0 — без ограничения; потом бот просто гуляет">узлов за запуск ${num("gather.max_nodes", g.max_nodes, 0, 10000)}</label>
-          <label><input type="checkbox" data-k="gather.avoid_players"${g.avoid_players ? " checked" : ""}> уходить от враждебных игроков</label>
-        </div>
-      </details>
-      <details><summary>Рынок</summary>
-        <div class="bots-row">
-          <label class="col">Предметы (id через пробел или с новой строки)<textarea data-k="market.items" rows="2" placeholder="T4_BAG T5_2H_BOW">${esc(m.items || "")}</textarea></label>
-        </div>
-        <div class="bots-row">
-          <label>Заказы <select data-k="market.side">${opt("sell", "на продажу", m.side)}${opt("buy", "на покупку", m.side)}</select></label>
-          <label title="Продажа — на столько дешевле лучшей цены, покупка — дороже">шаг цены ${num("market.undercut", m.undercut, 0, 1e9)}</label>
-          <label>кол-во ${num("market.qty", m.qty, 1, 9999)}</label>
-          <label>пауза между заказами, мин ${num("market.interval_min", m.interval_min, 0.1, 600, 0.1)}–${num("market.interval_max", m.interval_max, 0.1, 600, 0.1)}</label>
-        </div>
-        <div class="bots-row">
-          <label>открыть рынок ${macroSel("macro_open")}</label>
-          <label>заказ ${macroSel("macro_order")}</label>
-          <label>закрыть ${macroSel("macro_close")}</label>
-        </div>
-      </details>
-      <div class="bots-row">
-        <button type="button" data-a="start">▶ Старт</button>
-        <button type="button" data-a="stop">■ Стоп</button>
-        <button type="button" data-a="calibrate" title="Встаньте на открытое место: бот сделает 4 клика рядом с персонажем">Калибровка</button>
-        <button type="button" data-a="test_click" title="Клик чуть ниже персонажа — проверка, что клики доходят до игры">Пробный клик</button>
-        <span class="muted bot-calib"></span>
-      </div>` : `<p class="muted">Бот узнаёт персонажа по входу в зону: смените зону (или перезайдите) в этом окне.</p>`}
-      <div class="bot-log muted"></div>`;
-    const pid = w.pid;
-    const send = (patch) => this.post({ action: "configure", pid, ...patch });
-    $$("[data-k]", el).forEach((inp) => inp.addEventListener("change", () => {
-      const v = inp.type === "checkbox" ? inp.checked : inp.type === "number" ? Number(inp.value) : inp.value;
-      const [a, b] = inp.dataset.k.split(".");
-      send(b ? { [a]: { [b]: v } } : { [a]: v });
-    }));
-    $$("[data-res]", el).forEach((inp) => inp.addEventListener("change", () => {
-      send({ gather: { res: $$("[data-res]", el).filter((x) => x.checked).map((x) => x.dataset.res) } });
-    }));
-    $$("[data-m]", el).forEach((sel) => sel.addEventListener("change", () => send({ market: { [sel.dataset.m]: sel.value } })));
-    $$("[data-a]", el).forEach((b) => b.addEventListener("click", async () => {
-      const body = { action: b.dataset.a, pid };
-      if (b.dataset.a === "start") body.task = $("[data-k=task]", el).value;
-      if (b.dataset.a === "test_click") Object.assign(body, { x: 0.5, y: 0.62 });
-      await this.post(body);
-      this.poll();
-    }));
-    return el;
-  },
-
-  update(card, w) {
-    const bot = w.bot;
-    const where = [w.zone && `зона ${w.zone}`, w.pos && `(${w.pos[0]}, ${w.pos[1]})`,
-      w.traffic ? `ресурсов рядом: ${w.resources}` : "нет трафика"].filter(Boolean).join(" · ");
-    $(".bot-where", card).textContent = " " + where;
-    const st = $(".bot-status", card);
-    st.textContent = bot.status + (bot.gathered ? ` · собрано ${bot.gathered}` : "") + (bot.orders ? ` · заказов ${bot.orders}` : "");
-    st.className = "bot-status " + (bot.status === "ошибка" ? "bad" : bot.running ? "good" : "muted");
-    const calib = $(".bot-calib", card);
-    if (calib) calib.textContent = w.config && w.config.calib && w.config.calib.measured ? "откалиброван" : "нужна калибровка";
-    $(".bot-log", card).innerHTML = bot.log.slice(-6).reverse()
-      .map((x) => `<div>${new Date(x.ts * 1000).toLocaleTimeString("ru-RU")} — ${esc(x.text)}</div>`).join("");
+    const rec = d.recording;
+    $("#macro-rec").textContent = rec && !rec.point ? "■ Стоп" : "● Запись кликов";
   },
 });

@@ -306,7 +306,7 @@ class BotsApiTest(unittest.TestCase):
     def test_get_and_post(self):
         with urlopen(self.url + "/api/bots", timeout=5) as r:
             snap = json.loads(r.read())
-        self.assertEqual((snap["enabled"], snap["windows"]), (False, []))
+        self.assertEqual((snap["enabled"], snap["game"]), (False, None))
         self.assertIn("expect", snap["macro_help"])
         self.assertTrue(self.post({"action": "save_macro", "name": "m", "text": "click 0.1 0.2"})["ok"])
         with self.assertRaises(HTTPError) as e:
@@ -315,7 +315,7 @@ class BotsApiTest(unittest.TestCase):
         self.assertIn("строка 1", json.loads(e.exception.read())["error"])
         e.exception.close()
         with self.assertRaises(HTTPError) as e:
-            self.post({"action": "test_click", "pid": "x"})
+            self.post({"action": "start", "task": "dance"})
         self.assertEqual(e.exception.code, 400)
         e.exception.close()
         self.assertTrue((Path(self.tmp.name) / "bots.json").exists())
