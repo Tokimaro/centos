@@ -38,6 +38,7 @@ from typing import Callable
 from .bot_core import (MACRO_HELP, POINTS, TEMPLATES, BotError, BotStopped, Calibration, ClientFeed, fill,
                        parse_macro, solve_calibration)
 from .bot_nav import Grid, Router
+from .bot_dungeon import PORTAL_KINDS, DungeonMixin
 from .bot_tasks import DEFAULTS, TasksMixin
 from .bot_win import VK, VK_LBUTTON, Desktop, GameWindow
 
@@ -53,7 +54,7 @@ CLEAR_TRIES = [(1.0, 0.0), (0.6, 0.0), (1.0, 0.5), (1.0, -0.5), (0.8, 1.0), (0.8
 ZONE_WAIT = 20.0          # сколько ждать загрузки следующей зоны, с
 
 TASKS = {"gather": "Сбор ресурсов", "market": "Рынок", "transport": "Перевозка между городами",
-         "dungeon": "Данж", "wander": "Прогулка"}
+         "dungeon_run": "Данжи по кругу из города", "dungeon": "Пройти этот данж", "wander": "Прогулка"}
 SAFETY_NAMES = {"safe": "только безопасные (синие)", "yellow": "с жёлтыми", "red": "с красными",
                 "black": "любые, включая чёрные"}
 DEFAULT_CONFIG = {"enabled": False, "stop_key": "f12", "pause_when_active": True, "user_idle": 3.0,
@@ -69,7 +70,7 @@ def size_key(win: GameWindow) -> str:
 
 
 # --- бот -----------------------------------------------------------------------
-class Bot(TasksMixin):
+class Bot(TasksMixin, DungeonMixin):
     def __init__(self, manager: BotManager):
         self.manager = manager
         self.pid: int | None = None
@@ -82,7 +83,9 @@ class Bot(TasksMixin):
         self.home_zone = ""
         self.failed: dict[int, float] = {}
         self.fails_in_row = 0
-        self.gathered = self.orders = self.trips = self.kills = self.loots = 0
+        self.gathered = self.orders = self.trips = self.kills = self.loots = self.runs = 0
+        self.bad_portals: set = set()
+        self.start_dungeon_state()
         self.rng = random.Random()
 
     # --- окружение ------------------------------------------------------
@@ -176,6 +179,9 @@ class Bot(TasksMixin):
         if task == "dungeon":
             self.dungeon()
             return
+        if task == "dungeon_run":
+            self.dungeon_run()
+            return
         cfg = self.manager.config
         limit = int(self.task_cfg("market").get("orders") or 0) if task == "market" else 0
         while True:
@@ -217,13 +223,14 @@ class Bot(TasksMixin):
     def click_world(self, dx: float, dy: float, step: float = 0.26, keep_clear_of=None) -> tuple[float, float]:
         """Клик по точке в мире со смещением (dx, dy) от персонажа (шаг ограничен).
 
-        ``keep_clear_of`` — id ресурса, к которому идём (или None): клик для ходьбы не
-        должен попасть в другой ресурс (игра начала бы собирать его), поэтому шаг
-        укорачивается или поворачивается. ``False`` — клик ровно в цель (по объекту)."""
+        ``keep_clear_of`` — id объекта, к которому идём (или None): клик для ходьбы не
+        должен попасть в другой ресурс (игра начала бы собирать его) или в портал/выход
+        (игра начала бы переход), поэтому шаг укорачивается или поворачивается.
+        ``False`` — клик ровно в цель (по объекту)."""
         fx, fy, wx, wy = self.plan_click(dx, dy, step)
         if keep_clear_of is not False:
             px, py = self.pos()
-            others = [e for e in self.feed.entities("resource") if e.id != keep_clear_of]
+            others = [e for e in self.feed.entities("resource") + self.exits_around() if e.id != keep_clear_of]
             if others:
                 best, best_gap = None, -1.0
                 for k, angle in CLEAR_TRIES:
@@ -354,8 +361,9 @@ class Bot(TasksMixin):
             self.wait(0.5)
         return False
 
-    def travel_to(self, zone: str, x: float, y: float, safety: str = "safe") -> None:
-        """Дойти до точки (x, y) в зоне ``zone``, при необходимости через другие зоны."""
+    def travel_to(self, zone: str, x: float | None = None, y: float | None = None, safety: str = "safe") -> None:
+        """Дойти до точки (x, y) в зоне ``zone``, при необходимости через другие зоны
+        (без точки — только войти в зону)."""
         router = self.manager.router()
         for _ in range(80):
             self.check()
@@ -363,6 +371,8 @@ class Bot(TasksMixin):
             if not cur:
                 raise BotError("зона неизвестна — смените зону в игре, чтобы бот её увидел")
             if cur == zone:
+                if x is None:
+                    return
                 if not self.walk_path(x, y):
                     px, py = self.pos()
                     if self.feed.zone == zone and math.hypot(x - px, y - py) > 6:
@@ -392,7 +402,7 @@ class Bot(TasksMixin):
         place = self.manager.config["places"].get(name)
         if not place:
             raise BotError(f"нет сохранённого места «{name}» — встаньте там и нажмите «Запомнить место»")
-        self.travel_to(place["zone"], float(place["x"]), float(place["y"]), safety)
+        self.travel_to(place["zone"], float(place["x"]), float(place["y"]), safety=safety)
 
     # --- калибровка -----------------------------------------------------
     def calibrate(self, d: float = 0.15) -> Calibration:
@@ -429,7 +439,7 @@ class Bot(TasksMixin):
     def snapshot(self) -> dict:
         return {"task": self.task, "status": self.status, "running": self.running,
                 "stats": {"gathered": self.gathered, "orders": self.orders, "trips": self.trips,
-                          "kills": self.kills, "loots": self.loots},
+                          "kills": self.kills, "loots": self.loots, "runs": self.runs, "floors": len(self.floors)},
                 "log": list(self.log)[-50:]}
 
 
@@ -878,5 +888,5 @@ class BotManager:
                 "points_size": cfg.get("points_size", ""),
                 "templates": TEMPLATES, "macros": cfg["macros"],
                 "recording": {"point": rec.point, "text": rec.text()} if rec else None,
-                "message": self.message, "tasks": TASKS, "safety": SAFETY_NAMES,
+                "message": self.message, "tasks": TASKS, "safety": SAFETY_NAMES, "portal_kinds": PORTAL_KINDS,
                 "macro_help": MACRO_HELP, "keys": sorted(VK)}

@@ -65,6 +65,13 @@ EVENT_NAMES = {
     "regeneration_health_changed": "evRegenerationHealthChanged",
     "mounted": "evMounted",
     "change_flagging_finished": "evChangeFlaggingFinished",
+    "new_exit": "evNewExit",
+    "exit_enter_start": "evExitEnterStart",
+    "exit_enter_cancel": "evExitEnterCancel",
+    "exit_enter_finished": "evExitEnterFinished",
+    "new_portal_entrance": "evNewPortalEntrance",
+    "new_portal_exit": "evNewPortalExit",
+    "new_random_dungeon_exit": "evNewRandomDungeonExit",
 }
 
 _START = re.compile(r"^(\w+)\s+\w+Type\s*=\s*iota\s*$")

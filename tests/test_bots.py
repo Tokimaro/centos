@@ -24,7 +24,7 @@ except ImportError:
     import photon_builder as pb
 
 TRUE_M = [[14.0, 20.0], [16.0, -23.0]]     # «настоящая» камера модели (отличается от умолчания)
-ALL_POINTS = {name: [0.1 + 0.07 * i, 0.2 + 0.05 * i] for i, name in enumerate(POINTS)}
+ALL_POINTS = {name: [round(0.05 + 0.06 * i, 3), round(0.1 + 0.055 * i, 3)] for i, name in enumerate(POINTS)}
 
 # Модель мира: город А — дорога — город Б; выходы на ±50 м по x.
 INDEX = {
@@ -125,14 +125,17 @@ class FakeDesktop:
 
 
 class FakeGame:
-    """Модель игры: персонажи в окнах, зоны с выходами, ресурсы, мобы, добыча."""
+    """Модель игры: персонажи в окнах, зоны с выходами и порталами, ресурсы, мобы,
+    игроки, добыча. Объекты живут в своей зоне и приходят событиями при входе в неё."""
 
     def __init__(self):
         self.manager = None
         self.windows, self.pos, self.port, self.zone = {}, {}, {}, {}
         self.nodes = {}           # id → (x, y)
-        self.mobs = {}            # id → [x, y, hp]
-        self.loot = {}            # id → (x, y)
+        self.mobs = {}            # id → [x, y, hp, зона, имя]
+        self.loot = {}            # id → (x, y, зона, сундук?)
+        self.links = {}           # id → (x, y, зона, куда, x там, y там, событие, имя)
+        self.players = {}         # id → (x, y, зона, имя, флаг)
         self.harvest_ok = True
         self.ignore_clicks = False
         self.center = (0.5, 0.5)  # где персонаж на экране на самом деле
@@ -140,6 +143,7 @@ class FakeGame:
         self.attacking = None
         self.opened = None
         self.next_id = 5000
+        self.my_hp = None
 
     def add_window(self, pid, name, pos=(0.0, 0.0), zone="0201", rect=(0, 0, 1600, 900)):
         port = 50000 + pid
@@ -150,8 +154,24 @@ class FakeGame:
 
     def join(self, pid, name, zone, pos):
         self.pos[pid], self.zone[pid] = pos, zone
+        self.attacking = self.opened = None
         self.send(pid, pb.response(DEFAULT_OPCODES["join"], {0: pid, 2: name, 8: zone,
                                                               9: [float(pos[0]), float(pos[1])]}))
+        for mid, m in self.mobs.items():
+            if m[3] == zone:
+                self._send_mob(pid, mid)
+        for lid, lt in self.loot.items():
+            if lt[2] == zone:
+                self._send_loot(pid, lid)
+        for lid, ln in self.links.items():
+            if ln[2] == zone:
+                self._send_link(pid, lid)
+        for cid, pl in self.players.items():
+            if pl[2] == zone:
+                self._send_player(pid, cid)
+
+    def here(self, pid, zone):
+        return zone == self.zone.get(pid)
 
     def send(self, pid, command):
         self.manager.on_packet(self.port[pid], pb.packet(command))
@@ -177,11 +197,11 @@ class FakeGame:
         self.pos[pid] = (fx, fy)
         self.request(pid, DEFAULT_OPCODES["move"], {1: [float(fx), float(fy)]})
         zone = self.zone[pid]
+        name = self.manager.feed_for(pid).character
         for ex, ey, target, _icon in (INDEX.get(zone) or {}).get("exits", []):
             if math.hypot(fx - ex, fy - ey) < 2.0:
                 back = next(e for e in INDEX[target]["exits"] if e[2] == zone)
                 inward = -4.0 if back[0] > 0 else 4.0
-                name = self.manager.feed_for(pid).character
                 self.join(pid, name, target, (back[0] + inward, back[1]))
                 return
 
@@ -190,13 +210,44 @@ class FakeGame:
         self.event(pid, "new_harvestable_object", {0: nid, 5: type_id, 7: tier, 8: [float(x), float(y)],
                                                    10: size, 11: enchant})
 
-    def add_mob(self, pid, mid, x, y, hp=100):
-        self.mobs[mid] = [x, y, hp]
-        self.event(pid, "new_mob", {0: mid, 1: 5, 7: [float(x), float(y)], 13: float(hp), 14: float(hp)})
+    def add_mob(self, pid, mid, x, y, hp=100, zone=None, name=""):
+        self.mobs[mid] = [x, y, hp, zone or self.zone[pid], name]
+        if self.here(pid, self.mobs[mid][3]):
+            self._send_mob(pid, mid)
 
-    def add_loot(self, pid, lid, x, y, chest=False):
-        self.loot[lid] = (x, y)
+    def _send_mob(self, pid, mid):
+        x, y, hp, _z, name = self.mobs[mid]
+        self.event(pid, "new_mob", {0: mid, 1: 5, 7: [float(x), float(y)], 13: float(hp), 14: 100.0, 32: name})
+
+    def add_loot(self, pid, lid, x, y, chest=False, zone=None):
+        self.loot[lid] = (x, y, zone or self.zone[pid], chest)
+        if self.here(pid, self.loot[lid][2]):
+            self._send_loot(pid, lid)
+
+    def _send_loot(self, pid, lid):
+        x, y, _z, chest = self.loot[lid]
         self.event(pid, "new_loot_chest" if chest else "new_loot", {0: lid, 3: [float(x), float(y)]})
+
+    def add_link(self, pid, lid, x, y, zone, target, tx, ty, event="new_exit", name=""):
+        self.links[lid] = (x, y, zone, target, tx, ty, event, name)
+        if self.here(pid, zone):
+            self._send_link(pid, lid)
+
+    def _send_link(self, pid, lid):
+        x, y, _z, _t, _tx, _ty, event, name = self.links[lid]
+        params = {0: lid, 1: [float(x), float(y)]}
+        if name:
+            params[3] = name
+        self.event(pid, event, params)
+
+    def add_player(self, pid, cid, x, y, zone=None, name="Gank", faction=0):
+        self.players[cid] = (x, y, zone or self.zone[pid], name, faction)
+        if self.here(pid, self.players[cid][2]):
+            self._send_player(pid, cid)
+
+    def _send_player(self, pid, cid):
+        x, y, _z, name, faction = self.players[cid]
+        self.event(pid, "new_character", {0: cid, 1: name, 12: [float(x), float(y)], 53: faction})
 
     def screen_to_world(self, pid, fx, fy):
         w = self.windows[pid]
@@ -222,12 +273,18 @@ class FakeGame:
             return
         tx, ty = self.screen_to_world(pid, fx, fy)
         x0, y0 = self.pos[pid]
-        for mid, (mx, my, _hp) in self.mobs.items():
-            if math.hypot(mx - tx, my - ty) < 2.0:
+        zone = self.zone[pid]
+        # Порталы и выходы данжей — по клику (в игре вход в них — действие с задержкой).
+        for lx, ly, lzone, target, ttx, tty, _ev, _name in list(self.links.values()):
+            if lzone == zone and math.hypot(lx - tx, ly - ty) < 2.0 and math.hypot(lx - x0, ly - y0) < 8:
+                self.join(pid, self.manager.feed_for(pid).character, target, (ttx, tty))
+                return
+        for mid, (mx, my, _hp, mzone, _n) in self.mobs.items():
+            if mzone == zone and math.hypot(mx - tx, my - ty) < 2.0:
                 self.attacking = mid
                 return
-        for lid, (lx, ly) in self.loot.items():
-            if math.hypot(lx - tx, ly - ty) < 2.0 and math.hypot(lx - x0, ly - y0) < 6:
+        for lid, (lx, ly, lzone, _c) in self.loot.items():
+            if lzone == zone and math.hypot(lx - tx, ly - ty) < 2.0 and math.hypot(lx - x0, ly - y0) < 6:
                 self.move_to(pid, lx + 1, ly)
                 self.opened = lid
                 return
@@ -782,6 +839,99 @@ class DungeonTest(Base):
         self.bot.run("dungeon")
         self.assertTrue(any("бой затянулся" in t for t in self.texts()))
         self.assertIn("время на данж вышло", self.texts()[-1])
+
+
+class DungeonRunTest(Base):
+    """Цикл: город А → дорога (портал) → этаж 1 → этаж 2 (босс, сундук) → назад → сундук в городе."""
+
+    def setUp(self):
+        super().setUp()
+        self.window("Hero", zone="CITYA", pos=(0.0, 0.0))
+        self.mgr.config["points"] = dict(ALL_POINTS)
+        self.mgr.config["places"] = {"сундук": {"zone": "CITYA", "x": 0.0, "y": 10.0}}
+        self.bot.calibrate()
+        self.game.join(1, "Hero", "CITYA", (0.0, 0.0))
+        g = self.game
+        g.add_link(1, 700, 20, 30, "ROAD", "DNG1", 0.0, 0.0, "new_random_dungeon_exit", "RANDOMDUNGEON_SOLO_FOREST")
+        g.add_link(1, 701, -20, -25, "ROAD", "DNGX", 0.0, 0.0, "new_random_dungeon_exit", "RANDOMDUNGEON_GROUP_X")
+        g.add_link(1, 710, 0, -6, "DNG1", "ROAD", 24.0, 30.0)                 # этаж 1: выход назад
+        g.add_link(1, 711, 30, 10, "DNG1", "DNG2", 0.0, 0.0)                  # этаж 1 → этаж 2
+        g.add_link(1, 720, 0, -6, "DNG2", "DNG1", 27.0, 10.0)                 # этаж 2: выход назад
+        g.add_mob(1, 801, 12, 4, zone="DNG1")
+        g.add_mob(1, 802, 14, 0, zone="DNG2", name="T4_MOB_BOSS_FOREST")
+        g.add_loot(1, 803, -12, 8, chest=True, zone="DNG2")
+        self.mgr.command({"action": "configure", "dungeon": {
+            "home_place": "сундук", "skills": "q:1 w:2", "explore_min": 0.5, "chest_wait": 2, "runs": 1,
+            "safety": "yellow", "search_zones": 2, "search_min": 2}})
+
+    def test_full_run_from_city_and_back(self):
+        self.bot.run("dungeon_run")
+        self.assertEqual(self.bot.status, "готово", self.texts()[-4:])
+        self.assertEqual(self.bot.runs, 1)
+        self.assertEqual((self.bot.kills, self.bot.loots), (2, 3))      # сумки с мобов и босса, сундук
+        self.assertTrue(self.bot.boss_killed)
+        self.assertEqual([lid for lid, lt in self.game.loot.items() if lt[2] == "DNG2"], [])
+        self.assertEqual(self.game.zone[1], "CITYA")
+        self.assertLess(math.hypot(self.game.pos[1][0], self.game.pos[1][1] - 10), 3)
+        texts = self.texts()
+        for t in ("ищу данж в «Дорога»", "нашёл портал: RANDOMDUNGEON_SOLO_FOREST", "вошёл в данж", "этаж 2",
+                  "босс побеждён: T4_MOB_BOSS_FOREST", "финальный сундук открыт", "вышел из данжа в «Дорога»",
+                  "добыча сдана в сундук"):
+            self.assertTrue(any(t in x for x in texts), t)
+        stash = [ALL_POINTS["stash_open"][0], ALL_POINTS["stash_deposit"][0]]
+        clicked = [fx for _p, fx, *_ in self.desk.clicks]
+        self.assertTrue(all(any(abs(fx - x) < 0.01 for fx in clicked) for x in stash))
+
+    def test_skips_portal_with_players_and_wrong_kind(self):
+        self.game.add_player(1, 950, 22, 33, zone="ROAD")
+        self.game.join(1, "Hero", "ROAD", (-46.0, 0.0))
+        d = self.mgr.task_config("dungeon")
+        self.assertIsNone(self.bot.pick_portal(d))                    # у зелёного игрок, групповой не нужен
+        self.assertEqual(self.bot.pick_portal({**d, "portal_kinds": ["group"]}).id, 701)
+        self.assertEqual(self.bot.pick_portal({**d, "avoid_players": False}).id, 700)
+
+    def test_walks_away_from_players_in_open_world(self):
+        self.game.join(1, "Hero", "ROAD", (0.0, 0.0))
+        self.game.add_player(1, 951, 10, 0, zone="ROAD", name="Stalker")
+        d = self.mgr.task_config("dungeon")
+        self.assertTrue(self.bot.avoid_players(d))
+        self.assertLess(self.game.pos[1][0], -10)                     # ушёл в противоположную сторону
+        self.assertIn("уходит от игроков: Stalker", self.texts()[-1])
+        self.assertFalse(self.bot.avoid_players({**d, "avoid_players": False}))
+
+    def test_players_in_dungeon_make_bot_leave(self):
+        self.game.add_player(1, 952, 8, 8, zone="DNG1")
+        self.game.join(1, "Hero", "DNG1", (0.0, 0.0))
+        self.bot.run("dungeon")
+        self.assertEqual(self.bot.status, "готово", self.texts()[-3:])
+        self.assertIn("рядом игроки — выхожу из данжа", self.texts())
+        self.assertEqual(self.game.zone[1], "ROAD")
+
+    def test_no_portals_errors_and_death(self):
+        for lid in (700, 701):
+            del self.game.links[lid]
+        self.mgr.command({"action": "configure", "dungeon": {"search_min": 0.2}})
+        self.bot.run("dungeon_run")
+        self.assertEqual(self.bot.status, "ошибка")
+        self.assertIn("подходящих данжей в ближайших зонах нет", self.texts()[-1])
+        self.mgr.command({"action": "configure", "dungeon": {"home_place": ""}})
+        self.bot.run("dungeon_run")
+        self.assertIn("выберите место сундука", self.texts()[-1])
+        self.mgr.command({"action": "configure", "dungeon": {"home_place": "нет такого"}})
+        self.bot.run("dungeon_run")
+        self.assertIn("нет сохранённого места", self.texts()[-1])
+        self.mgr.command({"action": "configure", "dungeon": {"home_place": "сундук", "safety": "safe"}})
+        self.bot.run("dungeon_run")
+        self.assertIn("нет зон с допустимой опасностью", self.texts()[-1])
+        self.game.event(1, "regeneration_health_changed", {0: 1, 2: 0.0, 3: 1000.0})
+        with self.assertRaisesRegex(BotError, "погиб"):
+            self.bot.check_alive()
+
+    def test_portal_kinds(self):
+        from albion_trader.bot_dungeon import portal_kind
+        self.assertEqual([portal_kind(n) for n in ("RANDOMDUNGEON_SOLO_X", "CORRUPTED_SOLO", "HELLGATE_2V2",
+                                                   "ROADS_AVALON", "RANDOMDUNGEON_GROUP", "", "вход в данж")],
+                         ["solo", "corrupted", "hellgate", "avalon", "group", "unknown", "unknown"])
 
 
 # --- команды и запись -------------------------------------------------------------

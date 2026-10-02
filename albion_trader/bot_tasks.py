@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import math
 
-from .bot_core import BotError, market_price, parse_skills, split_items
+from .bot_core import BotError, market_price, split_items
 
 RES_KINDS = ("wood", "rock", "fiber", "hide", "ore")
 NEAR_NODE = 3.5           # с какого расстояния кликать по самому узлу, м
 HARVEST_IDLE = 12.0       # узел не меняется столько секунд — сбор не идёт
 FAILED_KEEP = 300.0       # не возвращаться к узлу, который не удалось собрать, с
-FIGHT_TIMEOUT = 45.0      # моб не умирает так долго — бросаем
-EXPLORE_CELL = 10.0       # клетка «уже были здесь» при разведке данжа, м
 
 DEFAULTS = {
     "gather": {"res": list(RES_KINDS), "tier_min": 2, "tier_max": 8, "enchant_min": 0,
@@ -27,7 +25,11 @@ DEFAULTS = {
                   "safety": "safe", "mount_key": "", "round_trip": True, "trips": 0},
     "dungeon": {"skills": "q:3 w:10 e:20", "attack_range": 15, "potion_key": "", "potion_hp": 40,
                 "retreat_hp": 20, "loot_bags": True, "open_chests": True, "chest_wait": 8,
-                "explore_min": 4, "max_min": 40},
+                "explore_min": 4, "max_min": 40, "max_floors": 8,
+                # Цикл из города: где сдавать добычу, где искать порталы, от кого уходить.
+                "home_place": "", "deposit_macro": "", "safety": "yellow", "search_zones": 4,
+                "search_min": 8, "portal_kinds": ["solo"], "avoid_players": True, "player_radius": 45,
+                "runs": 0},
 }
 
 
@@ -215,150 +217,3 @@ class TasksMixin:
         if t.get("mount_key"):
             self.press_key(t["mount_key"])
             self.wait(3.5)        # посадка на маунта
-
-    # --- данж ---------------------------------------------------------------
-    def dungeon(self) -> None:
-        d = self.task_cfg("dungeon")
-        try:
-            skills = parse_skills(d.get("skills"))
-        except ValueError as e:
-            raise BotError(f"данж: умения — {e}") from None
-        self.home = self.pos()
-        self.cooldowns: dict[str, float] = {}
-        self.potion_at = -1e9
-        visited: set = set()
-        done: set = set()
-        started = last_found = self.clock()
-        while True:
-            self.check()
-            now = self.clock()
-            if now - started > float(d.get("max_min") or 40) * 60:
-                self.note("время на данж вышло")
-                return
-            self.mark_visited(visited)
-            self.heal(d)
-            mob = self.pick_mob(d, done)
-            if mob is not None:
-                self.fight(mob, d, skills, done)
-                last_found = self.clock()
-                continue
-            loot = self.pick_loot(d, done)
-            if loot is not None:
-                self.take_loot(loot, d, done)
-                last_found = self.clock()
-                continue
-            if self.clock() - last_found > float(d.get("explore_min") or 4) * 60:
-                self.note(f"больше ничего не найдено — данж пройден (убито: {self.kills}, "
-                          f"добыча: {self.loots})")
-                return
-            self.explore(visited)
-
-    def heal(self, d: dict) -> None:
-        hp = self.feed.hp_pct
-        if hp is None:
-            return
-        if d.get("potion_key") and hp < float(d.get("potion_hp") or 40) and self.clock() - self.potion_at > 30:
-            self.press_key(d["potion_key"])
-            self.potion_at = self.clock()
-            self.note(f"здоровье {hp:.0f}% — зелье")
-        if hp < float(d.get("retreat_hp") or 20):
-            self.status = f"здоровье {hp:.0f}% — отход к входу"
-            self.note(self.status)
-            if self.home:
-                self.walk_to(*self.home, tol=3)
-            start = self.clock()
-            while (self.feed.hp_pct or 100) < 90 and self.clock() - start < 90:
-                self.wait(2)
-
-    def pick_mob(self, d: dict, done: set):
-        px, py = self.pos()
-        rng = float(d.get("attack_range") or 15)
-        mobs = [e for e in self.feed.entities("mob") if e.id not in done and (e.health is None or e.health > 0)]
-        near = [m for m in mobs if math.hypot(m.x - px, m.y - py) <= rng]
-        pool = near or [m for m in mobs if math.hypot(m.x - px, m.y - py) <= rng * 3]
-        return min(pool, key=lambda m: math.hypot(m.x - px, m.y - py)) if pool else None
-
-    def fight(self, mob, d: dict, skills: list, done: set) -> None:
-        name = mob.name or f"моб {mob.id}"
-        self.status = f"бой: {name}"
-        last_click = -1e9
-        start = self.clock()
-        while True:
-            self.check()
-            cur = self.feed.entity(mob.id)
-            if cur is None or (cur.health is not None and cur.health <= 0):
-                done.add(mob.id)
-                self.kills += 1
-                self.note(f"побеждён {name} (всего {self.kills})")
-                self.wait(self.rng.uniform(0.8, 1.6))      # добыча появляется не сразу
-                return
-            if self.clock() - start > FIGHT_TIMEOUT:
-                done.add(mob.id)
-                self.note(f"{name}: бой затянулся — пропускаю")
-                return
-            px, py = self.pos()
-            if self.clock() - last_click > 2.5:
-                # Клик по мобу — атака (и подход, если далеко).
-                self.click_world(cur.x - px, cur.y - py, step=0.6, keep_clear_of=False)
-                last_click = self.clock()
-            for key, cd in skills:
-                if self.clock() >= self.cooldowns.get(key, 0):
-                    self.press_key(key)
-                    self.cooldowns[key] = self.clock() + cd
-                    break
-            self.heal(d)
-            self.wait(0.6)
-
-    def pick_loot(self, d: dict, done: set):
-        px, py = self.pos()
-        out = []
-        for e in self.feed.entities("loot"):
-            if e.id in done or e.opened:
-                continue
-            chest = "chest" in e.event
-            if (chest and not d.get("open_chests")) or (not chest and not d.get("loot_bags")):
-                continue
-            if e.event == "new_silver_object":
-                continue          # серебро подбирается само
-            out.append(e)
-        return min(out, key=lambda e: math.hypot(e.x - px, e.y - py)) if out else None
-
-    def take_loot(self, e, d: dict, done: set) -> None:
-        chest = "chest" in e.event
-        what = "сундук" if chest else "добыча"
-        self.status = f"к {what}у" if chest else "к добыче"
-        done.add(e.id)
-        if not self.walk_to(e.x, e.y, tol=2.5, max_steps=25):
-            self.note(f"{what}: не дошёл — пропускаю")
-            return
-        px, py = self.pos()
-        self.click_world(e.x - px, e.y - py, step=0.5, keep_clear_of=False)
-        self.status = f"открывает {what}"
-        self.wait(float(d.get("chest_wait") or 8) if chest else 1.2)
-        self.run_template("loot_all", {})
-        self.loots += 1
-        self.note(f"{what} собрана (всего: {self.loots})" if not chest else f"сундук открыт (всего: {self.loots})")
-
-    def mark_visited(self, visited: set) -> None:
-        px, py = self.pos()
-        visited.add((int(px // EXPLORE_CELL), int(py // EXPLORE_CELL)))
-
-    def explore(self, visited: set) -> None:
-        """Идти туда, где ещё не были (и где проходимо по схеме зоны, если она есть)."""
-        px, py = self.pos()
-        grid = self.manager.zone_grid(self.feed.zone)
-        best, best_score = None, -1e9
-        for i in range(12):
-            ang = i * math.pi / 6 + self.rng.uniform(-0.2, 0.2)
-            tx, ty = px + 22 * math.cos(ang), py + 22 * math.sin(ang)
-            if grid is not None and not grid.free_at(tx, ty):
-                continue
-            cell = (int(tx // EXPLORE_CELL), int(ty // EXPLORE_CELL))
-            score = (0 if cell in visited else 10) + self.rng.uniform(0, 3)
-            if score > best_score:
-                best, best_score = (tx, ty), score
-        self.status = "разведка"
-        if best is None:
-            self.wander(20)
-            return
-        self.walk_to(*best, tol=3, max_steps=8)

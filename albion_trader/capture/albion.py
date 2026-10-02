@@ -79,6 +79,15 @@ DEFAULT_EVENTS = {
     "regeneration_health_changed": 91,
     "mounted": 209,
     "change_flagging_finished": 365,
+    # Порталы и выходы (бот данжей): вход в случайный данж в открытом мире, выходы
+    # между этажами, начало и конец перехода через выход.
+    "new_exit": 216,
+    "exit_enter_start": 254,
+    "exit_enter_cancel": 255,
+    "exit_enter_finished": 256,
+    "new_portal_entrance": 323,
+    "new_portal_exit": 324,
+    "new_random_dungeon_exit": 325,
 }
 EVENT_MOVE = 3  # самое частое событие (движение) — разбираем, только пока открыт радар
 

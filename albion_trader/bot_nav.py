@@ -64,6 +64,25 @@ class Router:
     def exits(self, cid: str) -> list:
         return [(float(x), float(y), t) for x, y, t, *_ in (self.index.get(cid) or {}).get("exits") or []]
 
+    def nearby(self, start: str, safety: str = "yellow", limit: int = 4) -> list[str]:
+        """Ближайшие к ``start`` зоны открытого мира (не города), в порядке удаления по переходам."""
+        seen, order, queue = {start}, [], [start]
+        while queue and len(order) < limit:
+            nxt = []
+            for zone in queue:
+                for _x, _y, target in self.exits(zone):
+                    if target in seen or target not in self.index:
+                        continue
+                    seen.add(target)
+                    ztype = self.index[target].get("type", "")
+                    if not zone_allowed(ztype, safety):
+                        continue
+                    nxt.append(target)
+                    if "PLAYERCITY" not in ztype.upper():
+                        order.append(target)
+            queue = nxt
+        return order[:limit]
+
     def route(self, start: str, goal: str, safety: str = "safe",
               start_pos: tuple[float, float] | None = None) -> list[tuple[str, float, float, str]]:
         """Список переходов [(зона, x выхода, y выхода, следующая зона)] от ``start`` до ``goal``.

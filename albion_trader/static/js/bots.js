@@ -27,10 +27,22 @@ const BOT_HELP = {
     разгрузки</b> (город Б) по маршруту через зоны допустимой опасности и там выполняет макрос разгрузки или
     выставляет предметы из списка на продажу по ценам рынка Б. «Туда и обратно» — повторять рейсы. Маршрут строится по
     выходам зон из справочника игры, путь внутри зоны — в обход построек и воды по схеме зоны.`,
-  dungeon: `Зайдите в данж и запустите бота у входа. Бот бьёт ближайших мобов (клик по мобу и умения по перезарядке),
-    после боя собирает добычу и открывает сундуки (кнопка «Взять всё» из точек интерфейса), затем идёт туда, где ещё не
-    был. Здоровье ниже порога — зелье; ещё ниже — отход к входу до восстановления. Ничего нового за заданное время —
-    данж пройден. Умения: «клавиша:перезарядка», например <code>q:3 w:10 e:20</code>.`,
+  dungeon_run: `<ol>
+    <li><b>Подготовка.</b> Встаньте у сундука в центре города и нажмите «Запомнить место» (например, «сундук Тетфорд»),
+      выберите его ниже. В «Точках интерфейса» укажите сундук, кнопку «Положить всё» и «Взять всё» (добыча), а если
+      игра спрашивает подтверждение входа в данж — кнопку «Войти».</li>
+    <li><b>Поиск.</b> Бот выходит из города в ближайшую зону допустимой опасности, бегает по ней (по схеме зоны — только
+      по проходимому) и ищет на радаре вход в данж нужного вида: по умолчанию зелёные (соло). У портала игроки — не
+      заходит. Не нашёл за отведённое время — идёт в следующую ближайшую зону.</li>
+    <li><b>Данж.</b> Этаж за этажом: бой с мобами (клик по мобу и умения по перезарядке), добыча и сундуки, разведка;
+      этаж пуст — выход на следующий этаж. Убит босс, открыт финальный сундук и собрано всё вокруг — данж пройден.</li>
+    <li><b>Игроки.</b> Радар следит за игроками: в открытом мире бот отходит от них, в данже — бросает его и выходит тем
+      же путём, потом ищет другой данж.</li>
+    <li><b>Домой.</b> Выход тем же путём (этаж за этажом к точкам появления), дорога в город к сундуку, «Положить всё» —
+      и снова поиск. «Данжей за запуск» 0 — без ограничения.</li></ol>
+    Здоровье ниже порога — зелье, ещё ниже — отход к точке появления на этаже. Персонаж погиб — бот останавливается.`,
+  dungeon: `Пройти данж, в котором стоит персонаж: этажи, мобы, добыча, босс и финальный сундук. Игроки рядом — выход из
+    данжа тем же путём. Настройки — те же, что у «Данжи по кругу».`,
   wander: `Бот просто гуляет по округе от точки старта (радиус — как у сбора), чтобы мир выглядел живым.`,
 };
 
@@ -227,7 +239,8 @@ App.tab({
     const b = d.bot;
     const st = b.stats;
     const stats = [st.gathered && `собрано ${st.gathered}`, st.orders && `заказов ${st.orders}`, st.trips && `рейсов ${st.trips}`,
-      st.kills && `убито ${st.kills}`, st.loots && `добыча ${st.loots}`].filter(Boolean).join(" · ");
+      st.kills && `убито ${st.kills}`, st.loots && `добыча ${st.loots}`, st.floors && `этаж ${st.floors}`,
+      st.runs && `данжей ${st.runs}`].filter(Boolean).join(" · ");
     const status = $("#bot-status");
     status.textContent = (b.running && b.task ? `${d.tasks[b.task] || b.task}: ` : "") + b.status + (stats ? ` · ${stats}` : "");
     status.className = "bot-status " + (b.status === "ошибка" ? "bad" : b.running ? "good" : "muted");
@@ -245,7 +258,7 @@ App.tab({
   renderForm(d) {
     const form = $("#bot-form");
     const task = this.task;
-    const sect = task === "wander" ? "gather" : task;
+    const sect = task === "wander" ? "gather" : task === "dungeon_run" ? "dungeon" : task;
     const c = d.tasks_config[sect] || {};
     const s = d.settings;
     const opt = (v, t, cur) => `<option value="${esc(v)}"${String(cur) === String(v) ? " selected" : ""}>${esc(t)}</option>`;
@@ -284,8 +297,17 @@ App.tab({
         <div class="bots-row">${num("undercut", "шаг цены", 0, 1e9)}${num("qty", "кол-во в заказе", 1, 9999)}
           <label>зоны по пути <select data-c="safety">${Object.entries(d.safety).map(([k, t]) => opt(k, t, c.safety)).join("")}</select></label>
           ${txt("mount_key", "клавиша маунта", "a")}${chk("round_trip", "туда и обратно")}${num("trips", "рейсов", 0, 1000, 1, "0 — без ограничения")}</div>`;
-    } else if (task === "dungeon") {
-      html = `<div class="bots-row">${txt("skills", "умения", "q:3 w:10 e:20")}${num("attack_range", "дальность атаки, м", 3, 40)}</div>
+    } else if (task === "dungeon" || task === "dungeon_run") {
+      const kinds = Object.entries(d.portal_kinds).map(([k, t]) =>
+        `<label><input type="checkbox" data-kind="${k}"${(c.portal_kinds || []).includes(k) ? " checked" : ""}> ${esc(t)}</label>`).join("");
+      html = (task === "dungeon_run" ? `<div class="bots-row">${place("home_place", "сундук в городе", "— выберите место —")}
+          ${macro("deposit_macro", "сдать добычу", "готовый шаблон по точкам")}${num("runs", "данжей за запуск", 0, 1000, 1, "0 — без ограничения")}</div>
+        <div class="bots-row"><label>зоны поиска <select data-c="safety">${Object.entries(d.safety).map(([k, t]) => opt(k, t, c.safety)).join("")}</select></label>
+          ${num("search_zones", "сколько ближайших зон", 1, 20)}${num("search_min", "искать в зоне, мин", 0.5, 120, 0.5)}</div>
+        <div class="bots-row"><span class="muted">порталы:</span> ${kinds}</div>` : "") + `
+        <div class="bots-row">${chk("avoid_players", "уходить от игроков")}${num("player_radius", "ближе, м", 10, 150, 5)}
+          ${num("max_floors", "этажей не больше", 1, 30)}</div>
+        <div class="bots-row">${txt("skills", "умения", "q:3 w:10 e:20")}${num("attack_range", "дальность атаки, м", 3, 40)}</div>
         <div class="bots-row">${txt("potion_key", "клавиша зелья", "2")}${num("potion_hp", "пить при HP ниже, %", 1, 99)}
           ${num("retreat_hp", "отходить при HP ниже, %", 0, 99)}</div>
         <div class="bots-row">${chk("loot_bags", "собирать добычу с мобов")}${chk("open_chests", "открывать сундуки")}
@@ -298,6 +320,9 @@ App.tab({
     }));
     $$("[data-res]", form).forEach((inp) => inp.addEventListener("change", () => {
       send({ res: $$("[data-res]", form).filter((x) => x.checked).map((x) => x.dataset.res) });
+    }));
+    $$("[data-kind]", form).forEach((inp) => inp.addEventListener("change", () => {
+      send({ portal_kinds: $$("[data-kind]", form).filter((x) => x.checked).map((x) => x.dataset.kind) });
     }));
     $$("[data-s]", form).forEach((inp) => inp.addEventListener("change", () => this.post({ action: "settings", [inp.dataset.s]: Number(inp.value) })));
   },
@@ -339,7 +364,7 @@ App.tab({
     const tpl = $("#macro-template");
     if (tpl.options.length < 2) {
       tpl.innerHTML = `<option value="">—</option>` + Object.keys(d.templates).map((k) =>
-        `<option value="${k}">${{ market_sell: "рынок: продажа", market_buy: "рынок: покупка", loot_all: "взять всё" }[k] || k}</option>`).join("");
+        `<option value="${k}">${{ market_sell: "рынок: продажа", market_buy: "рынок: покупка", loot_all: "взять всё", stash_deposit: "сундук: положить всё" }[k] || k}</option>`).join("");
     }
     const macros = Object.keys(d.macros).sort();
     const pick = $("#macro-pick");

@@ -54,6 +54,12 @@ class RouterTest(unittest.TestCase):
         idx = {**INDEX, "A": {**INDEX["A"], "exits": INDEX["A"]["exits"] + [[-50, 0, "R", "x"]]}}
         self.assertEqual(self.zones(Router(idx).route("A", "R", "safe")), ["A", "R"])
 
+    def test_nearby_zones_skip_cities_and_danger(self):
+        self.assertEqual(self.r.nearby("A", "yellow"), ["Y", "B1", "B2"])
+        self.assertEqual(self.r.nearby("A", "safe"), ["B1", "B2"])
+        self.assertEqual(self.r.nearby("A", "yellow", limit=1), ["Y"])
+        self.assertEqual(self.r.nearby("ZZ"), [])
+
     def test_errors_and_same_zone(self):
         self.assertEqual(self.r.route("A", "A"), [])
         with self.assertRaisesRegex(ValueError, "нет в списке зон"):

@@ -70,6 +70,8 @@ def init(conn) -> None:
 KIND_PLAYER, KIND_MOB, KIND_RESOURCE, KIND_LOOT, KIND_OBJECT = "player", "mob", "resource", "loot", "object"
 LOOT_EVENTS = {"new_loot", "new_loot_chest", "new_treasure_chest", "new_silver_object"}
 GENERIC_NAMES = {"new_loot": "лут", "new_loot_chest": "сундук", "new_treasure_chest": "сундук с сокровищами",
+                 "new_random_dungeon_exit": "вход в данж", "new_exit": "выход", "new_portal_exit": "портал",
+                 "new_portal_entrance": "портал",
                  "new_silver_object": "серебро"}
 
 # Ключи параметров по событиям. "position" — кандидаты по порядку; если ни один
@@ -93,6 +95,9 @@ DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
     "harvestable_change_state": {"id": 0, "size": 1, "enchant": 2},
     "new_loot_chest": {"id": 0, "name": 3, "rarity": 21, "rarity_static": 23},
     "loot_chest_opened": {"id": 0},
+    # Вход в случайный данж (как в ZQRadar): имя содержит вид — SOLO (зелёный), группа,
+    # CORRUPTED, HELLGATE; 6 — зачарование.
+    "new_random_dungeon_exit": {"id": 0, "position": [1], "name": 3, "enchant": 6},
     "_generic": {"id": 0},
     "op:join": {"id": 0, "name": 2, "position": [9]},
     "op:move": {"position": [1]},
@@ -490,9 +495,11 @@ class Radar:
             label = next((v for k, v in sorted(p.items(), key=lambda kv: str(kv[0]))
                           if isinstance(k, int) and k < 250 and isinstance(v, str) and v), "")
         kind = KIND_LOOT if name in LOOT_EVENTS else KIND_OBJECT
-        self._put(Entity(id=_int(p.get(keys["id"])), kind=kind, event=name,
-                         name=label or GENERIC_NAMES.get(name) or name.removeprefix("new_").replace("_", " ")),
-                  p, keys)
+        ent = Entity(id=_int(p.get(keys["id"])), kind=kind, event=name,
+                     name=label or GENERIC_NAMES.get(name) or name.removeprefix("new_").replace("_", " "))
+        if "enchant" in keys:
+            ent.enchant = _int(p.get(keys["enchant"]))
+        self._put(ent, p, keys)
 
     def _put(self, ent: Entity, p, keys) -> None:
         pos = find_position(p, keys.get("position"))
