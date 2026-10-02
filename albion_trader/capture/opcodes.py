@@ -72,6 +72,10 @@ EVENT_NAMES = {
     "new_portal_entrance": "evNewPortalEntrance",
     "new_portal_exit": "evNewPortalExit",
     "new_random_dungeon_exit": "evNewRandomDungeonExit",
+    "inventory_put_item": "evInventoryPutItem",
+    "durability_changed": "evDurabilityChanged",
+    "overload_mode_update": "evOverloadModeUpdate",
+    "encumbered_restricted": "evEncumberedRestricted",
 }
 
 _START = re.compile(r"^(\w+)\s+\w+Type\s*=\s*iota\s*$")

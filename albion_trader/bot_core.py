@@ -16,8 +16,9 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, NamedTuple
 
+from .activity import _fix
 from .bot_win import parse_keys
 from .capture.albion import AlbionState
 from .capture.photon import PhotonParser
@@ -53,12 +54,53 @@ class ClientFeed:
         self.harvests = 0
         self.hp: float | None = None
         self.max_hp: float | None = None
+        self.items_put = 0           # предметов положено в сумку (InventoryPutItem)
+        self.overloaded = False      # перегруз (OverloadModeUpdate / EncumberedRestricted)
+        self.durability_events = 0
+        self.money: float | None = None
+        self.silver_gained = 0.0
+        self.fame_gained = 0.0
+        # Движение других (мобов, игроков) нужно боту всегда: кайт, угрозы.
+        self.state.moves_until = float("inf")
         self.state.on("event:harvest_finished", lambda _p: self._harvested())
+        self.state.on("event:inventory_put_item", lambda _p: self._put_item())
+        self.state.on("event:overload_mode_update", self._overload)
+        self.state.on("event:encumbered_restricted", lambda _p: setattr(self, "overloaded", True))
+        self.state.on("event:durability_changed", lambda _p: self._durability())
+        self.state.on("event:update_money", self._money)
+        self.state.on("event:update_fame", self._fame)
         self.state.on("event:health_update", lambda p: self._health(p, 3, None))
         self.state.on("event:regeneration_health_changed", lambda p: self._health(p, 2, 3))
 
     def _harvested(self) -> None:
         self.harvests += 1
+
+    def _put_item(self) -> None:
+        self.items_put += 1
+
+    def _durability(self) -> None:
+        self.durability_events += 1
+
+    def _overload(self, p: dict) -> None:
+        me = self.radar.me.get("id")
+        if p.get(0) not in (None, me):
+            return
+        v = p.get(1)
+        self.overloaded = bool(v) if isinstance(v, (bool, int, float)) else True
+
+    def _money(self, p: dict) -> None:
+        """UpdateMoney: 1 — баланс серебра. Прирост копится (траты не вычитаются)."""
+        silver = _fix(p.get(1))
+        if silver is not None:
+            if self.money is not None and silver > self.money:
+                self.silver_gained += silver - self.money
+            self.money = silver
+
+    def _fame(self, p: dict) -> None:
+        """UpdateFame: 2 — полученная слава (как в учёте активности)."""
+        v = _fix(p.get(2))
+        if v is not None and v > 0:
+            self.fame_gained += v
 
     def _health(self, p: dict, hkey: int, mkey: int | None) -> None:
         me = self.radar.me.get("id")
@@ -126,30 +168,51 @@ class Calibration:
     """Где персонаж на экране и как смещение на экране переходит в смещение в мире.
 
     Смещение на экране меряется в долях высоты окна по обеим осям (не зависит от
-    соотношения сторон). ``m`` — столбцы: мир на единицу смещения вправо и вниз."""
+    соотношения сторон). ``m`` — столбцы: мир на единицу смещения вправо и вниз.
+    ``p`` — перспектива: камера наклонена, поэтому у верха экрана метров на долю
+    больше, чем у низа; мир = M·s·(1 + p·sy)."""
 
     cx: float = 0.5
     cy: float = 0.5
     m: list = field(default_factory=lambda: [[15.5, 21.9], [15.5, -21.9]])
     measured: bool = False
+    p: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict | None) -> Calibration:
         if not d:
             return cls()
         return cls(float(d.get("cx", 0.5)), float(d.get("cy", 0.5)),
-                   [[float(v) for v in row] for row in d.get("m") or cls().m], bool(d.get("measured")))
+                   [[float(v) for v in row] for row in d.get("m") or cls().m], bool(d.get("measured")),
+                   float(d.get("p") or 0.0))
 
     def to_world(self, sx: float, sy: float) -> tuple[float, float]:
         (a, b), (c, d) = self.m
-        return a * sx + b * sy, c * sx + d * sy
+        k = 1.0 + self.p * sy
+        return (a * sx + b * sy) * k, (c * sx + d * sy) * k
 
     def to_screen(self, wx: float, wy: float) -> tuple[float, float]:
         (a, b), (c, d) = self.m
         det = a * d - b * c
         if abs(det) < 1e-9:
             raise BotError("калибровка испорчена — повторите её")
-        return (d * wx - b * wy) / det, (-c * wx + a * wy) / det
+        sx0, sy0 = (d * wx - b * wy) / det, (-c * wx + a * wy) / det
+        p = self.p
+        if abs(p) < 1e-9:
+            return sx0, sy0
+        # Перспектива верна только в пределах экрана: дальнюю цель решаем в масштабе
+        # «полэкрана» и растягиваем обратно — направление сохраняется.
+        n0 = math.hypot(sx0, sy0)
+        f = 0.5 / n0 if n0 > 0.5 else 1.0
+        sx0, sy0 = sx0 * f, sy0 * f
+        # sy·(1 + p·sy) = sy0 — корень, близкий к sy0.
+        disc = 1 + 4 * p * sy0
+        sy = (-1 + math.sqrt(disc)) / (2 * p) if disc > 0 else sy0
+        k = 1 + p * sy
+        sx = sx0 / k if k > 0.2 else sx0
+        if k <= 0.2:
+            sy = sy0
+        return sx / f, sy / f
 
     def fractions(self, sx: float, sy: float, aspect: float) -> tuple[float, float]:
         """Смещение (в долях высоты) → доли окна по x и y."""
@@ -171,8 +234,50 @@ class Calibration:
         return sx * k, sy * k
 
 
+def _fit_perspective(ts: list[float], gs: list[float]) -> tuple[float, float, float] | None:
+    """Подбор c, e, p в g(t) = c·(t+e)·(1 + p·(t+e)) методом Гаусса — Ньютона."""
+    c = (gs[0] - gs[1]) / (ts[0] - ts[1]) if ts[0] != ts[1] else 0.0
+    if abs(c) < 1e-6:
+        return None
+    e, p = 0.0, 0.0
+    for _ in range(30):
+        jtj = [[0.0] * 3 for _ in range(3)]
+        jtr = [0.0] * 3
+        for t, gv in zip(ts, gs):
+            u = t + e
+            r = c * u * (1 + p * u) - gv
+            j = (u * (1 + p * u), c * (1 + 2 * p * u), c * u * u)
+            for a in range(3):
+                jtr[a] += j[a] * r
+                for b in range(3):
+                    jtj[a][b] += j[a] * j[b]
+        step = _solve3(jtj, jtr)
+        if step is None:
+            return None
+        c, e, p = c - step[0], e - step[1], p - step[2]
+        if max(abs(x) for x in step) < 1e-9:
+            break
+    return c, e, p
+
+
+def _solve3(a: list[list[float]], b: list[float]) -> list[float] | None:
+    def det(m):
+        return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+    dt = det(a)
+    if abs(dt) < 1e-15:
+        return None
+    out = []
+    for col in range(3):
+        m = [row[:] for row in a]
+        for r in range(3):
+            m[r][col] = b[r]
+        out.append(det(m) / dt)
+    return out
+
+
 def solve_calibration(d: float, plus_x, minus_x, plus_y, minus_y, cx=0.5, cy=0.5,
-                      aspect: float = 16 / 9) -> Calibration:
+                      aspect: float = 16 / 9, plus_y2=None, minus_y2=None) -> Calibration:
     """Матрица по сдвигам персонажа после кликов на ±d по осям экрана.
 
     ``plus_x`` — сдвиг в мире после клика на +d по x, ``minus_x`` — после клика на −d
@@ -195,6 +300,20 @@ def solve_calibration(d: float, plus_x, minus_x, plus_y, minus_y, cx=0.5, cy=0.5
     ey = cal.to_screen((plus_y[0] + minus_y[0]) / 2, (plus_y[1] + minus_y[1]) / 2)
     off_x = max(-0.15, min(0.15, (ex[0] + ey[0]) / 2))
     off_y = max(-0.15, min(0.15, (ex[1] + ey[1]) / 2))
+    if plus_y2 is not None and minus_y2 is not None:
+        # Перспектива по второй паре кликов (±2d по вертикали). Проекции сдвигов на ось y:
+        # g(t) = c·u·(1 + p·u), u = t + e — подбираем c, e, p по четырём кликам.
+        uy = (col_y[0] / ny, col_y[1] / ny)
+        g = [m[0] * uy[0] + m[1] * uy[1] for m in (plus_y, minus_y, plus_y2, minus_y2)]
+        fit = _fit_perspective([d, -d, 2 * d, -2 * d], g)
+        if fit is not None:
+            c, e, p = fit
+            cal.p = round(max(-0.9, min(0.9, p)), 4)
+            k0 = 1 + cal.p * e                  # клики по x шли на высоте ошибки центра
+            cal.m = [[col_x[0] / k0, uy[0] * c], [col_x[1] / k0, uy[1] * c]]
+            off_y = max(-0.15, min(0.15, e))
+            ex = cal.to_screen((plus_x[0] + minus_x[0]) / 2, (plus_x[1] + minus_x[1]) / 2)
+            off_x = max(-0.15, min(0.15, ex[0]))
     cal.cx = round(min(0.85, max(0.15, cx - off_x / max(aspect, 1e-6))), 4)
     cal.cy = round(min(0.85, max(0.15, cy - off_y)), 4)
     return cal
@@ -350,20 +469,65 @@ def market_price(best: float | None, side: str, undercut: float) -> int | None:
     return max(1, int(round(price)))
 
 
-def parse_skills(text: str) -> list[tuple[str, float]]:
-    """«q:3 w:10 e:20» → [(клавиша, перезарядка в секундах)]. Без «:» — 5 секунд."""
+class Skill(NamedTuple):
+    """Умение: клавиша, перезарядка и условия применения."""
+    key: str
+    cd: float
+    hp_below: float | None = None     # только если своё здоровье ниже, %
+    hp_above: float | None = None     # только если своё здоровье выше, %
+    boss: bool = False                # только против босса
+    cast: float = 0.0                 # время каста: не двигаться, с
+    self_cast: bool = False           # не нужна цель (лечение, щит)
+    opener: bool = False              # в начале боя с целью
+
+
+SKILLS_HELP = """Умение — «клавиша:перезарядка», через пробел, в порядке приоритета.
+Условия через @: hp<50 (своё здоровье ниже 50%), hp>80, boss (только по боссу),
+cast=1.5 (каст 1,5 с — не двигаться), self (без цели, например лечение),
+open (первым в бою с целью). Пример: q:3 w:10@open e:20@boss 2:30@hp<40@self"""
+
+
+def parse_skills(text: str) -> list[Skill]:
+    """«q:3 w:10@open e:20@boss r:30@hp<50@self f:15@cast=1.5» → умения. Без «:» — 5 с."""
     out = []
     for part in re.split(r"[\s,;]+", (text or "").strip()):
         if not part:
             continue
-        key, _, cd = part.partition(":")
+        head, *conds = part.split("@")
+        key, _, cd = head.partition(":")
         parse_keys(key)
         try:
             cool = float(cd) if cd else 5.0
         except ValueError:
             raise ValueError(f"перезарядка «{cd}» — не число") from None
-        out.append((key.lower(), max(0.2, cool)))
+        opts: dict = {}
+        for c in conds:
+            c = c.strip().lower()
+            m = re.fullmatch(r"hp([<>])(\d+(?:\.\d+)?)", c)
+            mc = re.fullmatch(r"cast=(\d+(?:\.\d+)?)", c)
+            if m:
+                opts["hp_below" if m.group(1) == "<" else "hp_above"] = float(m.group(2))
+            elif mc:
+                opts["cast"] = min(10.0, float(mc.group(1)))
+            elif c in ("boss", "self", "open"):
+                opts[{"boss": "boss", "self": "self_cast", "open": "opener"}[c]] = True
+            else:
+                raise ValueError(f"непонятное условие «@{c}» у «{key}»")
+        out.append(Skill(key.lower(), max(0.2, cool), **opts))
     return out
+
+
+def skill_ready(s: Skill, hp_pct: float | None, boss: bool, first: bool) -> bool:
+    """Подходит ли умение сейчас (без учёта перезарядки)."""
+    if s.boss and not boss:
+        return False
+    if s.opener and not first:
+        return False
+    if s.hp_below is not None and (hp_pct is None or hp_pct >= s.hp_below):
+        return False
+    if s.hp_above is not None and hp_pct is not None and hp_pct <= s.hp_above:
+        return False
+    return True
 
 
 def split_items(text: str) -> list[str]:

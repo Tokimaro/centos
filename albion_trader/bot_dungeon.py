@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import math
 
-from .bot_core import BotError, parse_skills
+from .bot_core import BotError, parse_skills, skill_ready
+from .bot_threat import DANGER, ThreatTracker, friends_of
 
 FIGHT_TIMEOUT = 45.0      # моб не умирает так долго — бросаем
 EXPLORE_CELL = 10.0       # клетка «уже были здесь» при разведке, м
@@ -31,6 +32,10 @@ EXIT_EVENTS = ("new_exit", "new_portal_exit", "new_portal_entrance", "new_random
 ENTRY_RADIUS = 15.0       # выход ближе к точке появления на этаже — это выход назад
 PORTAL_KINDS = {"solo": "соло (зелёные)", "group": "групповые", "corrupted": "проклятые",
                 "hellgate": "адские врата", "avalon": "авалонские", "unknown": "без названия"}
+
+
+class DungeonAbort(Exception):
+    """Бросить данж сейчас (мало здоровья — быстрый выход)."""
 
 
 def portal_kind(name: str) -> str:
@@ -59,34 +64,54 @@ class DungeonMixin:
             x, y = self.pos()
         return [e for e in self.feed.entities("player") if math.hypot(e.x - x, e.y - y) <= radius]
 
-    def avoid_players(self, d: dict) -> bool:
-        """Игроки рядом — отойти от них (в открытом мире). True — пришлось уходить."""
+    def threats(self, d: dict) -> list:
         if not d.get("avoid_players"):
-            return False
-        near = self.players_near(float(d.get("player_radius") or 45))
-        if not near:
-            return False
+            return []
+        if getattr(self, "threat_tracker", None) is None:
+            self.threat_tracker = ThreatTracker()
+        return self.threat_tracker.assess(self.feed, self.pos(), d)
+
+    def away_point(self, threats: list, dist: float) -> tuple[float, float] | None:
         px, py = self.pos()
         vx = vy = 0.0
-        for e in near:
-            dist = max(1.0, math.hypot(e.x - px, e.y - py))
-            vx, vy = vx + (px - e.x) / dist ** 2, vy + (py - e.y) / dist ** 2
+        for t in threats:
+            e = t.entity
+            r = max(1.0, math.hypot(e.x - px, e.y - py))
+            w = 2.0 if t.level >= DANGER else 1.0
+            vx, vy = vx + w * (px - e.x) / r ** 2, vy + w * (py - e.y) / r ** 2
         n = math.hypot(vx, vy) or 1.0
         grid = self.manager.zone_grid(self.feed.zone)
-        target = None
         for turn in (0.0, 0.6, -0.6, 1.2, -1.2, 2.0, -2.0):
             c, s = math.cos(turn), math.sin(turn)
             dx, dy = (vx * c - vy * s) / n, (vx * s + vy * c) / n
-            tx, ty = px + 35 * dx, py + 35 * dy
+            tx, ty = px + dist * dx, py + dist * dy
             if grid is None or grid.free_at(tx, ty):
-                target = (tx, ty)
-                break
-        names = ", ".join(e.name or "игрок" for e in near[:3])
-        self.status = f"уходит от игроков: {names}"
+                return tx, ty
+        return None
+
+    def avoid_players(self, d: dict) -> bool:
+        """Игроки рядом (в открытом мире) — по уровню угрозы: отойти или сбежать
+        (зелье побега, маунт, дальше). True — пришлось уходить."""
+        threats = self.threats(d)
+        if not threats:
+            return False
+        top = threats[0]
+        danger = top.level >= DANGER
+        what = ", ".join(t.text() for t in threats[:3])
+        self.status = ("опасно — убегает: " if danger else "уходит от игроков: ") + what
         self.note(self.status)
-        self.alert(f"players:{names}:{int(self.clock() // 600)}", "Бот: рядом игроки", self.status)
+        self.alert(f"players:{top.name}:{int(self.clock() // 600)}",
+                   "Бот: опасные игроки" if danger else "Бот: рядом игроки", what)
+        if danger:
+            if d.get("escape_key"):
+                self.press_key(d["escape_key"])
+                self.wait(0.5)
+            if d.get("mount_key"):
+                self.press_key(d["mount_key"])
+                self.wait(2.5)
+        target = self.away_point(threats, 60 if danger else 35)
         if target:
-            self.walk_to(*target, tol=4, max_steps=12)
+            self.walk_to(*target, tol=4, max_steps=16 if danger else 12)
         self.wait(self.rng.uniform(1, 3))
         return True
 
@@ -115,10 +140,12 @@ class DungeonMixin:
 
     def explore(self, visited: set, step: float = 22.0) -> None:
         """Идти туда, где ещё не были (по схеме зоны — только по проходимому), не наступая
-        на выходы и порталы."""
+        на выходы и порталы. Предпочтение — краю разведанного (а не случайным кругам)
+        и направлениям, где рядом тоже не были."""
         px, py = self.pos()
         grid = self.manager.zone_grid(self.feed.zone)
         exits = self.exits_around()
+        failed = getattr(self, "explore_failed", set())
         best, best_score = None, -1e9
         for i in range(12):
             ang = i * math.pi / 6 + self.rng.uniform(-0.2, 0.2)
@@ -128,14 +155,19 @@ class DungeonMixin:
             if any(math.hypot(e.x - tx, e.y - ty) < 8 for e in exits):
                 continue
             cell = (int(tx // EXPLORE_CELL), int(ty // EXPLORE_CELL))
-            score = (0 if cell in visited else 10) + self.rng.uniform(0, 3)
+            if cell in failed:
+                continue
+            around = sum((cell[0] + dx, cell[1] + dy) in visited for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+            score = (0 if cell in visited else 10) - 0.8 * around + self.rng.uniform(0, 2)
             if score > best_score:
                 best, best_score = (tx, ty), score
         self.status = "разведка"
         if best is None:
             self.wander(20)
             return
-        self.walk_to(*best, tol=3, max_steps=10)
+        if not self.walk_to(*best, tol=3, max_steps=10):
+            # Туда не пройти (стена, обрыв) — больше не пытаться в этой зоне.
+            self.explore_failed = failed | {(int(best[0] // EXPLORE_CELL), int(best[1] // EXPLORE_CELL))}
 
     def mark_visited(self, visited: set) -> None:
         px, py = self.pos()
@@ -156,6 +188,9 @@ class DungeonMixin:
             self.potion_at = self.clock()
             self.note(f"здоровье {hp:.0f}% — зелье")
         if hp < float(d.get("retreat_hp") or 20):
+            if self.floors and d.get("exit_key") and d.get("retreat_exit"):
+                self.note(f"здоровье {hp:.0f}% — быстрый выход")
+                raise DungeonAbort("hp")
             self.status = f"здоровье {hp:.0f}% — отход к входу"
             self.note(self.status)
             if self.home:
@@ -169,13 +204,42 @@ class DungeonMixin:
         info = radar.mobs.info(mob.type_id, radar.mob_offset) if radar.mobs is not None else None
         return bool(info and info.get("boss")) or "BOSS" in (mob.name or "").upper()
 
-    def pick_mob(self, d: dict, done: set):
+    def mob_info(self, mob) -> dict:
+        radar = self.feed.radar
+        return (radar.mobs.info(mob.type_id, radar.mob_offset) if radar.mobs is not None else None) or {}
+
+    def mob_allowed(self, mob, d: dict) -> bool:
+        info = self.mob_info(mob)
+        max_tier = int(d.get("max_mob_tier") or 0)
+        if max_tier and (info.get("tier") or 0) > max_tier:
+            return False
+        if d.get("skip_elite") and info.get("category") in ("champion", "elite") and not self.is_boss(mob):
+            return False
+        return True
+
+    def pick_mob(self, d: dict, done: set, attacked: bool = False):
+        """Следующий моб: ближний, но не из большой группы (если есть выбор). ``attacked`` —
+        нас бьют: ближайший в 15 м без всяких фильтров."""
         px, py = self.pos()
         rng = float(d.get("attack_range") or 15)
         mobs = [e for e in self.feed.entities("mob") if e.id not in done and (e.health is None or e.health > 0)]
+        if attacked:
+            near = [m for m in mobs if math.hypot(m.x - px, m.y - py) <= 15]
+            return min(near, key=lambda m: math.hypot(m.x - px, m.y - py)) if near else None
+        mobs = [m for m in mobs if self.mob_allowed(m, d)]
+        max_pack = int(d.get("max_pack") or 0)
         near = [m for m in mobs if math.hypot(m.x - px, m.y - py) <= rng]
-        pool = near or [m for m in mobs if math.hypot(m.x - px, m.y - py) <= rng * 3]
-        return min(pool, key=lambda m: math.hypot(m.x - px, m.y - py)) if pool else None
+        # С ограничением группы выбираем из более широкого круга: одиночка чуть дальше
+        # лучше большой группы рядом.
+        pool = [m for m in mobs if math.hypot(m.x - px, m.y - py) <= rng * 3] if max_pack or not near else near
+        if not pool:
+            return None
+
+        def score(m):
+            pack = sum(1 for o in mobs if math.hypot(o.x - m.x, o.y - m.y) < 8)
+            over = max(0, pack - max_pack) if max_pack else 0
+            return math.hypot(m.x - px, m.y - py) + 25 * over
+        return min(pool, key=score)
 
     def fight(self, mob, d: dict, skills: list, done: set) -> None:
         boss = self.is_boss(mob)
@@ -183,6 +247,9 @@ class DungeonMixin:
         self.status = f"бой: {'босс ' if boss else ''}{name}"
         last_click = -1e9
         start = self.clock()
+        first = True
+        kite = bool(d.get("kite"))
+        kite_dist = float(d.get("kite_dist") or 5)
         while True:
             self.check()
             self.check_alive()
@@ -202,17 +269,45 @@ class DungeonMixin:
                 self.note(f"{name}: бой затянулся — пропускаю")
                 return
             px, py = self.pos()
+            dist = math.hypot(cur.x - px, cur.y - py)
+            if kite and dist < kite_dist:
+                # Дальний бой: отступить от моба и бить дальше.
+                ax, ay = (px - cur.x) / max(dist, 0.1), (py - cur.y) / max(dist, 0.1)
+                self.click_world(ax * 6, ay * 6, step=0.3)
+                self.wait(0.6)
+                last_click = -1e9
+                continue
             if self.clock() - last_click > 2.5:
                 # Клик по мобу — атака (и подход, если далеко).
                 self.click_world(cur.x - px, cur.y - py, step=0.6, keep_clear_of=False)
                 last_click = self.clock()
-            for key, cd in skills:
-                if self.clock() >= self.cooldowns.get(key, 0):
-                    self.press_key(key)
-                    self.cooldowns[key] = self.clock() + cd
+            hp = self.feed.hp_pct
+            for s in skills:
+                if self.clock() >= self.cooldowns.get(s.key, 0) and skill_ready(s, hp, boss, first):
+                    self.press_key(s.key)
+                    self.cooldowns[s.key] = self.clock() + s.cd
+                    if s.cast:
+                        self.wait(s.cast)         # каст: не двигаться
+                    first = False
                     break
             self.heal(d)
             self.wait(0.6)
+
+    def rest_between_packs(self, d: dict) -> None:
+        """Мобов рядом нет, а здоровья мало — подождать восстановления перед следующей группой."""
+        rest_hp = float(d.get("rest_hp") or 0)
+        hp = self.feed.hp_pct
+        if not rest_hp or hp is None or hp >= rest_hp:
+            return
+        px, py = self.pos()
+        if any(math.hypot(m.x - px, m.y - py) < 12 for m in self.feed.entities("mob")):
+            return
+        self.status = f"восстанавливается ({hp:.0f}%)"
+        self.note(self.status)
+        start = self.clock()
+        hits = self.feed.hits
+        while (self.feed.hp_pct or 100) < 90 and self.clock() - start < 60 and self.feed.hits == hits:
+            self.wait_idle(2)
 
     def pick_loot(self, d: dict, done: set):
         px, py = self.pos()
@@ -259,6 +354,9 @@ class DungeonMixin:
     # --- данж ---------------------------------------------------------------
     def start_dungeon_state(self) -> None:
         self.floors: list[tuple[str, tuple[float, float]]] = []
+        self.floor_visited: dict[str, set] = {}
+        self.explore_failed: set = set()
+        self.last_hits = 0
         self.boss_killed = self.boss_done = False
         self.cooldowns: dict[str, float] = {}
         self.potion_at = -1e9
@@ -269,11 +367,15 @@ class DungeonMixin:
         except ValueError as e:
             raise BotError(f"данж: умения — {e}") from None
 
+    def bag_full(self, d: dict) -> bool:
+        slots = int(d.get("bag_slots") or 0)
+        return self.feed.overloaded or bool(slots and self.feed.items_put - self.items_base >= slots)
+
     def clear_floor(self, d: dict, skills: list, started: float) -> str:
         """Зачистить этаж. «cleared» — пуст, «boss» — босс и его сундук, «players» — рядом
-        игроки, «time» — время вышло, «moved» — неожиданно сменился этаж."""
+        игроки, «time» — время вышло, «bag» — сумка полна, «moved» — сменился этаж."""
         zone = self.feed.zone
-        visited: set = set()
+        visited = self.floor_visited.setdefault(zone, set())
         done: set = set()
         last_found = self.clock()
         while True:
@@ -283,17 +385,34 @@ class DungeonMixin:
                 return "moved"
             if self.clock() - started > float(d.get("max_min") or 40) * 60:
                 return "time"
-            near = self.players_near(float(d.get("player_radius") or 45)) if d.get("avoid_players") else []
-            if near:
-                names = ", ".join(e.name or "игрок" for e in near[:3])
-                self.alert(f"players:{names}:{int(self.clock() // 600)}", "Бот: игроки в данже", names)
+            threats = self.threats(d)
+            if threats:
+                what = ", ".join(t.text() for t in threats[:3])
+                self.alert(f"players:{threats[0].name}:{int(self.clock() // 600)}", "Бот: игроки в данже", what)
+                self.note(f"игроки в данже: {what}")
                 return "players"
+            if self.bag_full(d):
+                self.note("сумка полна — домой" if not self.feed.overloaded else "перегруз — домой")
+                return "bag"
             self.mark_visited(visited)
             self.heal(d)
+            if self.feed.hits != self.last_hits:
+                # Нас бьют — сначала ответить ближайшему, даже если его бы пропустили.
+                self.last_hits = self.feed.hits
+                attacker = self.pick_mob(d, done, attacked=True)
+                if attacker is not None:
+                    self.note("атакован — отвечаю")
+                    self.fight(attacker, d, skills, done)
+                    self.last_hits = self.feed.hits
+                    last_found = self.clock()
+                    self.rest_between_packs(d)
+                    continue
             mob = self.pick_mob(d, done)
             if mob is not None:
                 self.fight(mob, d, skills, done)
+                self.last_hits = self.feed.hits
                 last_found = self.clock()
+                self.rest_between_packs(d)
                 continue
             loot = self.pick_loot(d, done)
             if loot is not None:
@@ -315,6 +434,7 @@ class DungeonMixin:
     def clear_dungeon(self, d: dict, skills: list) -> str:
         """Пройти данж этаж за этажом. Возвращает «done», «players» или «time»."""
         self.start_dungeon_state()
+        self.last_hits = self.feed.hits
         started = self.clock()
         used: set = set()
         while True:
@@ -323,10 +443,14 @@ class DungeonMixin:
                 self.floors.append((zone, entry))
                 self.home = entry          # отходить при малом здоровье — сюда
                 self.note(f"этаж {len(self.floors)}")
-            result = self.clear_floor(d, skills, started)
+            try:
+                result = self.clear_floor(d, skills, started)
+            except DungeonAbort as e:
+                return str(e)
             if result == "moved":
+                self.explore_failed = set()
                 continue
-            if result in ("players", "time"):
+            if result in ("players", "time", "bag"):
                 return result
             if result == "boss":
                 return "done"
@@ -414,6 +538,9 @@ class DungeonMixin:
         if result == "players":
             self.note("рядом игроки — выхожу из данжа")
             self.exit_dungeon(d)
+        elif result in ("hp", "bag"):
+            self.note("мало здоровья — выхожу" if result == "hp" else "сумка полна — выхожу")
+            self.exit_dungeon(d, None if result == "hp" else skills)
         elif result == "time":
             self.note("время на данж вышло")
         else:
@@ -430,7 +557,11 @@ class DungeonMixin:
                 continue
             if portal_kind(e.name) not in kinds:
                 continue
-            if d.get("avoid_players") and self.players_near(radius, e.x, e.y):
+            enchant = e.enchant or 0
+            if not int(d.get("portal_enchant_min") or 0) <= enchant <= int(d.get("portal_enchant_max") or 4):
+                continue
+            if d.get("avoid_players") and [p for p in self.players_near(radius, e.x, e.y)
+                                           if (p.name or "").lower() not in friends_of(d)]:
                 continue
             out.append(e)
         return min(out, key=lambda e: math.hypot(e.x - px, e.y - py)) if out else None
@@ -468,6 +599,14 @@ class DungeonMixin:
                 return False
             if self.avoid_players(d):
                 continue
+            if self.feed.hits != self.last_hits:
+                self.last_hits = self.feed.hits
+                px, py = self.pos()
+                attacker = self.pick_mob(d, set(), attacked=True)
+                if attacker is not None:
+                    self.note("атакован мобом — отвечаю")
+                    self.fight(attacker, d, self.skills_of(d), set())
+                    continue
             portal = self.pick_portal(d)
             if portal is not None:
                 self.status = f"к порталу ({portal_kind(portal.name)})"
@@ -487,7 +626,23 @@ class DungeonMixin:
             self.run_macro(d["deposit_macro"], {})
         else:
             self.run_template("stash_deposit", {})
+        self.items_base = self.feed.items_put
+        self.feed.overloaded = False
         self.note("добыча сдана в сундук")
+
+    def services(self, d: dict) -> None:
+        """Ремонт и докупка (зелья, еда) — каждые N данжей: дойти до места и выполнить макрос."""
+        for kind, title in (("repair", "ремонт"), ("restock", "докупка")):
+            every = int(d.get(f"{kind}_every") or 0)
+            place, macro = d.get(f"{kind}_place"), d.get(f"{kind}_macro")
+            if not every or not macro or self.runs == 0 or self.runs % every or self.serviced.get(kind) == self.runs:
+                continue
+            self.status = title
+            if place:
+                self.go_place(place, d.get("safety") or "yellow")
+            self.run_macro(macro, {})
+            self.serviced[kind] = self.runs
+            self.note(f"{title}: готово")
 
     def dungeon_run(self) -> None:
         d = self.task_cfg("dungeon")
@@ -498,6 +653,8 @@ class DungeonMixin:
         if home not in self.manager.config["places"]:
             raise BotError(f"нет сохранённого места «{home}»")
         self.bad_portals: set = set()
+        self.items_base = self.feed.items_put
+        self.serviced: dict = {}
         limit = int(d.get("runs") or 0)
         while True:
             self.check()
@@ -506,20 +663,22 @@ class DungeonMixin:
                 self.go_place(home, d.get("safety") or "yellow")
             self.find_portal(d)
             result = self.clear_dungeon(d, skills)
-            if result == "players":
-                self.note("в данже игроки — ухожу, ищу другой данж")
-            elif result == "time":
-                self.note("время на данж вышло — выхожу")
-            # При игроках рядом — без боя: выход сразу (бой задержал бы уход).
-            self.exit_dungeon(d, None if result == "players" else skills)
+            notes = {"players": "в данже игроки — ухожу, ищу другой данж", "time": "время на данж вышло — выхожу",
+                     "hp": "мало здоровья — выхожу и иду домой", "bag": "сумка полна — несу добычу домой"}
+            if result in notes:
+                self.note(notes[result])
+            # При игроках рядом или малом здоровье — без боя: выход сразу.
+            self.exit_dungeon(d, None if result in ("players", "hp") else skills)
             if result == "players":
                 continue
             self.status = "домой"
             self.go_place(home, d.get("safety") or "yellow")
             self.deposit(d)
-            self.runs += 1
-            self.note(f"данж {self.runs} пройден: убито {self.kills}, добыча {self.loots}")
-            self.alert(f"run:{self.runs}", "Бот: данж пройден",
-                       f"данжей: {self.runs}, убито: {self.kills}, добыча: {self.loots}")
+            if result == "done":
+                self.runs += 1
+                self.note(f"данж {self.runs} пройден: убито {self.kills}, добыча {self.loots}")
+                self.alert(f"run:{self.runs}", "Бот: данж пройден",
+                           f"данжей: {self.runs}, убито: {self.kills}, добыча: {self.loots}")
+            self.services(d)
             if limit and self.runs >= limit:
                 return

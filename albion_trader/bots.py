@@ -275,8 +275,8 @@ class Bot(TasksMixin, DungeonMixin):
     def act(self, fn: Callable[[Desktop, GameWindow, bool], None]) -> None:
         self.manager.act(self, fn)
 
-    def click_at(self, fx: float, fy: float, button: str = "left") -> None:
-        jx, jy = self.rng.uniform(-0.004, 0.004), self.rng.uniform(-0.004, 0.004)
+    def click_at(self, fx: float, fy: float, button: str = "left", jitter: bool = True) -> None:
+        jx, jy = (self.rng.uniform(-0.004, 0.004), self.rng.uniform(-0.004, 0.004)) if jitter else (0.0, 0.0)
         self.manager.record({"a": "click", "x": round(fx + jx, 4), "y": round(fy + jy, 4), "b": button})
         self.act(lambda d, w, bg: d.click(w, fx + jx, fy + jy, button, background=bg))
 
@@ -465,7 +465,11 @@ class Bot(TasksMixin, DungeonMixin):
                 raise BotError(str(e)) from None
             _z, ex, ey, nxt = hops[0]
             self.status = f"в пути: {router.name(nxt)} (осталось переходов: {len(hops)})"
-            self.walk_path(ex, ey, tol=1.5)
+            for _walk in range(3):        # дойти до выхода (с повтором, если не дошли)
+                self.walk_path(ex, ey, tol=1.5)
+                px, py = self.pos()
+                if self.feed.zone != cur or math.hypot(ex - px, ey - py) <= 5:
+                    break
             if self.feed.zone == cur and not self.wait_zone(cur, 6):
                 for _try in range(3):     # встать точно на выход
                     px, py = self.pos()
@@ -496,23 +500,24 @@ class Bot(TasksMixin, DungeonMixin):
             raise BotError("рядом ресурс — клик калибровки начнёт его сбор; отойдите на открытое место "
                            "(в 7 м вокруг не должно быть ресурсов)")
         moves = []
-        for sx, sy in ((d, 0), (-d, 0), (0, d), (0, -d)):
+        for sx, sy in ((d, 0), (-d, 0), (0, d), (0, -d), (0, 2 * d), (0, -2 * d)):
             before = self.settle(timeout=2.0)
             requests = self.feed.requests
-            self.click_at(*old.fractions(sx, sy, aspect))
+            self.click_at(*old.fractions(sx, sy, aspect), jitter=False)
             self.wait(0.6)
             after = self.settle()
             if self.feed.requests == requests and not moves:
                 raise BotError("игра не отправила ни одного запроса после клика — клики не доходят до окна "
                                "(попробуйте ввод «с переключением окна» и запуск программы от администратора)")
             moves.append((after[0] - before[0], after[1] - before[1]))
-        cal = solve_calibration(d, moves[0], moves[1], moves[2], moves[3], old.cx, old.cy, aspect)
+        cal = solve_calibration(d, moves[0], moves[1], moves[2], moves[3], old.cx, old.cy, aspect,
+                                moves[4], moves[5])
         with self.manager.lock:
             self.manager.config["calib"][size_key(win)] = asdict(cal)
             self.manager.save()
         self.note("калибровка готова: вправо — ({:.1f}, {:.1f}) м, вниз — ({:.1f}, {:.1f}) м на высоту окна, "
-                  "персонаж в точке ({:.2f}, {:.2f}) окна".format(
-                      cal.m[0][0], cal.m[1][0], cal.m[0][1], cal.m[1][1], cal.cx, cal.cy))
+                  "персонаж в точке ({:.2f}, {:.2f}) окна, перспектива {:+.2f}".format(
+                      cal.m[0][0], cal.m[1][0], cal.m[0][1], cal.m[1][1], cal.cx, cal.cy, cal.p))
         return cal
 
     def snapshot(self) -> dict:

@@ -27,7 +27,16 @@ DEFAULTS = {
                 "retreat_hp": 20, "loot_bags": True, "open_chests": True, "chest_wait": 8,
                 "explore_min": 4, "max_min": 40, "max_floors": 8,
                 # Цикл из города: где сдавать добычу, где искать порталы, от кого уходить.
-                "exit_key": "", "exit_channel": 10,
+                "exit_key": "", "exit_channel": 10, "retreat_exit": False,
+                # Бой: профиль умений (условия @), кайт, безопасность.
+                "kite": False, "kite_dist": 5, "max_pack": 3, "rest_hp": 60, "max_mob_tier": 0,
+                "skip_elite": False,
+                # Угрозы: друзья не в счёт, сила снаряжения, клавиши побега.
+                "friends": "", "danger_ip": 0, "escape_key": "", "mount_key": "",
+                "portal_enchant_min": 0, "portal_enchant_max": 4,
+                # Сумка и обслуживание.
+                "bag_slots": 0, "repair_place": "", "repair_macro": "", "repair_every": 0,
+                "restock_place": "", "restock_macro": "", "restock_every": 0,
                 "home_place": "", "deposit_macro": "", "safety": "yellow", "search_zones": 4,
                 "search_min": 8, "portal_kinds": ["solo"], "avoid_players": True, "player_radius": 45,
                 "runs": 0},

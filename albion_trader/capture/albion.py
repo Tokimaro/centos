@@ -88,6 +88,11 @@ DEFAULT_EVENTS = {
     "new_portal_entrance": 323,
     "new_portal_exit": 324,
     "new_random_dungeon_exit": 325,
+    # Сумка и снаряжение (бот): предмет в сумку, перегруз, прочность.
+    "inventory_put_item": 26,
+    "durability_changed": 97,
+    "overload_mode_update": 333,
+    "encumbered_restricted": 612,
 }
 EVENT_MOVE = 3  # самое частое событие (движение) — разбираем, только пока открыт радар
 

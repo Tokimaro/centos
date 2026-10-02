@@ -148,6 +148,7 @@ class FakeGame:
         self.exit_map = {}        # зона данжа → (куда выводит быстрый выход, позиция)
         self.exiting = None       # (pid, когда закончится задержка)
         self.damage_on_exit = 0   # сколько первых попыток выхода собьёт урон
+        self.items_per_loot = 0   # предметов в сумку с каждой добычи
 
     def add_window(self, pid, name, pos=(0.0, 0.0), zone="0201", rect=(0, 0, 1600, 900)):
         port = 50000 + pid
@@ -268,6 +269,8 @@ class FakeGame:
         pts = self.manager.config["points"]
         if self.opened is not None and pts.get("loot_all") and \
                 math.hypot(fx - pts["loot_all"][0], fy - pts["loot_all"][1]) < 0.01:
+            for _ in range(self.items_per_loot):
+                self.event(pid, "inventory_put_item", {0: pid})
             self.event(pid, "leave", {0: self.opened})
             self.loot.pop(self.opened, None)
             self.opened = None
@@ -398,6 +401,18 @@ class GeometryTest(unittest.TestCase):
         self.assertAlmostEqual(fx, 0.5 + 0.09)
         self.assertAlmostEqual(fy, 0.6)
 
+    def test_far_targets_keep_direction_with_perspective(self):
+        cal = Calibration(m=[[14.2, 19.8], [15.5, -23.1]], p=-0.26)
+        for w in ((-200, -150), (300, -400), (1000, 1000), (-10, 5), (5, -6), (0, 900)):
+            s = cal.to_screen(*w)
+            k = min(1.0, 0.3 / math.hypot(*s))
+            back = cal.to_world(s[0] * k, s[1] * k)
+            cos = (back[0] * w[0] + back[1] * w[1]) / (math.hypot(*back) * math.hypot(*w))
+            self.assertGreater(cos, 0.99, w)
+        near = cal.to_world(*cal.to_screen(4.0, -3.0))
+        self.assertAlmostEqual(near[0], 4.0, places=4)
+        self.assertAlmostEqual(near[1], -3.0, places=4)
+
     def test_broken_calibration(self):
         with self.assertRaises(BotError):
             Calibration(m=[[1, 2], [2, 4]]).to_screen(1, 1)
@@ -445,7 +460,7 @@ class MacroTest(unittest.TestCase):
         self.assertEqual(market_price(1000, "buy", 5), 1005)
         self.assertEqual(market_price(1, "sell", 5), 1)
         self.assertIsNone(market_price(None, "sell", 1))
-        self.assertEqual(parse_skills("q:3 W:10, e"), [("q", 3.0), ("w", 10.0), ("e", 5.0)])
+        self.assertEqual([(s.key, s.cd) for s in parse_skills("q:3 W:10, e")], [("q", 3.0), ("w", 10.0), ("e", 5.0)])
         with self.assertRaisesRegex(ValueError, "не число"):
             parse_skills("q:x")
         with self.assertRaises(ValueError):
@@ -590,6 +605,13 @@ class CalibrationTest(Base):
             self.assertAlmostEqual(got, want, delta=abs(want) * 0.1)
         self.assertAlmostEqual(cal.cx, 0.47, delta=0.01)
         self.assertAlmostEqual(cal.cy, 0.56, delta=0.015)
+        self.assertAlmostEqual(cal.p, -0.25, delta=0.05)          # перспектива модели
+        # Один клик далеко от персонажа попадает почти точно (перспектива учтена).
+        for target in ((6.0, 4.0), (-5.0, -3.0), (2.0, -7.0), (-6.0, 5.0)):
+            x0, y0 = self.game.pos[1]
+            self.bot.click_world(target[0], target[1], step=0.45)
+            x1, y1 = self.game.pos[1]
+            self.assertLess(math.hypot(x1 - x0 - target[0], y1 - y0 - target[1]), 0.6, target)
         saved = json.loads((Path(self.tmp.name) / "bots.json").read_text())["calib"]["1600x900"]
         self.assertTrue(saved["measured"])
         self.game.add_node(1, 801, 2.0, 1.0)
@@ -1054,11 +1076,11 @@ class SessionAndOverlayTest(Base):
         self.assertTrue(all(port == 50001 for _t, port, _p in packets))
         actions = read_log(folders[0] / "log.jsonl")
         self.assertEqual(actions[0]["a"], "start")
-        self.assertEqual(sum(1 for a in actions if a["a"] == "click"), 4)
+        self.assertEqual(sum(1 for a in actions if a["a"] == "click"), 6)
         self.assertTrue(any(a["a"] == "note" and "калибровка готова" in a["text"] for a in actions))
         # Сводка видит пакеты, клики и журнал (зона уже известна до записи — смен зон нет).
         text = summarize(folders[0], lambda: ClientFeed(lambda: Radar(clock=self.clock)))
-        for s in ("Сессия бота:", "move", "click 4", "калибровка готова"):
+        for s in ("Сессия бота:", "move", "click 6", "калибровка готова"):
             self.assertIn(s, text)
 
     def test_summary_shows_zones_and_unknown_codes(self):
@@ -1108,6 +1130,182 @@ class SessionAndOverlayTest(Base):
         ov = self.mgr.overlay()
         self.assertEqual((ov["zone"], ov["target"]), ("0201", [30, 0]))
         self.bot.stop()
+
+
+class SkillsAndThreatsTest(unittest.TestCase):
+    def test_skill_conditions(self):
+        from albion_trader.bot_core import skill_ready
+        s = parse_skills("q:3 w:10@open e:20@boss 2:30@hp<40@self f:15@cast=1.5 r:9@hp>80")
+        self.assertEqual([x.key for x in s], ["q", "w", "e", "2", "f", "r"])
+        q, w, e, pot, f, r = s
+        self.assertTrue(skill_ready(q, None, False, False))
+        self.assertTrue(skill_ready(w, 90, False, True))
+        self.assertFalse(skill_ready(w, 90, False, False))
+        self.assertFalse(skill_ready(e, 90, False, True))
+        self.assertTrue(skill_ready(e, 90, True, False))
+        self.assertTrue(skill_ready(pot, 30, False, False))
+        self.assertFalse(skill_ready(pot, 50, False, False))
+        self.assertFalse(skill_ready(pot, None, False, False))
+        self.assertTrue(pot.self_cast)
+        self.assertEqual(f.cast, 1.5)
+        self.assertFalse(skill_ready(r, 70, False, False))
+        self.assertTrue(skill_ready(r, None, False, False))
+        with self.assertRaisesRegex(ValueError, "непонятное условие"):
+            parse_skills("q:3@sometimes")
+
+    def test_threat_levels(self):
+        from albion_trader.bot_threat import CAUTION, DANGER, ThreatTracker, friends_of
+        clock = Clock()
+        f = ClientFeed(lambda: Radar(clock=clock), clock=clock)
+        f.feed(pb.packet(pb.response(DEFAULT_OPCODES["join"], {0: 1, 2: "Me", 8: "0201", 9: [0.0, 0.0]})))
+
+        def player(cid, name, x, y, faction=0):
+            f.feed(pb.packet(pb.event(DEFAULT_EVENTS["new_character"], {0: cid, 1: name, 12: [float(x), float(y)],
+                                                                         53: faction})))
+        d = {"avoid_players": True, "player_radius": 45, "friends": "Buddy; pal"}
+        self.assertEqual(friends_of(d), {"buddy", "pal"})
+        player(10, "Walker", 30, 0)
+        player(11, "Buddy", 5, 0, 255)            # друг — не угроза даже с флагом
+        player(12, "Far", 200, 0, 255)            # далеко
+        tr = ThreatTracker()
+        t = tr.assess(f, (0, 0), d)
+        self.assertEqual([(x.name, x.level) for x in t], [("Walker", CAUTION)])
+        f.feed(pb.packet(pb.event(DEFAULT_EVENTS["move"], {0: 10, 1: [20.0, 0.0]})))
+        t = tr.assess(f, (0, 0), d)
+        self.assertIn("приближается", t[0].reasons)
+        player(13, "Gank", 25, 5, 255)
+        t = tr.assess(f, (0, 0), d)
+        self.assertEqual(t[0].name, "Gank")
+        self.assertEqual(t[0].level, DANGER)
+        self.assertIn("враждебный", t[0].text())
+        self.assertIn("группа 2", t[0].reasons)
+
+
+class CombatTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.window("Hero", zone="DNG1", pos=(0.0, 0.0))
+        self.mgr.config["points"] = dict(ALL_POINTS)
+        self.bot.calibrate()
+        self.game.join(1, "Hero", "DNG1", (0.0, 0.0))
+        self.bot.start_dungeon_state()
+
+    def d(self, **kw):
+        return {**self.mgr.task_config("dungeon"), **kw}
+
+    def test_prefers_small_packs_and_filters(self):
+        g = self.game
+        for i, (x, y) in enumerate(((10, 0), (11, 1), (10, -1), (12, 0))):   # группа из 4
+            g.add_mob(1, 100 + i, x, y)
+        g.add_mob(1, 200, -16, 0)                                               # одиночка дальше
+        self.assertEqual(self.bot.pick_mob(self.d(max_pack=3), set()).id, 200)
+        self.assertIn(self.bot.pick_mob(self.d(max_pack=0), set()).id, (100, 101, 102, 103))
+        self.bot.mob_info = lambda m: {"tier": 8 if m.id == 200 else 4, "category": "champion" if m.id == 100 else ""}
+        self.assertNotEqual(self.bot.pick_mob(self.d(max_pack=3, max_mob_tier=6), set()).id, 200)
+        picked = self.bot.pick_mob(self.d(max_pack=0, skip_elite=True), set()).id
+        self.assertNotEqual(picked, 100)
+        self.assertEqual(self.bot.pick_mob(self.d(), set(), attacked=True).id, 100)
+
+    def test_skill_profile_boss_only_and_cast(self):
+        self.game.add_mob(1, 300, 6, 0)
+        d = self.d()
+        skills = parse_skills("e:1@boss q:1@cast=2")
+        self.bot.fight(self.bot.feed.entity(300), d, skills, set())
+        self.assertNotIn((1, "e"), self.desk.keys)            # «только по боссу» не нажата
+        self.assertIn((1, "q"), self.desk.keys)
+        self.game.add_mob(1, 301, 6, 2, name="T5_MOB_BOSS")
+        self.bot.fight(self.bot.feed.entity(301), d, skills, set())
+        self.assertIn((1, "e"), self.desk.keys)
+
+    def test_kiting_steps_back(self):
+        self.game.add_mob(1, 400, 2.5, 0, hp=10_000)
+        start = self.clock.t
+        self.clock.limit = start + 6
+        with self.assertRaises(BotStopped):
+            self.bot.fight(self.bot.feed.entity(400), self.d(kite=True, kite_dist=5), parse_skills("q:1"), set())
+        self.assertLess(self.game.pos[1][0], -1.0)             # отошёл от моба (моб справа)
+
+    def test_answers_hits_and_rests_between_packs(self):
+        g = self.game
+        g.add_mob(1, 500, 8, 0)
+        self.bot.mob_info = lambda m: {"tier": 9}
+        d = self.d(max_mob_tier=6, explore_min=0.2, rest_hp=60)
+        g.event(1, "regeneration_health_changed", {0: 1, 2: 1000.0, 3: 1000.0})
+        g.event(1, "health_update", {0: 1, 3: 400.0})          # нас ударили
+        regen = []
+
+        def heal_up():
+            if not regen and self.clock.t > 1060:
+                regen.append(1)
+                g.event(1, "regeneration_health_changed", {0: 1, 2: 950.0, 3: 1000.0})
+        self.clock.on_sleep.append(heal_up)
+        self.assertEqual(self.bot.clear_floor(d, parse_skills("q:1"), self.clock.t), "cleared")
+        self.assertIn("атакован — отвечаю", self.texts())
+        self.assertNotIn(500, g.mobs)
+        self.assertTrue(any("восстанавливается" in t for t in self.texts()))
+
+    def test_bag_full_and_overload(self):
+        g = self.game
+        g.items_per_loot = 3
+        g.add_loot(1, 600, 5, 5)
+        self.bot.items_base = self.bot.feed.items_put
+        d = self.d(bag_slots=3, explore_min=0.2)
+        self.assertEqual(self.bot.clear_floor(d, [], self.clock.t), "bag")
+        self.assertIn("сумка полна — домой", self.texts())
+        self.bot.items_base = self.bot.feed.items_put
+        g.event(1, "overload_mode_update", {0: 1, 1: True})
+        self.assertTrue(self.bot.bag_full(self.d()))
+        g.event(1, "overload_mode_update", {0: 99, 1: False})  # чужой — не про нас
+        self.assertTrue(self.bot.feed.overloaded)
+
+    def test_low_hp_quick_exit(self):
+        g = self.game
+        g.exit_map = {"DNG1": ("ROAD", (24.0, 30.0))}
+        d = self.d(exit_key="a", retreat_exit=True, retreat_hp=30)
+        self.mgr.command({"action": "configure", "dungeon": {"exit_key": "a", "retreat_exit": True, "retreat_hp": 30}})
+        g.event(1, "regeneration_health_changed", {0: 1, 2: 100.0, 3: 1000.0})
+        self.assertEqual(self.bot.clear_dungeon(d, []), "hp")
+        self.bot.exit_dungeon(d)
+        self.assertEqual(g.zone[1], "ROAD")
+
+    def test_escape_in_open_world(self):
+        g = self.game
+        g.join(1, "Hero", "ROAD", (0.0, 0.0))
+        g.add_player(1, 700, 0, 10, zone="ROAD", name="Gank", faction=255)
+        d = self.d(escape_key="3", mount_key="a")
+        self.assertTrue(self.bot.avoid_players(d))
+        self.assertIn((1, "3"), self.desk.keys)
+        self.assertIn((1, "a"), self.desk.keys)
+        self.assertLess(g.pos[1][1], -25)                       # убежал далеко
+        self.assertTrue(any(t == "Бот: опасные игроки" for _k, t, _x in self.mgr.alerts))
+        self.assertFalse(self.bot.avoid_players(self.d(friends="gank")))
+
+    def test_explore_remembers_blocked_directions(self):
+        self.game.ignore_clicks = True
+        visited = set()
+        self.bot.explore(visited)
+        self.assertEqual(len(self.bot.explore_failed), 1)
+
+
+class DungeonServicesTest(DungeonRunTest):
+    def test_portal_enchant_filter(self):
+        self.game.join(1, "Hero", "ROAD", (-46.0, 0.0))
+        d = self.mgr.task_config("dungeon")
+        self.assertIsNotNone(self.bot.pick_portal(d))
+        self.assertIsNone(self.bot.pick_portal({**d, "portal_enchant_min": 1}))
+
+    def test_bag_full_goes_home_and_services_run(self):
+        self.game.items_per_loot = 5
+        self.mgr.config["places"]["кузня"] = {"zone": "CITYA", "x": 6.0, "y": 0.0}
+        self.mgr.config["macros"]["ремонт"] = "click 0.61 0.43\nexpect 2000"
+        self.mgr.command({"action": "configure", "dungeon": {"bag_slots": 5, "runs": 1, "repair_every": 1,
+                                                             "repair_place": "кузня", "repair_macro": "ремонт"}})
+        self.bot.run("dungeon_run")
+        texts = self.texts()
+        self.assertIn("сумка полна — несу добычу домой", texts)
+        self.assertIn("добыча сдана в сундук", texts)
+        self.assertEqual(self.bot.runs, 1, texts[-5:])         # второй заход дошёл до конца
+        self.assertIn("ремонт: готово", texts)
 
 
 # --- команды и запись -------------------------------------------------------------
