@@ -28,7 +28,9 @@ SOLVE_SAMPLES = 80          # брать в подбор
 MIN_SAMPLES = 12            # меньше — ключ не подбирать (легко ошибиться)
 CONFIDENT = 20              # ключ по стольким образцам — опора для следующего интервала
 PRIOR = 0.02                # при прочих равных — игроки ближе ко мне
-KEEP_WINDOWS = 4
+KEEP_WINDOWS = 6            # образцы — за столько интервалов
+KEEP_KEYS = 60              # ключи — 10 минут: стоящий игрок раскодируется и позже
+PRIOR_SINGLE = 0.15         # стоящий (одна позиция, без опоры) — сильнее «рядом со мной»
 
 
 def window_of(ticks: int) -> int:
@@ -39,24 +41,33 @@ def _dec(b: bytes, k2: int, k3: int, k1: int = 0) -> float:
     return struct.unpack("<f", bytes((b[0], b[1] ^ k1, b[2] ^ k2, b[3] ^ k3)))[0]
 
 
-def _refine_k1(rows: list, axis: int, k2: int, k3: int) -> int:
-    """Третий байт ключа — по плавности путей (с неверным путь «дрожит» до метра)."""
+def _pairs(rows: list, axis: int) -> list:
     by: dict = {}
-    for ticks, oid, enc, _speed in rows:
+    for _ticks, oid, enc, _speed in rows:
         by.setdefault(oid, []).append(enc[axis * 4:axis * 4 + 4])
-    pairs = [(a, b) for lst in by.values() for a, b in zip(lst, lst[1:]) if a != b]
+    return [(a, b) for lst in by.values() for a, b in zip(lst, lst[1:]) if a != b]
+
+
+def _tv(pairs: list, k2: int, k3: int, k1: int, limit: float = math.inf) -> float:
+    tv = 0.0
+    for a, b in pairs:
+        tv += abs(_dec(b, k2, k3, k1) - _dec(a, k2, k3, k1))
+        if tv >= limit:
+            break
+    return tv
+
+
+def _refine_low(rows: list, axis: int, k2: int, k3: int) -> tuple[int, int]:
+    """Третий байт ключа — по плавности путей (с неверным путь «дрожит» до метра)."""
+    pairs = _pairs(rows, axis)
     if len(pairs) < 5:
-        return 0
+        return k2, 0
     best = (math.inf, 0)
     for k1 in range(256):
-        tv = 0.0
-        for a, b in pairs:
-            tv += abs(_dec(b, k2, k3, k1) - _dec(a, k2, k3, k1))
-            if tv >= best[0]:
-                break
+        tv = _tv(pairs, k2, k3, k1, best[0])
         if tv < best[0]:
             best = (tv, k1)
-    return best[1]
+    return k2, best[1]
 
 
 def move_parts(block) -> tuple[int, bytes, float] | None:
@@ -68,6 +79,17 @@ def move_parts(block) -> tuple[int, bytes, float] | None:
     if not math.isfinite(speed) or not 0 <= speed < 50:
         speed = 0.0
     return ticks, bytes(block[9:17]), speed
+
+
+def _subsample(rows: list) -> list:
+    """Для подбора: первая позиция каждого игрока (стоящие — только она) и равномерно
+    остальные, всего не больше SOLVE_SAMPLES + число игроков."""
+    first: dict = {}
+    for r in rows:
+        first.setdefault(r[1], r)
+    rest = [r for r in rows if first.get(r[1]) is not r]
+    step = max(1, len(rest) // SOLVE_SAMPLES)
+    return sorted([*first.values(), *rest[::step]])[:SOLVE_SAMPLES + 120]
 
 
 class PositionDecoder:
@@ -82,6 +104,8 @@ class PositionDecoder:
         self.ticks = 0                       # последняя известная метка времени игры
         self.version = 0                     # растёт при каждом новом подборе ключа
         self.checked: set = set()            # интервалы, перепроверенные после окончания
+        self.per_player: dict[int, dict] = {}  # интервал → {id: образцов}
+        self.chained: dict[int, bool] = {}     # интервал подобран с опорой на прошлый
 
     # --- данные --------------------------------------------------------
     def observe(self, ticks: int) -> None:
@@ -92,17 +116,24 @@ class PositionDecoder:
         self.observe(ticks)
         w = window_of(ticks)
         lst = self.samples.setdefault(w, [])
-        if len(lst) < MAX_SAMPLES:
+        per = self.per_player.setdefault(w, {})
+        # Первые образцы каждого игрока — всегда (стоящих не вытесняет толпа идущих).
+        if len(lst) < MAX_SAMPLES or (per.get(oid, 0) < 3 and len(lst) < MAX_SAMPLES * 2):
             lst.append((ticks, oid, enc, speed))
+            per[oid] = per.get(oid, 0) + 1
         for old in [k for k in self.samples if k < w - KEEP_WINDOWS]:
             self.samples.pop(old, None)
+            self.per_player.pop(old, None)
+        for old in [k for k in self.keys if k < w - KEEP_KEYS]:
             self.keys.pop(old, None)
             self.win_last.pop(old, None)
+            self.checked.discard(old)
+            self.chained.pop(old, None)
 
     # --- ключ -----------------------------------------------------------
     @staticmethod
     def _cost(rows: list, axis: int, k2: int, k3: int, center: float, prev: dict,
-              limit: float = math.inf, prior: float = PRIOR) -> float:
+              limit: float = math.inf, prior: float = PRIOR, single: frozenset = frozenset()) -> float:
         """Насколько правдоподобен ключ: игроки рядом со мной (``center``), пути без
         скачков (не быстрее своей скорости), продолжение путей прошлого интервала (``prev``)."""
         cost = 0.0
@@ -114,7 +145,7 @@ class PositionDecoder:
                 continue
             if abs(v - center) > VIEW:
                 cost += 5
-            cost += prior * abs(v - center)
+            cost += (PRIOR_SINGLE if oid in single and prior else prior) * abs(v - center)
             ref = last.get(oid) or prev.get(oid)
             if ref is not None:
                 dt = abs(ticks - ref[0]) / 1e7
@@ -133,10 +164,14 @@ class PositionDecoder:
             for t in tops:
                 for tt in (t, t ^ 1):
                     votes[b3 ^ tt] = votes.get(b3 ^ tt, 0) + 1
+        counts: dict = {}
+        for r in rows:
+            counts[r[1]] = counts.get(r[1], 0) + 1
+        single = frozenset(oid for oid, n in counts.items() if n == 1 and oid not in prev)
         best = (math.inf, 0, 0)
         for k3 in sorted(votes, key=lambda k: -votes[k])[:4]:
             for k2 in range(256):
-                cost = self._cost(rows, axis, k2, k3, center, prev, best[0])
+                cost = self._cost(rows, axis, k2, k3, center, prev, best[0], single=single)
                 if cost < best[0]:
                     best = (cost, k2, k3)
         return best
@@ -154,8 +189,7 @@ class PositionDecoder:
             return known
         # Образцы у границы интервала не берём: ключ там мог быть ещё прежним.
         inner = [r for r in rows if EDGE < (r[0] - OFFSET) % PERIOD < PERIOD - EDGE] or rows
-        step = max(1, len(inner) // SOLVE_SAMPLES)
-        sample = sorted(inner[::step])
+        sample = _subsample(inner)
         cx, cy = self.center()
         # Опора — позиции из уверенно разобранного прошлого интервала.
         pk = self.keys.get(w - 1)
@@ -164,11 +198,14 @@ class PositionDecoder:
         prev_y = {oid: (t, y) for oid, (t, _x, y) in trusted.items()}
         _cx, k2x, k3x = self._solve_axis(sample, 0, cx, prev_x)
         _cy, k2y, k3y = self._solve_axis(sample, 1, cy, prev_y)
-        srt = sorted(inner)[:SOLVE_SAMPLES * 2]
-        new = ((k2x, k3x, _refine_k1(srt, 0, k2x, k3x)), (k2y, k3y, _refine_k1(srt, 1, k2y, k3y)), len(rows))
+        srt = sorted(inner)[:SOLVE_SAMPLES * 3]
+        k2x, k1x = _refine_low(srt, 0, k2x, k3x)
+        k2y, k1y = _refine_low(srt, 1, k2y, k3y)
+        new = ((k2x, k3x, k1x), (k2y, k3y, k1y), len(rows))
         if not known or new[:2] != known[:2]:
             self.version += 1
         self.keys[w] = new
+        self.chained[w] = bool(trusted)
         return new
 
     def _recheck(self, w: int, known: tuple):
@@ -183,10 +220,11 @@ class PositionDecoder:
         for axis, c in ((0, cx), (1, cy)):
             k2, k3, k1 = known[axis]
             cur = self._cost(rows, axis, k2, k3, c, {}, prior=0.0)
-            alt_cost, a2, a3 = self._solve_axis(rows[::max(1, len(rows) // SOLVE_SAMPLES)], axis, c, {})
+            alt_cost, a2, a3 = self._solve_axis(_subsample(rows), axis, c, {})
             alt = self._cost(rows, axis, a2, a3, c, {}, prior=0.0)
             if (a2, a3) != (k2, k3) and alt + 5 < cur:
-                out[axis] = (a2, a3, _refine_k1(rows, axis, a2, a3))
+                a2, a1 = _refine_low(rows, axis, a2, a3)
+                out[axis] = (a2, a3, a1)
                 changed = True
         if changed:
             self.keys[w] = (out[0], out[1], known[2])

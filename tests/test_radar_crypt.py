@@ -82,13 +82,59 @@ class DecoderTest(unittest.TestCase):
 
     def test_positions_recovered(self):
         for seed in (1, 2, 3):
-            errors, decoded, total, r = self.run_model(seed)
+            errors, decoded, total, r = self.run_model(seed, seconds=40)
             errors.sort()
             self.assertGreater(decoded / total, 0.9, seed)
             self.assertLess(errors[len(errors) // 2], 0.5, seed)           # медиана — доли метра
             self.assertLess(errors[int(len(errors) * 0.9)], 3.0, seed)     # 90 % — до 3 м
             snap = r.snapshot(touch=False)
             self.assertEqual(sum(e["kind"] == "player" for e in snap["entities"]), 8)
+
+    def run_crowd(self, seed, standing=15, movers=3, seconds=40):
+        """Город: толпа стоит вокруг (3–15 м), несколько ходят; стоящие появляются по ходу."""
+        rng = random.Random(seed)
+        m = Model(seed, players=movers)
+        r = Radar()
+        r.on_join({0: 1, 2: "Me", 9: list(m.center)})
+        r.me["x"], r.me["y"] = m.center
+        crowd = {}
+        for i in range(standing):
+            ang, dist = rng.uniform(0, 2 * math.pi), rng.uniform(3, 15)
+            crowd[2000 + i] = (m.center[0] + dist * math.cos(ang), m.center[1] + dist * math.sin(ang),
+                               rng.randrange(0, int(seconds * 10)))
+        ticks = T0 + 30_000_000
+        r.decoder.observe(ticks)
+        for oid, (x, y, _a, _s) in m.players.items():
+            r.on_event("new_character", {0: oid, 1: f"M{oid}", 12: 0, 13: "", 16: enc(x, y, m.key(ticks))})
+        for i in range(int(seconds * 10)):
+            ticks += 1_000_000
+            m.step(0.1)
+            r.decoder.observe(ticks)
+            for oid, (x, y, at) in crowd.items():
+                if at == i:                                  # появился и стоит
+                    p = enc(x, y, m.key(ticks))
+                    r.on_event("new_character", {0: oid, 1: f"S{oid}", 12: 0, 13: "", 16: p, 17: p})
+            for oid, (x, y, _a, speed) in m.players.items():
+                k = m.key(ticks)
+                r.on_event("move", {0: oid, 1: move_block(ticks, enc(x, y, k), speed, enc(x, y, k))})
+        ticks += 200_000_000                                 # прошло ещё 20 с
+        for _ in range(30):
+            ticks += 1_000_000
+            m.step(0.1)
+            for oid, (x, y, _a, speed) in m.players.items():
+                k = m.key(ticks)
+                r.on_event("move", {0: oid, 1: move_block(ticks, enc(x, y, k), speed, enc(x, y, k))})
+        snap = r.snapshot(touch=False)
+        found = {e["id"]: e for e in snap["entities"] if e["kind"] == "player"}
+        errs = [math.hypot(found[oid]["x"] - x, found[oid]["y"] - y) for oid, (x, y, _a) in crowd.items()
+                if oid in found]
+        return len(errs), sorted(errs)
+
+    def test_standing_crowd(self):
+        for seed in (1, 2, 3):
+            n, errs = self.run_crowd(seed)
+            self.assertGreaterEqual(n, 14, seed)                       # стоящие не теряются
+            self.assertLess(errs[len(errs) // 2], 2.0, seed)
 
     def test_move_parts_and_edges(self):
         self.assertIsNone(rc.move_parts(b"\x03" * 10))
@@ -100,6 +146,29 @@ class DecoderTest(unittest.TestCase):
         self.assertIsNone(d.decode(1, b"\x00" * 8))                       # времени ещё нет
         d.add(1, T0, b"\x00" * 8)
         self.assertIsNone(d.decode(1, b"\x00" * 8, T0))                   # мало образцов — ключа нет
+
+    def test_pending_players_listed_and_threat(self):
+        from albion_trader.bot_threat import DANGER, ThreatTracker
+        r = Radar()
+        r.on_join({0: 1, 2: "Me", 9: [100.0, 100.0]})
+        r.decoder.observe(T0 + 30_000_000)
+        r.on_event("new_character", {0: 7, 1: "Gank", 12: 0, 13: "", 53: 255, 16: b"\x01" * 8})
+        r.on_event("new_character", {0: 8, 1: "Calm", 12: 0, 13: "", 16: b"\x02" * 8})
+        snap = r.snapshot(touch=False)
+        self.assertEqual(sorted(p["name"] for p in snap["pending_players"]), ["Calm", "Gank"])
+        self.assertTrue(snap["encrypted"])
+        self.assertIsNone(snap["pending_players"][0]["dist"])
+
+        class Feed:
+            radar = r
+
+            @staticmethod
+            def entities(kind=None):
+                return []
+        threats = ThreatTracker().assess(Feed, (100.0, 100.0), {"player_radius": 45})
+        self.assertEqual([(t.name, t.level) for t in threats], [("Gank", DANGER)])   # мирный без позиции — нет
+        self.assertIn("позиция уточняется", threats[0].text())
+        self.assertEqual((threats[0].entity.x, threats[0].entity.faction), (100.0, 255))
 
     def test_plain_positions_untouched(self):
         r = Radar()

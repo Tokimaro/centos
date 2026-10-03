@@ -76,6 +76,23 @@ class ThreatTracker:
                 score += min(2, group)
                 reasons.append(f"группа {group + 1}")
             out.append(Threat(e, DANGER if score >= 3 else CAUTION, dist, reasons))
+        # Враждебные, чья позиция ещё не раскодирована (сервер шифрует координаты):
+        # расстояние неизвестно — считать опасными на границе радиуса.
+        radar = getattr(feed, "radar", None)
+        for e in list(getattr(radar, "enc_pending", {}).values()):
+            if e.faction == 255 and (e.name or "").lower() not in friends:
+                out.append(Threat(_AtMe(e, pos), DANGER, radius, ["враждебный", "позиция уточняется"]))
         self.last = seen
         out.sort(key=lambda t: (-t.level, t.dist))
         return out
+
+
+class _AtMe:
+    """Игрок без позиции — для уклонения считать, что он рядом (направление неизвестно)."""
+
+    def __init__(self, ent, pos):
+        self._ent = ent
+        self.x, self.y = pos
+
+    def __getattr__(self, name):
+        return getattr(self._ent, name)

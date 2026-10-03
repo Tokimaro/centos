@@ -1108,8 +1108,8 @@ class RadarView {
     const replay = this.data.replay ? ` · <b>запись</b> ${fmt(this.data.replay.pos)}/${fmt(this.data.replay.duration)} с` : "";
     this.hud.innerHTML = this.error ? `<span class="bad">Нет связи: ${esc(this.error)}</span>`
       : `<b>${esc(me.name || "персонаж")}</b> · ${esc(me.zone_name || "зона неизвестна")} · (${fmt1(me.x)}, ${fmt1(me.y)})${replay}<br>
-        игроки ${n.player || 0}${hostile ? ` (<span style="color:#ff5a5a">враждебных ${hostile}</span>)` : ""} · мобы ${n.mob || 0}
-        · ресурсы ${n.resource || 0} · лут ${n.loot || 0} · объекты ${n.object || 0}${this.playersHint(n)}`
+        игроки ${n.player || 0}${(this.data.pending_players || []).length ? ` (+${this.data.pending_players.length} без позиции)` : ""}${hostile ? ` (<span style="color:#ff5a5a">враждебных ${hostile}</span>)` : ""} · мобы ${n.mob || 0}
+        · ресурсы ${n.resource || 0} · лут ${n.loot || 0} · объекты ${n.object || 0}${this.playersHint(n)}${this.data.encrypted ? '<br><span class="muted">позиции игроков на этом сервере закодированы — раскодированы подбором, примерно</span>' : ""}`
         + (this.opts.profile ? ` · профиль «${esc(this.opts.profile)}»` : "")
         + (bg ? `<br><span class="muted">${esc(bg)}</span>` : "");
   }

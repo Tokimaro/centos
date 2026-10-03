@@ -180,7 +180,8 @@ App.tab({
         html: (r) => `<span title="${esc((r.equipment || []).map((i) => `${i.slot}: ${i.name || i.id}`).join("\n"))}">${esc(r._weapon || "—")}</span>` },
       { key: "kb", title: "Убийств/смертей", sort: (r) => (r.kb ? r.kb.kills : -1),
         html: (r) => (r.kb ? `${fmt(r.kb.kills)} / ${fmt(r.kb.deaths)}` : "—") },
-      { key: "dist", title: "м", html: (r) => fmt(r.dist) },
+      { key: "dist", title: "м", html: (r) => r.pending ? '<span class="muted" title="позиция ещё раскодируется">уточняется</span>'
+          : `${r.approx ? "≈" : ""}${fmt(r.dist)}` },
     ], { sort: "dist", asc: true, empty: "Игроков рядом нет." });
     this.history = makeTable($("#radar-history", el), [
       { key: "name", title: "Игрок", html: (r) => `<b>${esc(r.name)}</b>` + (r.guild ? ` <span class="muted">[${esc(r.guild)}]</span>` : "") },
@@ -245,7 +246,8 @@ App.tab({
 
   renderPlayers() {
     const me = this.view.data.me, o = this.view.opts;
-    this.players.set(this.view.data.entities.filter((e) => e.kind === "player" && radarVisible(e, o, me))
+    const pending = (this.view.data.pending_players || []).filter((e) => radarVisible(e, o, me));
+    this.players.set([...this.view.data.entities.filter((e) => e.kind === "player" && radarVisible(e, o, me)), ...pending]
       .map((e) => ({ ...e, _st: playerStatus(e, me, o),
         _weapon: ((e.equipment || []).find((i) => i.slot === "оружие") || {}).name || "" })));
   },

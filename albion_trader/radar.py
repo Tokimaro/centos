@@ -664,7 +664,17 @@ class Radar:
                     d.update(player_power(d["equipment"], self.item_ip))
                 elif e.kind == KIND_MOB and self.mobs is not None:
                     d["mob"] = self.mob_info(e)
+                if e.id in self.enc_ids:
+                    d["approx"] = True          # позиция раскодирована подбором ключа
                 ents.append(d)
+            # Игроки, чья закодированная позиция ещё не раскодирована: без точки на карте.
+            pending = []
+            for e in self.enc_pending.values():
+                d = asdict(e)
+                d.update(dist=None, age=round(now - e.updated, 1), pending=True,
+                         equipment=self._items(e.equipment), flag=FACTIONS.get(e.faction, ""))
+                d.update(player_power(d["equipment"], self.item_ip))
+                pending.append(d)
             depleted = [{**x, "ago": round(now - x["at"])} for x in self.depleted.get(me["zone"], [])
                         if now - x["at"] < DEPLETED_KEEP]
             me["zone_type"] = self.zone_type(me["zone"]) if me["zone"] else ""
@@ -672,7 +682,8 @@ class Radar:
             codes = [{"code": c, "name": names.get(c), **info} for c, info in sorted(self.codes.items())]
             requests = self.requests_info()
         ents.sort(key=lambda d: d["dist"])
-        return {"me": me, "entities": ents, "codes": codes, "requests": requests, "now": now, "depleted": depleted,
+        return {"me": me, "entities": ents, "pending_players": pending, "encrypted": bool(self.enc_ids),
+                "codes": codes, "requests": requests, "now": now, "depleted": depleted,
                 "suggestions": self.guesser.suggestions(dict(self.state.ev) if self.state else {}),
                 "mob_offset": self.mob_offset,
                 "moves": bool(self.state and now < self.state.moves_until)}
