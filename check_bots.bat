@@ -17,7 +17,7 @@ if not defined PY (
 )
 if exist tests (
   echo === Автотесты ботов ===
-  %PY% -m unittest tests.test_bots tests.test_bot_nav tests.test_bot_win tests.test_bot_check
+  %PY% -m unittest tests.test_bots tests.test_bot_nav tests.test_bot_win tests.test_bot_check tests.test_bot_vision
   if errorlevel 1 (echo. & echo [!] Есть упавшие автотесты — пришлите вывод выше разработчику.) else (echo [OK] Автотесты прошли.)
   echo.
 )
