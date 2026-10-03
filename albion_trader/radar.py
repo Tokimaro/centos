@@ -543,11 +543,23 @@ class Radar:
             me["zone_type"] = self.zone_type(me["zone"]) if me["zone"] else ""
             names = {v: k for k, v in (self.state.ev.items() if self.state else ())}
             codes = [{"code": c, "name": names.get(c), **info} for c, info in sorted(self.codes.items())]
+            requests = self.requests_info()
         ents.sort(key=lambda d: d["dist"])
-        return {"me": me, "entities": ents, "codes": codes, "now": now, "depleted": depleted,
+        return {"me": me, "entities": ents, "codes": codes, "requests": requests, "now": now, "depleted": depleted,
                 "suggestions": self.guesser.suggestions(dict(self.state.ev) if self.state else {}),
                 "mob_offset": self.mob_offset,
                 "moves": bool(self.state and now < self.state.moves_until)}
+
+    def requests_info(self) -> dict:
+        """Запросы клиента (исходящий трафик): видны ли они и какой из них — движение."""
+        st = self.state
+        if st is None or not hasattr(st, "request_codes"):
+            return {"total": 0, "codes": [], "move": None, "detected": False}
+        names = dict(st._op_names)
+        codes = [{"code": c, "name": names.get(c), "count": i["count"], "positions": i["positions"],
+                  "shape": i["shape"]} for c, i in sorted(st.request_codes.items(), key=lambda kv: -kv[1]["count"])]
+        return {"total": st.stats.get("requests", 0), "codes": codes[:40], "move": st.op.get("move"),
+                "move_seen": st._move_seen, "detected": "move_op_detected" in st.stats}
 
     # --- запись в базу (вызывается сервером) -----------------------------------
     def flush(self, conn) -> int:

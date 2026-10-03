@@ -184,6 +184,16 @@ def check_live(r: Report, url: str) -> bool:
         for s in d.get("suggestions") or []:
             r.add(WARN, f"Номер события «{s['name']}» на этом сервере, похоже, {s['code']} (настроен {s['current']}) — "
                         f"примените на вкладке «Радар» → «Коды событий»")
+    rq = d.get("requests") or {}
+    if r.check(bool(rq.get("total")), f"Запросы игры (исходящий трафик) видны: {rq.get('total')}",
+               "Запросов игры не видно — программа видит только входящий трафик, своя позиция не обновится "
+               "(запустите программу от администратора; VPN/виртуальный адаптер может скрывать исходящие пакеты)", WARN):
+        r.check(bool(rq.get("move_seen")),
+                f"Запрос движения: код {rq.get('move')}{' (опознан автоматически)' if rq.get('detected') else ''}",
+                "Запрос движения не найден — пройдитесь персонажем и повторите проверку", WARN)
+        for c in (rq.get("codes") or [])[:12]:
+            r.add(INFO, f"  запрос {c['code']} ({c.get('name') or '—'}): {c['count']} раз, с позицией {c['positions']}"
+                        f" — {c['shape']}")
     me = d.get("me") or {}
     if r.check(bool(me.get("zone")), f"Зона: {me.get('zone')} ({me.get('zone_name')})",
                "Зона не определена — смените зону в игре", WARN):

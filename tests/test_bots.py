@@ -139,6 +139,7 @@ class FakeGame:
         self.players = {}         # id → (x, y, зона, имя, флаг)
         self.harvest_ok = True
         self.ignore_clicks = False
+        self.move_op = DEFAULT_OPCODES["move"]   # частный сервер может слать движение под другим кодом
         self.center = (0.5, 0.5)  # где персонаж на экране на самом деле
         self.walls = []           # [(x0, y0, x1, y1)] — непроходимо
         self.attacking = None
@@ -203,7 +204,7 @@ class FakeGame:
                 break
             fx, fy = px, py
         self.pos[pid] = (fx, fy)
-        self.request(pid, DEFAULT_OPCODES["move"], {1: [float(fx), float(fy)]})
+        self.request(pid, self.move_op, {1: [float(fx), float(fy)]})
         zone = self.zone[pid]
         name = self.manager.feed_for(pid).character
         for ex, ey, target, _icon in (self.index.get(zone) or {}).get("exits", []):
@@ -644,6 +645,18 @@ class CalibrationTest(Base):
         self.game.ignore_clicks = True
         with self.assertRaisesRegex(BotError, "клики не доходят"):
             self.bot.calibrate()
+
+    def test_private_server_move_code(self):
+        self.window()
+        self.game.move_op = 82
+        with self.assertRaisesRegex(BotError, "запрос движения ещё не опознан"):
+            self.bot.calibrate()
+        for i in range(3):                       # игрок пробежался — код движения опознан
+            self.game.move_to(1, 1.0 + i, 0.0)
+        self.assertEqual(self.bot.pos(), (3.0, 0.0))
+        self.game.center = (0.47, 0.56)
+        cal = self.bot.calibrate()
+        self.assertAlmostEqual(cal.cx, 0.47, delta=0.01)
 
     def test_command_runs_calibration_and_test_click(self):
         self.window()

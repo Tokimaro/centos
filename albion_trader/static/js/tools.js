@@ -2,14 +2,24 @@
 // Инструменты: работают и в основном интерфейсе (группа «Инструменты»),
 // и в окне-компаньоне (companion.html загружает только core.js и этот файл).
 
-// Кнопка «Отдельное окно»: на этом компьютере сервер открывает окно-приложение
-// (можно закрепить поверх игры); с другого устройства — всплывающее окно браузера.
-async function openCompanion() {
+// Кнопка «Отдельное окно»: окно открывает сам браузер сразу по клику (иначе браузер
+// считает его навязанным и молча блокирует). Заголовок окна тот же, поэтому «поверх
+// игры» и оверлей работают. Если всплывающие окна запрещены — окно-приложение запускает
+// программа (только на этом компьютере).
+async function openWindow(page, name, w, h, which) {
+  const win = window.open(page, name, `popup,width=${w},height=${h}`);
+  if (win) { try { win.focus(); } catch { /* другое окно */ } return true; }
   try {
-    const r = await apiPost("/api/window", { action: "open" });
-    if (r.mode && r.mode !== "popup") return;   // popup: откроет этот браузер
-  } catch { /* не этот компьютер — обычное всплывающее окно */ }
-  window.open("companion.html", "albion-companion", "popup,width=560,height=860");
+    const r = await apiPost("/api/window", { which, action: "open" });
+    if (r.mode && r.mode !== "popup") return true;
+  } catch { /* не этот компьютер */ }
+  alert("Браузер заблокировал всплывающее окно. Разрешите всплывающие окна для этого адреса " +
+        "(значок справа в адресной строке) и нажмите кнопку ещё раз.");
+  return false;
+}
+
+function openCompanion() {
+  return openWindow("companion.html", "albion-companion", 560, 860, undefined);
 }
 
 // Форма инструмента в раскрывающемся блоке «Параметры»: в узком окне результат

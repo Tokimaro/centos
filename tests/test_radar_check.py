@@ -159,6 +159,16 @@ class LiveChecksTest(unittest.TestCase):
         self.assertIn("«new_mob» на этом сервере, похоже, 777", t)
         self.assertIn("player 1", t)
         self.assertIn("История встреч: 1 игроков", t)
+        self.assertIn("Запросов игры не видно", t)
+        st = self.app.albion
+        for i in range(9):
+            st.on_request(1, {253: 82, 1: [float(i), 2.0]})
+        r = Report()
+        radar_check.check_live(r, self.url)
+        t = text(r)
+        self.assertIn("Запросы игры (исходящий трафик) видны: 9", t)
+        self.assertIn("Запрос движения: код 82 (опознан автоматически)", t)
+        self.assertIn("запрос 82 (move): 9 раз, с позицией 9 — 1:xy", t)
 
     def test_window_live_on_windows(self):
         rw = self.app.radar_window

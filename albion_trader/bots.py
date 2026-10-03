@@ -586,6 +586,10 @@ class Bot(TasksMixin, DungeonMixin):
                 raise BotError("игра не отправила ни одного запроса после клика — клики не доходят до окна "
                                "(попробуйте ввод «с переключением окна» и запуск программы от администратора)")
             moves.append((after[0] - before[0], after[1] - before[1]))
+        if not getattr(self.feed.state, "_move_seen", True):
+            raise BotError("игра отвечает на клики, но запрос движения ещё не опознан — своя позиция не "
+                           "обновляется. Пробегитесь персонажем 5–10 секунд и повторите калибровку; если не поможет — "
+                           "пришлите таблицу «Запросы игры» (Радар → Коды событий)")
         cal = solve_calibration(d, moves[0], moves[1], moves[2], moves[3], old.cx, old.cy, aspect,
                                 moves[4], moves[5])
         with self.manager.lock:

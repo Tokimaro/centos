@@ -77,6 +77,23 @@ class RadarTest(unittest.TestCase):
         self.feed(pb.packet(pb.request(77, {1: [5.0, 5.0]})))
         self.assertEqual(self.radar()["me"]["x"], 1.0)
 
+    def test_move_op_detected_even_if_code_is_taken(self):
+        # Номера операций сдвинулись: движение пришло под кодом «рыночного» запроса,
+        # а под 21 игра шлёт что-то без координат.
+        self.feed(pb.packet(pb.response(2, {0: 1, 2: "Me", 8: "3004", 9: [10.0, 10.0]})))
+        for i in range(10):
+            self.feed(pb.packet(pb.request(21, {0: i})),
+                      pb.packet(pb.request(82, {0: 123456 + i, 1: [40.0 + i, 50.0], 3: [41.0, 51.0]})))
+        r = self.radar()
+        self.assertEqual((r["me"]["x"], r["me"]["y"]), (49.0, 50.0))
+        rq = r["requests"]
+        self.assertEqual((rq["move"], rq["detected"], rq["move_seen"]), (82, True, True))
+        self.assertEqual(rq["total"], 20)
+        self.assertEqual(self.app.albion.stats["market_requests"], 7)     # дальше уже не рынок
+        row = next(c for c in rq["codes"] if c["code"] == 82)
+        self.assertEqual((row["name"], row["positions"]), ("move", 10))
+        self.assertIn("1:xy", row["shape"])
+
     def test_known_move_op_disables_detection(self):
         self.feed(pb.packet(pb.request(21, {1: [11.0, 12.0]})))
         for i in range(10):

@@ -111,6 +111,8 @@ App.tab({
         <p class="muted">Все события, что пришли от сервера: код, имя (если известно), количество и параметры с типами.
           <code>·pos</code> — значение похоже на координаты.</p>
         <div id="radar-codes"></div>
+        <h4>Запросы игры (свои действия)</h4>
+        <div id="radar-requests"></div>
       </details>`;
     this.view = new RadarView($("#radar-canvas", el), { hud: $("#radar-hud", el) });
     this.view.keysOnlyWhen = () => App.current === this;
@@ -138,13 +140,7 @@ App.tab({
       this.view.update({ resmatrix: m, profile: "" });
     }));
     modeRows();
-    $("#radar-open", el).addEventListener("click", async () => {
-      try {
-        const r = await apiPost("/api/window", { which: "radar", action: "open" });
-        if (r.mode && r.mode !== "popup") return;   // popup: откроет этот браузер
-      } catch { /* не этот компьютер — всплывающее окно браузера */ }
-      window.open("radar.html", "albion-radar", "popup,width=520,height=520");
-    });
+    $("#radar-open", el).addEventListener("click", () => openWindow("radar.html", "albion-radar", 520, 520, "radar"));
     const hint = (t) => { $("#radar-pin-hint").textContent = t || ""; };
     $("#radar-pin", el).addEventListener("change", async (ev) => {
       const on = ev.target.checked;
@@ -282,6 +278,16 @@ App.tab({
       <th>Кол-во</th><th>Параметры</th></tr></thead><tbody>${codes.map((c) => `<tr><td>${c.code}</td>
       <td>${esc(c.name || "—")}</td><td>${fmt(c.count)}</td><td><code>${esc(c.shape)}</code></td></tr>`).join("")}
       </tbody></table></div>` : '<p class="muted">Событий пока не было.</p>';
+    const rq = d.requests || { total: 0, codes: [] };
+    const moveLine = !rq.total
+      ? '<p class="bad">Запросов от игры не видно — программа не видит исходящий трафик, поэтому своя позиция не обновляется. Запустите программу от администратора; если не поможет — пришлите data\\radar_check.txt.</p>'
+      : rq.move_seen
+        ? `<p class="good">Своё движение: запрос с кодом ${rq.move}${rq.detected ? " (опознан автоматически)" : ""}.</p>`
+        : '<p class="bad">Запрос движения пока не найден — пройдитесь персонажем несколько шагов. Если не появится — пришлите эту таблицу.</p>';
+    $("#radar-requests").innerHTML = moveLine + (rq.codes.length ? `<div class="table-wrap"><table><thead><tr><th>Код</th><th>Имя</th>
+      <th>Кол-во</th><th>С позицией</th><th>Параметры</th></tr></thead><tbody>${rq.codes.map((c) => `<tr><td>${c.code}</td>
+      <td>${esc(c.name || "—")}</td><td>${fmt(c.count)}</td><td>${fmt(c.positions)}</td><td><code>${esc(c.shape)}</code></td></tr>`).join("")}
+      </tbody></table></div>` : "");
   },
 
   // Перемотка записи: список .pcap, воспроизведение, пауза, скорость, ползунок.
