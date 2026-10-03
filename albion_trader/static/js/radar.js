@@ -88,21 +88,79 @@ function playerStatus(e, me, o) {
   return { key: "passive", ...STATUS_STYLE.passive };
 }
 
-function mobTitle(e) {
-  const m = e.mob;
-  const name = m && m.name.length > 26 ? m.name.slice(0, 25) + "…" : m && m.name;
-  const base = m ? `T${m.tier ?? "?"} ${name}` : (e.name || `моб #${e.type_id ?? "?"}`);
-  return base + (e.enchant ? ` .${e.enchant}` : "") + (m && m.category_ru ? ` (${m.category_ru})` : "");
+// Подписи на карте — короткие (до SHORT_LEN символов), полные — в подсказке.
+const SHORT_LEN = 16;
+const short = (t, n = SHORT_LEN) => (t && t.length > n ? t.slice(0, n - 1) + "…" : t || "");
+
+// Объекты по имени из события (RANDOMDUNGEON_SOLO_…, …MISTS…) и виду события: короткое
+// русское название, значок и цвет. Порядок важен — первое совпадение.
+const OBJECT_TYPES = [
+  [/MIST/, "Мгла", "🌫", "#9fc3d9"],
+  [/HELLGATE/, "Адские врата", "🔥", "#ff5a36"],
+  [/CORRUPT/, "Проклятый", "☠", "#e5484d"],
+  [/AVALON|ROADS/, "Авалон", "🌀", "#f5c542"],
+  [/RANDOMDUNGEON.*SOLO|SOLO.*DUNGEON/, "Данж соло", "🟢", "#3ddc84"],
+  [/RANDOMDUNGEON|DUNGEON|NEW_RANDOM_DUNGEON_EXIT/, "Данж", "🔵", "#4aa3ff"],
+  [/EXPEDITION/, "Экспедиция", "🧭", "#c9a0ff"],
+  [/ARENA/, "Арена", "⚔", "#ff8f6b"],
+  [/SHRINE/, "Святилище", "✨", "#ffe678"],
+  [/FISH/, "Рыба", "🐟", "#5fc7ff"],
+  [/SILVER/, "Серебро", "🪙", "#d9d9d9"],
+  [/TREASURE/, "Клад", "💎", "#7fe3ff"],
+  [/CHEST/, "Сундук", "📦", "#c98a4b"],
+  [/LOOT|CORPSE/, "Добыча", "💰", "#4aa3ff"],
+  [/ENTRANCE|PORTAL/, "Портал", "🌀", "#b07cff"],
+  [/EXIT/, "Выход", "🚪", "#f2d27a"],
+];
+const CHEST_SHORT = { 0: "", 1: "зел.", 2: "син.", 3: "зол." };
+
+function objectInfo(e) {
+  const key = `${e.name || ""} ${e.event || ""}`.toUpperCase();
+  for (const [re, name, icon, color] of OBJECT_TYPES) {
+    if (re.test(key)) return { name, icon, color };
+  }
+  return { name: "Объект", icon: "❔", color: RADAR_COLOR.object };
 }
 
-function radarLabel(e) {
-  if (e.kind === "player") return e.name + (e.guild ? ` [${e.guild}]` : "") + (e.alliance ? ` <${e.alliance}>` : "");
+function mobTitle(e, full = false) {
+  const m = e.mob;
+  const name = m ? (full ? m.name : short(m.name, 14)) : "";
+  const base = m ? `T${m.tier ?? "?"} ${name}` : (e.name ? short(e.name) : `моб #${e.type_id ?? "?"}`);
+  return base + (e.enchant ? ` .${e.enchant}` : "") + (full && m && m.category_ru ? ` (${m.category_ru})` : "");
+}
+
+// Короткая подпись (на карте и в списке); full — полная (подсказка).
+function radarLabel(e, full = false) {
+  if (e.kind === "player") {
+    return full ? e.name + (e.guild ? ` [${e.guild}]` : "") + (e.alliance ? ` <${e.alliance}>` : "") : short(e.name);
+  }
   if (e.kind === "resource") {
     return `${e.name} T${e.tier ?? "?"}${e.enchant ? "." + e.enchant : ""}${e.size != null ? " ×" + e.size : ""}`;
   }
-  if (e.kind === "mob") return mobTitle(e);
-  if (e.kind === "loot" && e.rarity != null) return `${e.name} (${CHEST_RARITY[e.rarity]})${e.opened ? " — открыт" : ""}`;
-  return e.name || e.event;
+  if (e.kind === "mob") return mobTitle(e, full);
+  const info = objectInfo(e);
+  const ench = e.enchant ? ` .${e.enchant}` : "";
+  if (e.kind === "loot" && e.rarity != null) {
+    const r = full ? CHEST_RARITY[e.rarity] : CHEST_SHORT[e.rarity];
+    return `${info.name}${r ? ` ${full ? `(${r})` : r}` : ""}${e.opened ? (full ? " — открыт" : " ✓") : ""}`;
+  }
+  return info.name + ench + (full && e.name && e.name !== info.name ? ` — ${e.name}` : "");
+}
+
+// Значок объекта: цветной кружок и символ внутри.
+function drawObjectIcon(ctx, e, sx, sy, dense, dim = false) {
+  const info = objectInfo(e);
+  const r = dense ? 6 : 8;
+  ctx.globalAlpha *= dim ? 0.5 : 1;
+  ctx.fillStyle = "rgba(10,12,16,0.75)"; ctx.strokeStyle = info.color; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(sx, sy, r, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  ctx.font = `${dense ? 9 : 11}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", system-ui, sans-serif`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#fff"; ctx.fillText(info.icon, sx, sy + 0.5);
+  ctx.textBaseline = "alphabetic";
+  ctx.font = "11px system-ui, sans-serif";
+  if (dim) ctx.globalAlpha /= 0.5;
+  return info;
 }
 
 // Матрица фильтра ресурсов: вид × тир (пусто — всё разрешено) + мин. тир и зачарование.
@@ -553,6 +611,7 @@ class RadarView {
 
     ctx.textAlign = "center";
     const hits = [];
+    this.labels = [];
     this.hits = hits;   // экранные позиции — для подсказки при наведении
     if (o.depleted) this.drawDepleted(ctx, at, o, hits);
 
@@ -565,7 +624,7 @@ class RadarView {
         ctx.fillStyle = "#f2d27a"; ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.arc(sx, sy, 5, 0, 2 * Math.PI); ctx.stroke(); ctx.fill();
         const label = icon === "Bank" ? "банк" : icon === "Marketplace" ? "рынок" : name;
-        if (label && o.labels && !this.dense) drawText(ctx, label, sx, sy - 9, "#f2d27a");
+        if (label && o.labels && !this.dense) this.queueLabel(short(label, 14), sx, sy - 9, "#f2d27a", 4, 0);
         hits.push([sx, sy, { kind: "exit", name: label || "выход", dist: Math.hypot(x - me.x, y - me.y) }]);
       }
     }
@@ -590,13 +649,13 @@ class RadarView {
       else if (e.kind === "mob") this.drawMob(ctx, e, sx, sy);
       else if (e.kind === "loot") this.drawLoot(ctx, e, sx, sy);
       else {
-        ctx.fillStyle = RADAR_COLOR[e.kind]; ctx.strokeStyle = "rgba(0,0,0,0.7)"; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(sx, sy, 3.5, 0, 2 * Math.PI); ctx.stroke(); ctx.fill();
-        if (o.labels && !this.dense) drawText(ctx, radarLabel(e), sx, sy - 8);
+        const info = drawObjectIcon(ctx, e, sx, sy, this.dense);
+        if (o.labels && !this.dense) this.queueLabel(radarLabel(e), sx, sy - 12, info.color, 1, e.dist);
       }
       ctx.globalAlpha = 1;
       hits.push([sx, sy, e]);
     }
+    this.flushLabels(ctx);
     if (o.squads) this.drawSquads(ctx, at, ents, me);
 
     // Я: в статичном режиме — метка с обводкой, чтобы было видно на всей карте.
@@ -805,6 +864,28 @@ class RadarView {
     }
   }
 
+  // Подписи — после значков, по важности (игроки, лут и объекты, мобы, ресурсы, выходы),
+  // ближние раньше дальних; подпись, которая налезла бы на уже выведенную, не рисуется
+  // (значок остаётся, полное название — в подсказке).
+  queueLabel(text, x, y, color = "#f1f1f1", prio = 3, dist = 0, font = "11px system-ui, sans-serif") {
+    if (text) (this.labels || (this.labels = [])).push({ text, x, y, color, prio, dist, font });
+  }
+
+  flushLabels(ctx) {
+    const placed = [];
+    const items = (this.labels || []).sort((a, b) => a.prio - b.prio || a.dist - b.dist);
+    for (const l of items) {
+      ctx.font = l.font;
+      const w = ctx.measureText(l.text).width + 4, h = 12;
+      const box = [l.x - w / 2, l.y - h + 2, l.x + w / 2, l.y + 3];
+      if (l.prio > 0 && placed.some((b) => box[0] < b[2] && b[0] < box[2] && box[1] < b[3] && b[1] < box[3])) continue;
+      placed.push(box);
+      drawText(ctx, l.text, l.x, l.y, l.color);
+    }
+    ctx.font = "11px system-ui, sans-serif";
+    this.labels = [];
+  }
+
   drawHp(ctx, e, x, y, width) {
     const f = Math.max(0, Math.min(1, e.health / e.max_health));
     ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(x - width / 2 - 1, y - 1, width + 2, 5);
@@ -824,7 +905,7 @@ class RadarView {
     if (o.resstyle === "text") {
       ctx.fillStyle = TIER_COLOR[e.tier] || RADAR_COLOR.resource; ctx.strokeStyle = "#111"; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.rect(sx - 3, sy - 3, 6, 6); ctx.fill(); ctx.stroke();
-      if (o.labels && !this.dense) drawText(ctx, radarLabel(e) + (e.value ? ` · ${fmtShort(e.value)}` : ""), sx, sy - 7);
+      if (o.labels && !this.dense) this.queueLabel(radarLabel(e) + (e.value ? ` · ${fmtShort(e.value)}` : ""), sx, sy - 7, undefined, 3, e.dist);
       return;
     }
     const iid = o.iconset === "game" ? resourceItemId(e) : null;
@@ -833,7 +914,7 @@ class RadarView {
     if (img) ctx.drawImage(img, sx - size / 2, sy - size / 2, size, size);
     else drawResourceIcon(ctx, e, sx, sy, size);
     if (!o.labels || this.dense) return;
-    if (o.resstyle === "both") drawText(ctx, radarLabel(e) + (e.value ? ` · ${fmtShort(e.value)}` : ""), sx, sy - size * 0.65);
+    if (o.resstyle === "both") this.queueLabel(radarLabel(e) + (e.value ? ` · ${fmtShort(e.value)}` : ""), sx, sy - size * 0.65, undefined, 3, e.dist);
     else {
       ctx.font = "bold 10px system-ui, sans-serif";
       drawText(ctx, this.resourceText(e), sx + size * 0.55, sy + size * 0.35,
@@ -856,16 +937,18 @@ class RadarView {
     }
     if (o.moblabels && !this.dense) {
       if (e.max_health && e.health != null) this.drawHp(ctx, e, sx, sy + 8, 16);
-      if (o.labels) drawText(ctx, mobTitle(e), sx, sy - 9);
+      if (o.labels) this.queueLabel(mobTitle(e), sx, sy - 9, undefined, 2, e.dist);
     }
   }
 
   drawLoot(ctx, e, sx, sy) {
     const o = this.opts, color = e.rarity != null ? CHEST_COLOR[e.rarity] : RADAR_COLOR.loot;
-    ctx.fillStyle = e.opened ? "rgba(120,120,120,0.6)" : color; ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(sx, sy - 6); ctx.lineTo(sx + 6, sy); ctx.lineTo(sx, sy + 6); ctx.lineTo(sx - 6, sy); ctx.closePath();
-    ctx.stroke(); ctx.fill();
-    if (o.labels && !this.dense) drawText(ctx, radarLabel(e), sx, sy - 9, e.opened ? "#aaa" : color);
+    drawObjectIcon(ctx, e, sx, sy, this.dense, e.opened);
+    if (e.rarity != null && !e.opened) {          // редкость — цветное кольцо вокруг значка
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(sx, sy, this.dense ? 8 : 10.5, 0, 2 * Math.PI); ctx.stroke();
+    }
+    if (o.labels && !this.dense) this.queueLabel(radarLabel(e), sx, sy - 13, e.opened ? "#aaa" : color, 1, e.dist);
   }
 
   // Игрок компактно: точка цвета статуса, ♞ — на маунте, полоска HP — только у раненых,
@@ -886,10 +969,10 @@ class RadarView {
     if (e.max_health && e.health != null && e.health < e.max_health * 0.995) this.drawHp(ctx, e, sx, sy + 8, 16);
     if (o.labels && o.playerlabel !== "none") {
       ctx.font = "bold 11px system-ui, sans-serif";
-      let text = e.name;
+      let text = short(e.name);
       if (!this.dense && o.playerlabel === "guild" && e.guild) text = `${e.name} [${e.guild}]`;
       if (!this.dense && o.playerlabel === "power") text = [e.name, e.ip ? `IP ${e.ip}` : "", e.role].filter(Boolean).join(" · ");
-      drawText(ctx, text, sx, sy - 9, hostile ? "#ff6b6b" : "#f1f1f1");
+      this.queueLabel(text, sx, sy - 9, hostile ? "#ff6b6b" : "#f1f1f1", 0, e.dist, "bold 11px system-ui, sans-serif");
     }
     ctx.font = "11px system-ui, sans-serif";
   }
@@ -919,11 +1002,11 @@ class RadarView {
         ${kb}${gear}${stale}`;
     }
     if (e.kind === "resource") {
-      return `<b>${esc(radarLabel(e))}</b><div class="muted">${fmt(e.dist)} м</div>`
+      return `<b>${esc(radarLabel(e, true))}</b><div class="muted">${fmt(e.dist)} м</div>`
         + (e.price ? `<div>${esc(e.item)}: ${fmt(e.price)} за шт.${e.value ? ` · узел ≈ ${fmt(e.value)}` : ""}</div>` : "");
     }
     if (e.kind === "mob") {
-      return `<b>${esc(mobTitle(e))}</b><div class="muted">${fmt(e.dist)} м · тип #${e.type_id ?? "?"}`
+      return `<b>${esc(mobTitle(e, true))}</b><div class="muted">${fmt(e.dist)} м · тип #${e.type_id ?? "?"}`
         + `${e.mob ? ` → ${esc(e.mob.id)}` : " (справочник мобов не загружен)"}</div>`
         + (e.max_health && e.health != null ? `<div>HP ${fmt(e.health)} / ${fmt(e.max_health)}</div>` : "") + stale;
     }
@@ -932,7 +1015,8 @@ class RadarView {
         + `<div class="muted">${e.left > 0 ? `респаун ≈ через ${Math.ceil(e.left / 60)} мин` : "мог уже появиться"}</div>`;
     }
     if (e.kind === "exit") return `<b>${esc(e.name)}</b><div class="muted">выход · ${fmt(e.dist)} м</div>`;
-    return `<b>${esc(radarLabel(e))}</b><div class="muted">${fmt(e.dist)} м</div>`;
+    const info = objectInfo(e);
+    return `<b>${info.icon} ${esc(radarLabel(e, true))}</b><div class="muted">${fmt(e.dist)} м${e.event ? ` · ${esc(e.event)}` : ""}</div>`;
   }
 
   drawHud(me) {

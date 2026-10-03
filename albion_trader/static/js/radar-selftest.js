@@ -70,14 +70,28 @@ rtest("мобы: мин. тир, только боссы, живые ресур�
 
 // --- подписи --------------------------------------------------------------------
 rtest("подписи: игрок, ресурс, моб (обрезка длинных имён), сундук", () => {
-  eq(radarLabel(P({ guild: "W", alliance: "A" })), "Bob [W] <A>");
+  eq(radarLabel(P({ guild: "W", alliance: "A" })), "Bob");
+  eq(radarLabel(P({ guild: "W", alliance: "A" }), true), "Bob [W] <A>");
+  eq(radarLabel(P({ name: "VeryLongPlayerName123" })), "VeryLongPlayerN…");
   eq(radarLabel({ kind: "resource", name: "руда", tier: 6, enchant: 2, size: 4 }), "руда T6.2 ×4");
   eq(radarLabel({ kind: "resource", name: "руда", tier: null, enchant: 0, size: null }), "руда T?");
   const long = { kind: "mob", enchant: 1, mob: { tier: 7, name: "a".repeat(40), category_ru: "босс" } };
-  eq(radarLabel(long), `T7 ${"a".repeat(25)}… .1 (босс)`);
+  eq(radarLabel(long), `T7 ${"a".repeat(13)}… .1`);
+  eq(radarLabel(long, true), `T7 ${"a".repeat(40)} .1 (босс)`);
   eq(radarLabel({ kind: "mob", type_id: 9, name: "", enchant: 0 }), "моб #9");
-  eq(radarLabel({ kind: "loot", name: "Сундук", rarity: 3, opened: true }), "Сундук (легендарный) — открыт");
-  eq(radarLabel({ kind: "object", name: "", event: "new_portal" }), "new_portal");
+  eq(radarLabel({ kind: "loot", name: "сундук", event: "new_loot_chest", rarity: 3, opened: true }), "Сундук зол. ✓");
+  eq(radarLabel({ kind: "loot", name: "сундук", event: "new_loot_chest", rarity: 3, opened: true }, true),
+    "Сундук (легендарный) — открыт");
+  eq(radarLabel({ kind: "object", name: "", event: "new_portal" }), "Портал");
+  eq(radarLabel({ kind: "object", name: "RANDOMDUNGEON_SOLO_FOREST", event: "new_random_dungeon_exit", enchant: 2 }),
+    "Данж соло .2");
+  eq(radarLabel({ kind: "object", name: "RANDOMDUNGEON_GROUP_X", event: "new_random_dungeon_exit" }), "Данж");
+  eq(radarLabel({ kind: "object", name: "PORTAL_MISTS_SOLO_ENTRANCE", event: "new_portal_entrance" }), "Мгла");
+  eq(radarLabel({ kind: "object", name: "HELLGATE_2V2", event: "new_portal_entrance" }), "Адские врата");
+  eq(radarLabel({ kind: "object", name: "CORRUPTED_SOLO", event: "new_random_dungeon_exit" }), "Проклятый");
+  eq(radarLabel({ kind: "object", name: "WHATEVER_THING", event: "new_whatever" }), "Объект");
+  eq(radarLabel({ kind: "object", name: "WHATEVER_THING", event: "new_whatever" }, true), "Объект — WHATEVER_THING");
+  eq(objectInfo({ name: "серебро", event: "new_silver_object" }).icon, "🪙");
   eq([fmtShort(950), fmtShort(25400), fmtShort(3200000), fmtShort(null)], ["950", "25k", "3.2M", "—"]);
   eq([...nameSet("A, b\n c;;")], ["a", "b", "c"]);
 });

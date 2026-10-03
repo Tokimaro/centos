@@ -256,7 +256,7 @@ App.tab({
     $("#radar-list").innerHTML = rows.length ? rows.map((e) =>
       `<div><span class="radar-dot" style="background:${e.kind === "resource" ? (TIER_COLOR[e.tier] || RADAR_COLOR.resource)
         : e.kind === "loot" && e.rarity != null ? CHEST_COLOR[e.rarity] : RADAR_COLOR[e.kind]}"></span>
-        <span>${esc(radarLabel(e))}${e.value ? ` <span class="muted">≈${fmtShort(e.value)}</span>` : ""}</span>
+        <span>${e.kind === "object" || e.kind === "loot" ? objectInfo(e).icon + " " : ""}${esc(radarLabel(e))}${e.value ? ` <span class="muted">≈${fmtShort(e.value)}</span>` : ""}</span>
         <span class="muted">${fmt(e.dist)} м</span></div>`).join("")
       : '<p class="muted">Никого. Смените зону, чтобы сборщик увидел объекты вокруг.</p>';
   },

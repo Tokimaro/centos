@@ -24,7 +24,8 @@ except ImportError:
     import photon_builder as pb
 
 TRUE_M = [[14.0, 20.0], [16.0, -23.0]]     # «настоящая» камера модели (отличается от умолчания)
-ALL_POINTS = {name: [round(0.05 + 0.06 * i, 3), round(0.1 + 0.055 * i, 3)] for i, name in enumerate(POINTS)}
+# Точки интерфейса — у левого края окна: клики ходьбы туда не попадают.
+ALL_POINTS = {name: [0.02, round(0.04 + 0.065 * i, 3)] for i, name in enumerate(POINTS)}
 
 # Модель мира: город А — дорога — город Б; выходы на ±50 м по x.
 INDEX = {
@@ -139,6 +140,8 @@ class FakeGame:
         self.players = {}         # id → (x, y, зона, имя, флаг)
         self.harvest_ok = True
         self.ignore_clicks = False
+        self.speed = 0.0          # 0 — клик переносит сразу; иначе идёт со скоростью, м/с
+        self.dest, self.trace, self.last_tick, self.clicks_walk = {}, [], None, 0
         self.key_cd = {}          # клавиша → настоящая перезарядка умения, с
         self.key_last = {}
         self.casts = []
@@ -314,10 +317,37 @@ class FakeGame:
                     self.event(pid, "harvestable_change_state", {0: nid, 1: 0})
                     del self.nodes[nid]
                 return
+        if self.speed:
+            self.dest[pid] = (tx, ty)         # идёт постепенно (см. tick)
+            self.clicks_walk += 1
+            return
         self.move_to(pid, tx, ty)
 
+    def walk(self):
+        """Постепенная ходьба к точке клика со скоростью ``speed`` м/с."""
+        now = self.clock()
+        dt, self.last_tick = now - (self.last_tick if self.last_tick is not None else now), now
+        for pid, (tx, ty) in list(self.dest.items()):
+            x0, y0 = self.pos[pid]
+            d = math.hypot(tx - x0, ty - y0)
+            step = self.speed * dt
+            if d <= step:
+                nx, ny = tx, ty
+                del self.dest[pid]
+            else:
+                nx, ny = x0 + (tx - x0) * step / d, y0 + (ty - y0) * step / d
+            if self.blocked(nx, ny):
+                self.dest.pop(pid, None)
+                nx, ny = x0, y0
+            if (nx, ny) != (x0, y0):
+                self.pos[pid] = (nx, ny)
+                self.request(pid, self.move_op, {1: [float(nx), float(ny)]})
+            self.trace.append((now, pid in self.dest, nx, ny))
+
     def tick(self):
-        """Время идёт: быстрый выход завершается (или его сбивает урон)."""
+        """Время идёт: персонаж идёт к точке клика, быстрый выход завершается (или его сбивает урон)."""
+        if self.speed:
+            self.walk()
         if not self.exiting:
             return
         pid, until = self.exiting
@@ -703,6 +733,40 @@ class WalkTest(Base):
         self.assertTrue(self.bot.walk_path(20, 0))
         self.assertLess(math.hypot(self.game.pos[1][0] - 20, self.game.pos[1][1]), 3)
 
+    def travelled(self):
+        pts = [(x, y) for _t, _m, x, y in self.game.trace]
+        return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
+
+    def test_smooth_walking_without_stops_or_back_and_forth(self):
+        self.window()
+        self.bot.calibrate()
+        g = self.game
+        g.speed, g.trace = 5.0, []
+        self.assertTrue(self.bot.walk_to(60, -40, tol=2))
+        moving = [m for _t, m, _x, _y in g.trace]
+        last = max(i for i, m in enumerate(moving) if m)
+        self.assertLessEqual(moving[:last].count(False), 1, "персонаж останавливался по дороге")
+        dists = [math.hypot(60 - x, -40 - y) for _t, _m, x, y in g.trace]
+        self.assertTrue(all(b <= a + 0.05 for a, b in zip(dists, dists[1:])), "шёл назад")
+        self.assertLess(self.travelled(), math.hypot(60, 40) * 1.05)
+        self.assertLess(g.clicks_walk, 30)                  # не кликает без нужды
+
+    def test_smooth_path_around_wall_and_detour_without_map(self):
+        self.window(zone="WALLED", pos=(-20.0, 0.0))
+        self.game.walls = [(-3, -30, 3, 30)]
+        self.bot.calibrate()
+        g = self.game
+        g.join(1, "Alice", "WALLED", (-20.0, 0.0))
+        g.speed, g.trace = 5.0, []
+        self.assertTrue(self.bot.walk_path(20, 0))
+        path = self.bot.plan["path"]
+        plen = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip([[-20, 0], *path], path))
+        self.assertLess(self.travelled(), plen * 1.15)       # по пути, без метаний
+        # Без схемы зоны: короткая стена поперёк — обход в сторону.
+        g.join(1, "Alice", "NOMAP", (-20.0, 0.0))
+        g.walls = [(-3, -6, 3, 6)]
+        self.assertTrue(self.bot.walk_to(20, 0, tol=2))
+
     def test_walking_click_avoids_other_nodes(self):
         self.window()
         self.bot.calibrate()
@@ -1019,8 +1083,9 @@ class DungeonRunTest(Base):
     def test_portal_kinds(self):
         from albion_trader.bot_dungeon import portal_kind
         self.assertEqual([portal_kind(n) for n in ("RANDOMDUNGEON_SOLO_X", "CORRUPTED_SOLO", "HELLGATE_2V2",
-                                                   "ROADS_AVALON", "RANDOMDUNGEON_GROUP", "", "вход в данж")],
-                         ["solo", "corrupted", "hellgate", "avalon", "group", "unknown", "unknown"])
+                                                   "ROADS_AVALON", "RANDOMDUNGEON_GROUP", "", "вход в данж",
+                                                   "PORTAL_MISTS_SOLO")],
+                         ["solo", "corrupted", "hellgate", "avalon", "group", "unknown", "unknown", "mists"])
 
 
 class QuickExitTest(Base):

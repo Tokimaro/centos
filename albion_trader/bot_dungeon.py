@@ -34,7 +34,7 @@ EXPLORE_CELL = 10.0       # клетка «уже были здесь» при �
 EXIT_EVENTS = ("new_exit", "new_portal_exit", "new_portal_entrance", "new_random_dungeon_exit")
 ENTRY_RADIUS = 15.0       # выход ближе к точке появления на этаже — это выход назад
 PORTAL_KINDS = {"solo": "соло (зелёные)", "group": "групповые", "corrupted": "проклятые",
-                "hellgate": "адские врата", "avalon": "авалонские", "unknown": "без названия"}
+                "hellgate": "адские врата", "avalon": "авалонские", "mists": "Мгла", "unknown": "без названия"}
 
 
 class DungeonAbort(Exception):
@@ -45,6 +45,8 @@ def portal_kind(name: str) -> str:
     up = (name or "").upper()
     if not up or up in ("ВХОД В ДАНЖ",):
         return "unknown"
+    if "MIST" in up:
+        return "mists"                 # портал в Мглу — не данж
     if "CORRUPT" in up:
         return "corrupted"
     if "HELLGATE" in up:

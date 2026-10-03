@@ -54,6 +54,12 @@ VK_RBUTTON = 0x02
 WALK_SPEED = 5.0          # м/с пешком — оценка времени шага
 MAX_LOG = 200
 CLEARANCE = 3.5           # клик для ходьбы — не ближе к чужому ресурсу, м
+LOOKAHEAD = 10.0          # ходьба: клик на точку пути на столько метров впереди
+WALK_STEP = 0.42          # ходьба: наибольший шаг клика, доля экрана
+WAYPOINT_NEAR = 4.0       # точка пути пройдена, если ближе, м
+STUCK_AFTER = 3.5         # нет продвижения столько секунд — обход
+DETOUR = 5.0              # обход: шаг в сторону, м
+MAX_DETOURS = 6
 # Варианты шага в обход чужого ресурса: (доля длины, поворот в радианах).
 CLEAR_TRIES = [(1.0, 0.0), (0.6, 0.0), (1.0, 0.5), (1.0, -0.5), (0.8, 1.0), (0.8, -1.0),
                (0.6, 1.57), (0.6, -1.57), (0.4, 2.3), (0.4, -2.3)]
@@ -75,6 +81,26 @@ SETTINGS = ("enabled", "stop_key", "pause_when_active", "user_idle", "restore_fo
 
 def size_key(win: GameWindow) -> str:
     return f"{win.rect[2]}x{win.rect[3]}"
+
+
+def _passed(p, a, b) -> bool:
+    """Персонаж уже за точкой a на отрезке a→b (проекция дальше начала отрезка)."""
+    vx, vy = b[0] - a[0], b[1] - a[1]
+    return (p[0] - a[0]) * vx + (p[1] - a[1]) * vy > 0
+
+
+def _lookahead(p, pts, idx, ahead: float) -> tuple[float, float]:
+    """Точка на пути в ``ahead`` метрах от персонажа (по ломаной, начиная с pts[idx])."""
+    left = ahead
+    cur = p
+    for q in pts[idx:]:
+        d = math.hypot(q[0] - cur[0], q[1] - cur[1])
+        if d >= left:
+            k = left / d
+            return cur[0] + (q[0] - cur[0]) * k, cur[1] + (q[1] - cur[1]) * k
+        left -= d
+        cur = q
+    return pts[-1]
 
 
 # --- бот -----------------------------------------------------------------------
@@ -371,14 +397,17 @@ class Bot(TasksMixin, DungeonMixin):
             others = [e for e in self.feed.entities("resource") + self.exits_around() if e.id != keep_clear_of]
             if others:
                 best, best_gap = None, -1.0
-                for k, angle in CLEAR_TRIES:
+                # Прежний поворот — первым: иначе клики прыгают то влево, то вправо.
+                last = getattr(self, "_clear_last", None)
+                for k, angle in ([last] if last else []) + CLEAR_TRIES:
                     c, s_ = math.cos(angle), math.sin(angle)
                     plan = self.plan_click(dx * c - dy * s_, dx * s_ + dy * c, step * k)
                     gap = min(math.hypot(e.x - px - plan[2], e.y - py - plan[3]) for e in others)
                     if gap > best_gap:
-                        best, best_gap = plan, gap
+                        best, best_gap, choice = plan, gap, (k, angle)
                     if gap > CLEARANCE:
                         break
+                self._clear_last = choice if choice != (1.0, 0.0) else None
                 fx, fy, wx, wy = best
         self.click_at(fx, fy)
         return wx, wy
@@ -446,15 +475,53 @@ class Bot(TasksMixin, DungeonMixin):
         return last
 
     def walk_to(self, x: float, y: float, tol: float = 2.0, max_steps: int | None = None, target=None) -> bool:
-        if max_steps is None:
-            px, py = self.pos()
-            max_steps = int(math.hypot(x - px, y - py) / 4) + 20
-        stuck = 0
+        """Дойти до точки по прямой (``max_steps`` — старый предел шагов, примерно по 2 с на шаг)."""
+        return self.follow([(x, y)], tol=tol, target=target,
+                           budget=None if max_steps is None else max_steps * 2.0 + 2.0)
+
+    def walk_path(self, x: float, y: float, tol: float = 2.5) -> bool:
+        """Дойти до точки зоны в обход препятствий по схеме зоны (если она есть)."""
+        grid = self.manager.zone_grid(self.feed.zone)
+        pts = None
+        if grid is not None:
+            pts = grid.path(self.pos(), (x, y))
+            if pts:
+                self.plan = {**self.plan, "zone": self.feed.zone,
+                             "path": [[round(a, 1), round(b, 1)] for a, b in pts]}
+        pts = list(pts or [])
+        if not pts or math.hypot(pts[-1][0] - x, pts[-1][1] - y) > 0.5:
+            pts.append((x, y))
+        return self.follow(pts, tol=tol, grid=grid)
+
+    def follow(self, pts: list, tol: float = 2.0, target=None, budget: float | None = None, grid=None) -> bool:
+        """Идти по точкам без остановок: клик на точку пути в LOOKAHEAD м впереди,
+        следующий клик — раньше, чем персонаж дойдёт до предыдущего (без рывков).
+        Нет продвижения — обход в сторону (сначала в одну, потом в другую), без метаний."""
         zone = self.feed.zone
         if self.plan.get("zone") != zone:
             self.plan = {"zone": zone, "target": None, "path": [], "explored": []}
-        self.plan["target"] = [round(x, 1), round(y, 1)]
-        for _ in range(max_steps):
+        fx, fy = pts[-1]
+        self.plan["target"] = [round(fx, 1), round(fy, 1)]
+        px, py = self.pos()
+        length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip([(px, py), *pts], pts))
+        start = self.clock()
+        budget = budget if budget is not None else length / WALK_SPEED * 2.5 + 15
+        idx = 0
+        best, progress_at = float("inf"), start
+        next_click, last_goal = -1e9, None
+        detours, side = 0, 1 if self.rng.random() < 0.5 else -1
+        detour_pt = None
+        pts = list(pts)
+
+        def sees(a, b) -> bool:
+            """По схеме зоны между точками нет препятствий (без схемы — считаем, что нет)."""
+            if grid is None:
+                return True
+            try:
+                return grid.line_free(grid.cell_of(*a), grid.cell_of(*b), clear=True)
+            except (IndexError, ValueError):  # pragma: no cover
+                return True
+        while True:
             self.check()
             if self.feed.zone != zone:
                 return False          # ушли в другую зону (выход по дороге)
@@ -462,42 +529,69 @@ class Bot(TasksMixin, DungeonMixin):
                 threats = self.threats(self.route_guard)
                 if threats:
                     raise RouteDanger(threats)
+            now = self.clock()
             px, py = self.pos()
-            dx, dy = x - px, y - py
-            dist = math.hypot(dx, dy)
+            dist = math.hypot(fx - px, fy - py)
             if dist <= tol:
                 return True
-            wx, wy = self.click_world(dx, dy, keep_clear_of=target)
+            if now - start > budget + detours * 10:
+                return False
+            # Пройденные точки пути (рядом или уже позади) — дальше.
+            while idx < len(pts) - 1 and (
+                    math.hypot(pts[idx][0] - px, pts[idx][1] - py) < (1.5 if pts[idx] is detour_pt else WAYPOINT_NEAR)
+                    or (pts[idx] is not detour_pt and _passed((px, py), pts[idx], pts[idx + 1])
+                        and math.hypot(pts[idx][0] - px, pts[idx][1] - py) < LOOKAHEAD)) \
+                    and (pts[idx] is detour_pt or sees((px, py), pts[idx + 1])):
+                idx += 1
+            rest = math.hypot(pts[idx][0] - px, pts[idx][1] - py) + sum(
+                math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts[idx:], pts[idx + 1:]))
+            if rest < best - 0.5:
+                best, progress_at = rest, now
             if not self.status.startswith("в пути"):
                 self.status = f"идёт ({dist:.0f} м)"
-            self.wait(min(4.0, math.hypot(wx, wy) / WALK_SPEED + 0.3) * self.rng.uniform(0.7, 0.9))
-            nx, ny = self.pos()
-            if math.hypot(nx - px, ny - py) < 0.4:
-                stuck += 1
-                if stuck >= 3:
-                    # Препятствие: шаг в сторону.
-                    ang = self.rng.uniform(0, 2 * math.pi)
-                    self.click_world(6 * math.cos(ang), 6 * math.sin(ang), keep_clear_of=target)
-                    self.wait(1.5)
-                if stuck >= 6:
+            if now - progress_at > STUCK_AFTER:
+                # Упёрлись: временная точка в сторону от направления на цель и чуть вперёд.
+                # Сторона та же, шаг всё шире; трижды не вышло — другая сторона.
+                detours += 1
+                if detours > MAX_DETOURS:
                     return False
+                if detours == 4:
+                    side = -side
+                width = DETOUR * (1 + (detours - 1) % 3)
+                gx, gy = _lookahead((px, py), pts, idx, LOOKAHEAD)
+                ax, ay = gx - px, gy - py
+                n = math.hypot(ax, ay) or 1.0
+                ax, ay = ax / n, ay / n
+                via = (px - ay * side * width - ax, py + ax * side * width - ay)   # вбок и чуть назад
+                if pts[idx] is not detour_pt:
+                    pts.insert(idx, via)
+                else:
+                    pts[idx] = via
+                detour_pt = pts[idx]
+                best, progress_at, next_click, last_goal = float("inf"), now, -1e9, None
+                continue
+            if pts[idx] is detour_pt:
+                goal = pts[idx]
             else:
-                stuck = 0
-        return False
-
-    def walk_path(self, x: float, y: float, tol: float = 2.5) -> bool:
-        """Дойти до точки зоны в обход препятствий по схеме зоны (если она есть)."""
-        grid = self.manager.zone_grid(self.feed.zone)
-        if grid is not None:
-            pts = grid.path(self.pos(), (x, y))
-            if pts:
-                zone = self.feed.zone
-                self.plan = {**self.plan, "zone": zone, "path": [[round(a, 1), round(b, 1)] for a, b in pts]}
-                for wx, wy in pts[:-1]:
-                    self.walk_to(wx, wy, tol=3.0)
-                    if self.feed.zone != zone:
-                        return False
-        return self.walk_to(x, y, tol=tol)
+                # Точка впереди по пути, но не за углом: срезать можно только по прямой видимости.
+                goal = pts[idx]
+                for ahead in (LOOKAHEAD, 7.0, 4.5):
+                    cand = _lookahead((px, py), pts, idx, ahead)
+                    if sees((px, py), cand):
+                        goal = cand
+                        break
+            final = math.hypot(goal[0] - fx, goal[1] - fy) < 0.01
+            moved_goal = last_goal is None or math.hypot(goal[0] - last_goal[0], goal[1] - last_goal[1]) > 3.0
+            if now >= next_click or (moved_goal and not final):
+                if final and last_goal is not None and math.hypot(last_goal[0] - fx, last_goal[1] - fy) < 0.01 \
+                        and now < next_click + 1.5:
+                    pass                  # уже идём ровно в конечную точку — не перекликивать
+                else:
+                    wx, wy = self.click_world(goal[0] - px, goal[1] - py, step=WALK_STEP, keep_clear_of=target)
+                    last_goal = goal
+                    # Следующий клик — на ~60 % пути до точки клика, чтобы не останавливаться.
+                    next_click = self.clock() + min(2.5, max(0.6, math.hypot(wx, wy) / WALK_SPEED * 0.6))
+            self.wait(0.25)
 
     def wait_zone(self, old: str, timeout: float = ZONE_WAIT) -> bool:
         start = self.clock()
