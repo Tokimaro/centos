@@ -279,7 +279,8 @@ class RadarDbTest(unittest.TestCase):
 # --- radar_data.py ---------------------------------------------------------------
 class RadarDataTest(unittest.TestCase):
     def test_compact_and_pretty(self):
-        self.assertEqual(compact_mobs({"Mobs": {"Mob": {"@uniquename": "A", "@tier": "x"}}}), [["A", None, ""]])
+        self.assertEqual(compact_mobs({"Mobs": {"Mob": {"@uniquename": "A", "@tier": "x"}}}), [["A", None, "", None]])
+        self.assertEqual(compact_mobs({"Mobs": {"Mob": {"@uniquename": "A", "@hitpointsmax": "20"}}})[0][3], 20.0)
         self.assertEqual(compact_mobs(None), [])
         self.assertEqual(pretty_mob("T5_MOB_DYNAMIC_HIDE_STEPPE_TERRORBIRD"), "hide steppe terrorbird")
         self.assertEqual(pretty_mob("T8_MOB_KEEPER_BOSS_DYNAMIC"), "keeper boss")
@@ -309,6 +310,29 @@ class RadarDataTest(unittest.TestCase):
             self.assertEqual(t.info(3, offset=-3)["tier"], 3)
             t.download_async()                                               # уже есть — без запроса
             self.assertEqual(calls, ["mobs.json"])
+
+    def test_mob_offset_guessed_by_health(self):
+        # Как на записи с частного сервера: в событии тип 424 (HP 20) и 425 (HP 515),
+        # а в mobs.json это кролик (408) и лиса (409) — сдвиг −16.
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "mobs.json"
+            rows = [[f"T8_MOB_X{i}", 8, "", 1370.0 + i] for i in range(500)]
+            rows[408] = ["MOB_RABBIT", 1, "harmless", 20.0]
+            rows[409] = ["MOB_FOX", 1, "harmless", 515.0]
+            p.write_text(json.dumps(rows))
+            t = MobTable(p)
+            self.assertIsNone(t.guess_offset({(424, 20.0): 4}))                 # мало мобов
+            self.assertEqual(t.guess_offset({(424, 20.0): 8, (425, 515.0): 1}), -16)
+            self.assertIsNone(t.guess_offset({(424, 20.0): 8, (425, 515.0): 1}, current=-16))
+            r = radar_mod.Radar(mobs=t)
+            for i in range(6):
+                r.on_event("new_mob", {0: 100 + i, 1: 424, 7: [1.0, float(i)], 13: 20.0, 14: 20.0})
+            self.assertEqual(r.mob_offset, -16)
+            self.assertEqual(r.snapshot()["entities"][0]["mob"]["id"], "MOB_RABBIT")
+            p.write_text(json.dumps([row[:3] for row in rows]))               # старый файл без HP
+            old = MobTable(p, fetch=lambda _p: json.dumps({"Mobs": {"Mob": []}}).encode())
+            self.assertFalse(old.has_hp)
+            self.assertIsNone(old.guess_offset({(424, 20.0): 8}))
 
     def test_mob_table_download_failure(self):
         with tempfile.TemporaryDirectory() as d:

@@ -210,13 +210,11 @@ class DungeonMixin:
                 self.wait_idle(2)
 
     def is_boss(self, mob) -> bool:
-        radar = self.feed.radar
-        info = radar.mobs.info(mob.type_id, radar.mob_offset) if radar.mobs is not None else None
+        info = self.feed.radar.mob_info(mob)
         return bool(info and info.get("boss")) or "BOSS" in (mob.name or "").upper()
 
     def mob_info(self, mob) -> dict:
-        radar = self.feed.radar
-        return (radar.mobs.info(mob.type_id, radar.mob_offset) if radar.mobs is not None else None) or {}
+        return self.feed.radar.mob_info(mob) or {}
 
     def mob_allowed(self, mob, d: dict) -> bool:
         info = self.mob_info(mob)

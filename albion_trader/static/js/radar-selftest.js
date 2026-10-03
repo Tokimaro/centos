@@ -84,7 +84,7 @@ rtest("подписи: игрок, ресурс, моб (обрезка длин
   eq(radarLabel({ kind: "mob", enchant: 0, mob: { tier: 6, id: "MOB_UNIQUE_POWERCRYSTAL_TERRITORY", name: "c", category: "standard" } }), "Кристалл T6");
   eq(radarLabel({ kind: "loot", name: "TREASURE_MISTS_SOLO", event: "new_loot_chest" }), "Сундук");
   eq(radarLabel(long, true), `T7 ${"a".repeat(40)} .1 (босс)`);
-  eq(radarLabel({ kind: "mob", type_id: 9, name: "", enchant: 0 }), "моб #9");
+  eq(radarLabel({ kind: "mob", type_id: 9, name: "", enchant: 0 }), "моб");
   eq(radarLabel({ kind: "loot", name: "сундук", event: "new_loot_chest", rarity: 3, opened: true }), "Сундук зол. ✓");
   eq(radarLabel({ kind: "loot", name: "сундук", event: "new_loot_chest", rarity: 3, opened: true }, true),
     "Сундук (легендарный) — открыт");

@@ -43,7 +43,11 @@ def compact_mobs(raw: dict) -> list:
             tier = int(tier)
         except (TypeError, ValueError):
             tier = None
-        out.append([m.get("@uniquename") or "", tier, m.get("@mobtypecategory") or ""])
+        try:
+            hp = float(m.get("@hitpointsmax"))
+        except (TypeError, ValueError):
+            hp = None
+        out.append([m.get("@uniquename") or "", tier, m.get("@mobtypecategory") or "", hp])
     return out
 
 
@@ -73,6 +77,35 @@ class MobTable:
                 self.rows = None
         return self.rows is not None
 
+    @property
+    def has_hp(self) -> bool:
+        return bool(self.rows) and len(self.rows[0]) >= 4
+
+    def guess_offset(self, samples: dict, current: int = 0, span: int = 64) -> int | None:
+        """Сдвиг номеров мобов по запасу здоровья: {(тип, макс. HP): сколько раз}.
+        На частных серверах и после патчей номера в событии сдвинуты относительно
+        mobs.json — подходит сдвиг, при котором здоровье совпадает у большинства."""
+        if not self.load() or not self.has_hp or sum(samples.values()) < 5:
+            return None
+        rows = self.rows
+
+        def score(off: int) -> int:
+            n = 0
+            for (t, hp), cnt in samples.items():
+                i = t + off
+                if 0 <= i < len(rows) and rows[i][3] is not None and abs(rows[i][3] - hp) < 0.5:
+                    n += cnt
+            return n
+        total = sum(samples.values())
+        scores = sorted(((score(o), o) for o in range(-span, span + 1)), reverse=True)
+        (s_best, best), (s_second, _o2) = scores[0], scores[1]
+        s_cur = score(current)
+        # Только однозначный сдвиг: второй по совпадениям заметно хуже.
+        if best != current and s_best >= max(5, 0.6 * total) and s_best > s_cur * 2 \
+                and s_second < s_best * 0.8:
+            return best
+        return None
+
     def save(self, raw: dict) -> int:
         rows = compact_mobs(raw)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +115,8 @@ class MobTable:
 
     def download_async(self) -> None:
         with self.lock:
-            if self._loading or self.load():
+            # Старый файл без запаса здоровья — перекачать (нужен для подбора сдвига).
+            if self._loading or (self.load() and self.has_hp):
                 return
             self._loading = True
 
@@ -102,11 +136,12 @@ class MobTable:
         i = type_id + offset
         if not 0 <= i < len(self.rows):
             return None
-        uname, tier, cat = self.rows[i]
+        uname, tier, cat = self.rows[i][:3]
+        hp = self.rows[i][3] if len(self.rows[i]) > 3 else None
         res = next((r for word, r in _LIVING if f"_{word}_" in f"_{uname}_"), "")
         return {"id": uname, "name": pretty_mob(uname), "tier": tier, "category": cat,
                 "category_ru": _CATEGORY_RU.get(cat, cat), "res": res,
-                "boss": cat in ("boss", "miniboss", "champion")}
+                "boss": cat in ("boss", "miniboss", "champion"), "hp": hp}
 
 
 # --- сила и роль игрока ------------------------------------------------------

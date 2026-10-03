@@ -27,6 +27,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .radar_crypt import PositionDecoder, move_parts
 from .radar_data import CodeGuesser, MobTable, player_power
 
 log = logging.getLogger("albion_trader.radar")
@@ -235,6 +236,9 @@ class Radar:
         self.item_ip = item_ip or (lambda _iid: None)
         self.mobs = mobs
         self.mob_offset = 0
+        self.mob_offset_auto = True          # подбирать сдвиг номеров мобов по здоровью
+        self.mob_hp: dict = {}               # (тип, макс. HP) → сколько раз встретился
+        self._mob_hp_checked = 0
         self.depleted: dict[str, list[dict]] = {}     # зона → истощённые узлы
         self.pending_players: list[dict] = []          # встречи для записи в базу
         self.pending_nodes: list[tuple] = []           # узлы ресурсов для тепловой карты
@@ -243,6 +247,14 @@ class Radar:
         self.lock = threading.RLock()
         self.entities: dict[int, Entity] = {}
         self.me = {"id": None, "name": "", "x": 0.0, "y": 0.0, "zone": ""}
+        # Закодированные позиции игроков (см. radar_crypt): игроки, чья позиция пришла
+        # байтами, ждут подбора ключа в enc_pending, последний код — в enc_last.
+        self.decoder = PositionDecoder(center=lambda: (self.me["x"], self.me["y"]))
+        self.enc_ids: set = set()
+        self.enc_pending: dict[int, Entity] = {}
+        self.enc_last: dict[int, tuple] = {}
+        self._resolved_at = 0.0
+        self._decoder_version = 0
         self.params = copy.deepcopy(DEFAULT_PARAMS)
         self.codes: dict[int, dict] = {}     # диагностика: код события → число и форма
         self.state = None
@@ -251,7 +263,9 @@ class Radar:
                 extra = json.loads(Path(params_path).read_text(encoding="utf-8")).get("params") or {}
                 for name, keys in extra.items():
                     self.params.setdefault(name, {}).update(keys)
-                self.mob_offset = int(json.loads(Path(params_path).read_text(encoding="utf-8")).get("mob_offset") or 0)
+                saved = json.loads(Path(params_path).read_text(encoding="utf-8"))
+                self.mob_offset = int(saved.get("mob_offset") or 0)
+                self.mob_offset_auto = "mob_offset" not in saved     # задан вручную — не трогать
                 log.info("Ключи параметров радара переопределены из %s", params_path)
             except (ValueError, OSError, AttributeError) as e:
                 log.warning("Не удалось прочитать %s: %s", params_path, e)
@@ -291,6 +305,10 @@ class Radar:
         keys = self.keys("op:join")
         with self.lock:
             self.entities.clear()
+            self.enc_pending.clear()
+            self.enc_ids.clear()
+            self.enc_last.clear()
+            self.decoder.last.clear()
             oid = _int(p.get(keys["id"]))
             if oid is not None:
                 self.me["id"] = oid
@@ -313,6 +331,9 @@ class Radar:
         with self.lock:
             if zone != self.me["zone"]:
                 self.entities.clear()
+                self.enc_pending.clear()
+                self.enc_ids.clear()
+                self.enc_last.clear()
                 self.me["zone"] = zone
 
     def on_event(self, name: str, p: dict) -> None:
@@ -325,10 +346,68 @@ class Radar:
                 self._generic(name, p, keys)
 
     def _ev_leave(self, p, keys):
-        self.entities.pop(_int(p.get(keys["id"])), None)
+        raw = p.get(keys["id"])
+        # Уход из видимости: один id или список (сервер шлёт пачкой).
+        for eid in (raw if isinstance(raw, (list, tuple)) else [raw]):
+            eid = _int(eid)
+            self.entities.pop(eid, None)
+            self.enc_pending.pop(eid, None)
+            self.enc_ids.discard(eid)
+            self.enc_last.pop(eid, None)
+
+    # --- закодированные позиции игроков -----------------------------------
+    def _enc_sample(self, ent: Entity, ticks: int, enc: bytes, speed: float = 0.0) -> None:
+        self.enc_ids.add(ent.id)
+        self.enc_last[ent.id] = (ticks, enc)
+        if ticks:
+            self.decoder.add(ent.id, ticks, enc, speed)
+        pos = self.decoder.decode(ent.id, enc, ticks or None)
+        if pos is None:
+            if ent.id not in self.entities:
+                self.enc_pending[ent.id] = ent
+            return
+        ent.x, ent.y = pos
+        ent.updated = self.clock()
+        self.enc_pending.pop(ent.id, None)
+        self.entities[ent.id] = ent
+
+    def _resolve_pending(self, force: bool = False) -> None:
+        """Игроки без позиции — раскодировать, когда ключ интервала подобран; ключ
+        уточнился — пересчитать позиции уже показанных."""
+        now = self.clock()
+        if not force and now - self._resolved_at < 0.5:
+            return
+        self._resolved_at = now
+        if self.decoder.version != self._decoder_version:
+            self._decoder_version = self.decoder.version
+            for eid in list(self.enc_ids):
+                ent = self.entities.get(eid)
+                ticks, enc = self.enc_last.get(eid, (0, b""))
+                if ent is None or not enc:
+                    continue
+                self.decoder.last.pop(eid, None)
+                pos = self.decoder.decode(eid, enc, ticks or None)
+                if pos is not None:
+                    ent.x, ent.y = pos
+        for eid, ent in list(self.enc_pending.items()):
+            ticks, enc = self.enc_last.get(eid, (0, b""))
+            pos = self.decoder.decode(eid, enc, ticks or None)
+            if pos is not None:
+                ent.x, ent.y = pos
+                self.entities[eid] = self.enc_pending.pop(eid)
 
     def _ev_move(self, p, keys):
         eid = _int(p.get(keys["id"]))
+        parts = move_parts(p.get(1))
+        if parts is not None:
+            self.decoder.observe(parts[0])
+            if eid in self.enc_ids:
+                ent = self.entities.get(eid) or self.enc_pending.get(eid)
+                if ent is not None:
+                    self._enc_sample(ent, *parts)
+                self._resolve_pending()
+                return
+            self._resolve_pending()
         pos = find_position(p, keys.get("position"))
         if pos is None:   # старый формат: x и y отдельными числами (параметры 4 и 5)
             x, y = _num(p.get(4)), _num(p.get(5))
@@ -345,12 +424,19 @@ class Radar:
     _ev_teleport = _ev_move
 
     def _ev_new_character(self, p, keys):
-        self._put(Entity(id=_int(p.get(keys["id"])), kind=KIND_PLAYER, event="new_character",
-                         name=_str(p.get(keys.get("name"))), guild=_str(p.get(keys.get("guild"))),
-                         alliance=_str(p.get(keys.get("alliance"))), faction=_int(p.get(keys.get("faction"))),
-                         health=_num(p.get(keys.get("health"))), max_health=_num(p.get(keys.get("max_health"))),
-                         equipment=_equipment(p.get(keys.get("equipment")))),
-                  p, keys)
+        ent = Entity(id=_int(p.get(keys["id"])), kind=KIND_PLAYER, event="new_character",
+                     name=_str(p.get(keys.get("name"))), guild=_str(p.get(keys.get("guild"))),
+                     alliance=_str(p.get(keys.get("alliance"))), faction=_int(p.get(keys.get("faction"))),
+                     health=_num(p.get(keys.get("health"))), max_health=_num(p.get(keys.get("max_health"))),
+                     equipment=_equipment(p.get(keys.get("equipment"))))
+        enc = p.get(keys.get("enc_position", 16))
+        if ent.id is not None and find_position(p, keys.get("position")) is None \
+                and isinstance(enc, (bytes, bytearray)) and len(enc) == 8:
+            # Позиция закодирована (8 байт) — раскодировать, когда подберётся ключ.
+            ent.updated = self.clock()
+            self._enc_sample(ent, self.decoder.ticks, bytes(enc))
+        else:
+            self._put(ent, p, keys)
         ent = self.entities.get(_int(p.get(keys["id"])))
         if ent and ent.kind == KIND_PLAYER:
             self._remember_player(ent)
@@ -411,11 +497,35 @@ class Radar:
             ent.faction = faction
 
     def _ev_new_mob(self, p, keys):
-        self._put(Entity(id=_int(p.get(keys["id"])), kind=KIND_MOB, event="new_mob",
-                         type_id=_int(p.get(keys.get("type_id"))), name=_str(p.get(keys.get("name"))),
-                         enchant=_int(p.get(keys.get("enchant"))), health=_num(p.get(keys.get("health"))),
-                         max_health=_num(p.get(keys.get("max_health"))), rarity=_int(p.get(keys.get("rarity")))),
-                  p, keys)
+        ent = Entity(id=_int(p.get(keys["id"])), kind=KIND_MOB, event="new_mob",
+                     type_id=_int(p.get(keys.get("type_id"))), name=_str(p.get(keys.get("name"))),
+                     enchant=_int(p.get(keys.get("enchant"))), health=_num(p.get(keys.get("health"))),
+                     max_health=_num(p.get(keys.get("max_health"))), rarity=_int(p.get(keys.get("rarity"))))
+        self._put(ent, p, keys)
+        if ent.type_id is not None and ent.max_health and not ent.enchant and len(self.mob_hp) < 500:
+            k = (ent.type_id, round(float(ent.max_health), 1))
+            self.mob_hp[k] = self.mob_hp.get(k, 0) + 1
+            self._check_mob_offset()
+
+    def mob_info(self, e: Entity) -> dict | None:
+        """Моб из справочника. Здоровье в 2+ раза не то — номер сдвинут (другая версия
+        игры): имени и тиру не верим."""
+        info = self.mobs.info(e.type_id, self.mob_offset) if self.mobs is not None else None
+        if info and info.get("hp") and e.max_health and not e.enchant \
+                and not 0.5 <= e.max_health / info["hp"] <= 2:
+            return None
+        return info
+
+    def _check_mob_offset(self) -> None:
+        """Сдвиг номеров мобов — подобрать по здоровью (каждые 5 новых мобов)."""
+        n = sum(self.mob_hp.values())
+        if not self.mob_offset_auto or self.mobs is None or n - self._mob_hp_checked < 5:
+            return
+        self._mob_hp_checked = n
+        off = self.mobs.guess_offset(self.mob_hp, self.mob_offset)
+        if off is not None:
+            log.info("Радар: сдвиг номеров мобов %+d (подобран по здоровью %d мобов)", off, n)
+            self.mob_offset = off
 
     def _ev_mob_change_state(self, p, keys):
         ent = self.entities.get(_int(p.get(keys["id"])))
@@ -539,6 +649,7 @@ class Radar:
             self.touch()
         now = self.clock()
         with self.lock:
+            self._resolve_pending(force=True)
             for eid in [e.id for e in self.entities.values() if now - e.updated > STALE_AFTER]:
                 del self.entities[eid]
             me = dict(self.me)
@@ -552,7 +663,7 @@ class Radar:
                     d["flag"] = FACTIONS.get(e.faction, "")
                     d.update(player_power(d["equipment"], self.item_ip))
                 elif e.kind == KIND_MOB and self.mobs is not None:
-                    d["mob"] = self.mobs.info(e.type_id, self.mob_offset)
+                    d["mob"] = self.mob_info(e)
                 ents.append(d)
             depleted = [{**x, "ago": round(now - x["at"])} for x in self.depleted.get(me["zone"], [])
                         if now - x["at"] < DEPLETED_KEEP]

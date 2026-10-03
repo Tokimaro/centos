@@ -166,7 +166,7 @@ function mobTitle(e, full = false) {
   }
   const kind = mobKind(e), word = MOB_KINDS[kind].word;
   if (kind === "wisp" || kind === "chest") return word;   // тир входа в Мглу и сундука не нужен
-  if (!m) return word || `моб${e.type_id != null ? " #" + e.type_id : ""}`;
+  if (!m) return word || "моб";             // номер типа — в подсказке
   return [word, tier + ench].filter(Boolean).join(" ");
 }
 
