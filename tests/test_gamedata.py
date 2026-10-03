@@ -220,3 +220,32 @@ class DownloadTest(unittest.TestCase):
             with mock.patch.object(gamedata.urllib.request, "urlopen", self.fake_urlopen(("items.json",))):
                 with self.assertRaises(OSError):
                     gamedata.download(path)
+
+
+class DownloadSpellsTest(unittest.TestCase):
+    def test_download_spells_merges_into_gamedata(self):
+        import io
+        import json as _json
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from albion_trader import gamedata
+        files = {"items.json": {"items": {"weapon": [{"@uniquename": "T4_X", "@slottype": "mainhand",
+                                                     "craftingspelllist": {"craftspell": [
+                                                         {"@uniquename": "HIT", "@slots": "1"}]}}]}},
+                 "spells.json": {"spells": {"activespell": [{"@uniquename": "HIT", "@recastdelay": "4"}]}}}
+
+        def urlopen(url, timeout=None):
+            return io.BytesIO(_json.dumps(files[url.split("/master/", 1)[1]]).encode())
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "gamedata.json"
+            path.write_text(_json.dumps({"version": 3, "recipes": {"A": {}}}))
+            with mock.patch.object(gamedata.urllib.request, "urlopen", urlopen):
+                self.assertEqual(gamedata.download_spells(path), 1)
+            g = GameData.load(path)
+            self.assertEqual(g.spells["items"]["T4_X"]["q"], ["HIT"])
+            self.assertIn("A", g.recipes)                          # остальное не тронуто
+            files["spells.json"] = {"spells": {}}
+            with mock.patch.object(gamedata.urllib.request, "urlopen", urlopen):
+                with self.assertRaises(ValueError):
+                    gamedata.download_spells(path)

@@ -82,9 +82,14 @@ class FakeDesktop:
         self.idle = 1e9
         self.alive = True
         self.focus_ok = True
+        self.port_lookups = 0
 
     def game_windows(self):
         return list(self.game.windows.values())
+
+    def udp_ports(self):
+        self.port_lookups += 1
+        return {pid: {port} for pid, port in self.game.port.items() if pid in self.game.windows}
 
     def window_alive(self, hwnd):
         return self.alive
@@ -140,6 +145,7 @@ class FakeGame:
         self.players = {}         # id → (x, y, зона, имя, флаг)
         self.harvest_ok = True
         self.ignore_clicks = False
+        self.reconnect = False    # смена зоны — новый локальный порт (как у игры)
         self.speed = 0.0          # 0 — клик переносит сразу; иначе идёт со скоростью, м/с
         self.dest, self.trace, self.last_tick, self.clicks_walk = {}, [], None, 0
         self.key_cd = {}          # клавиша → настоящая перезарядка умения, с
@@ -168,6 +174,8 @@ class FakeGame:
         self.join(pid, name, zone, pos)
 
     def join(self, pid, name, zone, pos):
+        if self.reconnect and pid in self.zone:
+            self.port[pid] += 1000            # смена зоны — новое подключение с нового порта
         self.pos[pid], self.zone[pid] = pos, zone
         self.attacking = self.opened = None
         self.send(pid, pb.response(DEFAULT_OPCODES["join"], {0: pid, 2: name, 8: zone,
@@ -616,7 +624,15 @@ class ManagerTest(Base):
         self.assertIn("F12", self.mgr.message)
         self.bot.thread.join(1)
         self.bot.stop_event.clear()
+        self.bot.pid = 1
+        win = self.game.windows.pop(1)
+        self.mgr.refresh()                       # пропало из списка, но живо (загрузка зоны)
+        self.assertFalse(self.bot.stop_event.is_set())
+        self.assertIn(1, self.mgr.windows)
+        self.game.windows[1] = win
+        self.mgr.refresh()
         del self.game.windows[1]
+        self.desk.alive = False                  # окно закрыли
         self.mgr.refresh()
         self.assertTrue(self.bot.stop_event.is_set())
 
@@ -786,6 +802,34 @@ class WalkTest(Base):
         self.assertLess(math.hypot(self.game.pos[1][0] - 10, self.game.pos[1][1] - 5), 3)
         self.assertIn("перешёл в «Дорога»", self.texts())
         self.assertIn("перешёл в «Город Б»", self.texts())
+
+    def test_zone_change_new_port_keeps_feed(self):
+        self.window(zone="CITYA", pos=(0.0, 0.0))
+        self.bot.calibrate()
+        g = self.game
+        g.reconnect = True
+        feed = self.mgr.feed_for(1)
+        g.event(1, "inventory_put_item", {0: 1})
+        items = feed.items_put
+        g.join(1, "Alice", "ROAD", (0.0, 0.0))          # пакеты пошли с нового порта
+        self.assertEqual(g.port[1], 51001)
+        self.assertIs(self.mgr.feed_for(1), feed)       # тот же разбор: персонаж и счётчики на месте
+        self.assertEqual((feed.zone, feed.character, feed.items_put), ("ROAD", "Alice", items))
+        self.assertEqual(self.mgr.windows[1].ports, [51001])
+        # Весь путь между городами — с переподключением на каждой зоне.
+        g.join(1, "Alice", "CITYA", (0.0, 0.0))
+        self.bot.travel_to("CITYB", 10, 5, safety="yellow")
+        self.assertEqual(g.zone[1], "CITYB")
+        self.assertIs(self.mgr.feed_for(1), feed)
+        self.assertNotIn(g.port[1], self.mgr.feeds)     # пакеты не ушли в отдельный разбор
+
+    def test_unknown_port_with_two_windows(self):
+        self.window(zone="CITYA")
+        self.game.add_window(2, "Bob", (0.0, 0.0), "CITYB")
+        self.game.port[2] = 59999                       # таблица портов ещё не знает окно 2
+        self.mgr.on_packet(59999, b"\0" * 12)
+        self.assertEqual(self.mgr.pid_of_port(59999), 2)   # уточнено по таблице UDP
+        self.assertEqual(self.mgr.pid_of_port(12345), None)  # чужой порт при двух окнах
 
     def test_travel_respects_safety_and_errors(self):
         self.window(zone="CITYA", pos=(0.0, 0.0))
@@ -1444,6 +1488,30 @@ class BuildFightTest(Base):
         self.assertEqual(keys["d"]["kind"], "усиление")
         self.assertFalse(keys["f"]["used"])
         self.assertIsNotNone(keys["e"]["learned"])
+
+    def test_spell_reference_downloaded_on_demand(self):
+        calls = []
+        state = {"have": False, "loading": False, "error": ""}
+
+        def status(start=False):
+            calls.append(start)
+            if start:
+                state.update(loading=True)
+            return dict(state)
+        self.mgr.spellbook = lambda: {}
+        self.mgr.spells_status = status
+        b = self.mgr.snapshot()["game"]["build"]
+        self.assertEqual((b["book"], b["book_loading"]), (False, True))
+        self.assertEqual(calls, [True])                  # нет справочника — скачать сразу
+        self.mgr.snapshot()
+        self.assertEqual(calls[-1], False)               # не чаще раза в 10 минут
+        state.update(loading=False, error="нет сети")
+        self.assertEqual(self.mgr.snapshot()["game"]["build"]["book_error"], "нет сети")
+        self.mgr.command({"action": "update_spells"})    # кнопка
+        self.assertEqual(calls[-1], True)
+        self.mgr.spells_status = None
+        with self.assertRaisesRegex(BotError, "только в программе"):
+            self.mgr.command({"action": "update_spells"})
 
     def test_no_equipment_falls_back_and_food(self):
         g = self.game

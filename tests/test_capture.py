@@ -214,6 +214,23 @@ class SnifferTest(unittest.TestCase):
             self.assertEqual(deals["count"], 1)
             self.assertEqual(deals["deals"][0]["destination"], "black_market")
 
+    def test_follows_game_local_ports_on_other_server_port(self):
+        from albion_trader.capture.sniffer import _is_albion_udp
+        state = AlbionState(Collector())
+        s = Sniffer(state)
+        got = []
+        s.taps.append(lambda port, payload: got.append(port))
+        pkt = pb.ip_udp(pb.packet(pb.request(21, {1: [1.0, 2.0]})), src_port=50007, dst_port=6123)
+        s.feed_ip_packet(pkt)
+        self.assertEqual(got, [])                         # сервер не на 5056, порт игры неизвестен
+        self.assertFalse(_is_albion_udp(pkt, (5056,)))
+        s.set_local_ports({50007})
+        self.assertTrue(_is_albion_udp(pkt, (5056,), s.local_ports))
+        s.feed_ip_packet(pkt)
+        s.feed_ip_packet(pb.ip_udp(pb.packet(pb.event(3, {0: 1})), src_port=6123, dst_port=50007))
+        self.assertEqual(got, [50007, 50007])              # исходящий и входящий — порт игры
+        self.assertEqual(state.stats["requests"], 1)
+
     def test_capture_error_reported(self):
         from albion_trader.capture.sniffer import CaptureError
 

@@ -467,3 +467,23 @@ def download(path: str | Path, base_url: str = DUMPS_URL) -> dict:
             "plants": len(data["plants"]), "animals": len(data["animals"]),
             "destiny_nodes": len(data["destiny"]["nodes"]), "clusters": len(data["clusters"]),
             "spells": len(data["spells"]["spells"])}
+
+
+def download_spells(path: str | Path, base_url: str = DUMPS_URL) -> int:
+    """Только справочник умений (items.json + spells.json) — дописать в gamedata.json.
+    Возвращает число умений."""
+    def fetch(name):
+        with urllib.request.urlopen(base_url + name, timeout=300) as resp:
+            return json.load(resp)
+    spells = parse_spells(fetch("items.json"), fetch("spells.json"))
+    if not spells["spells"]:
+        raise ValueError("в spells.json нет умений")
+    p = Path(path)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except (OSError, ValueError):
+        data = {}
+    data["spells"] = spells
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    return len(spells["spells"])

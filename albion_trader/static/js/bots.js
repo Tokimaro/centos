@@ -285,7 +285,11 @@ App.tab({
     const b = d.game && d.game.build;
     let html;
     if (!b) html = '<span class="muted">Билд: окно игры не найдено.</span>';
-    else if (!b.book) html = '<span class="bad">Билд: нет справочника умений. Программа скачивает его сама при запуске (нужен интернет) — перезапустите start.bat или выполните <code>update-items</code>.</span>';
+    else if (!b.book) {
+      html = b.book_loading ? '<span class="muted">Билд: скачиваю справочник умений (около 30 МБ)…</span>'
+        : `<span class="bad">Билд: нет справочника умений${b.book_error ? ` — ${esc(b.book_error)}` : ""}.</span>
+           <button type="button" data-spells>Скачать справочник умений</button>`;
+    }
     else if (!b.equipment.length) html = '<span class="muted">Билд: экипировка ещё не видна — снимите и наденьте любой предмет в игре (например, шлем), бот увидит весь комплект.</span>';
     else {
       html = `<div class="muted">Надето: ${b.equipment.map((e) => `${esc(e.slot)} — ${esc(e.name)}`).join(", ")}</div>`
@@ -295,7 +299,11 @@ App.tab({
             <td>${k.learned ? `<b>${k.learned} с</b> (изучено)` : `${k.cd} с (справочник)`}</td>
             <td><code>${esc(k.spells.join(", "))}</code></td></tr>`).join("")}</tbody></table></div>` : "");
     }
-    if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
+    if (box.dataset.html !== html) {
+      box.dataset.html = html; box.innerHTML = html;
+      const btn = $("[data-spells]", box);
+      if (btn) btn.addEventListener("click", async () => { await this.post({ action: "update_spells" }); this.poll(); });
+    }
   },
 
   renderGame(d) {
@@ -481,7 +489,11 @@ App.tab({
     const cur = this.data.points.filter((p) => p.value).map((p) => `<div class="mark current" style="left:${p.value[0] * 100}%;top:${p.value[1] * 100}%"
       title="сейчас: ${esc(p.label)}"></div>`);
     const html = cur.join("") + found.join("");
-    if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
+    if (box.dataset.html !== html) {
+      box.dataset.html = html; box.innerHTML = html;
+      const btn = $("[data-spells]", box);
+      if (btn) btn.addEventListener("click", async () => { await this.post({ action: "update_spells" }); this.poll(); });
+    }
   },
 
   renderExtras(d) {

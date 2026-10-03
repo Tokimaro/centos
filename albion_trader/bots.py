@@ -862,6 +862,7 @@ class BotManager:
                  heat: Callable[[str], list] = lambda _z: [],
                  my_orders: Callable[[str, str, str], list] = lambda *_a: [],
                  spellbook: Callable[[], dict] | None = None,
+                 spells_status: Callable[..., dict] | None = None,
                  clock: Callable[[], float] = time.time,
                  sleep: Callable[[float, threading.Event], bool] = _event_sleep):
         self.config_path = Path(config_path)
@@ -878,14 +879,20 @@ class BotManager:
         self.heat = heat
         self.my_orders = my_orders
         self.spellbook = spellbook        # умения предметов (справочник игры) — для билда
+        self.spells_status = spells_status  # есть ли справочник умений, скачать (start=True)
+        self._spells_try_at = -1e9
         self.session: Session | None = None
         self.clock = clock
         self.sleep = sleep
         self.lock = threading.RLock()
         self.input_lock = threading.Lock()
         self.windows: dict[int, GameWindow] = {}
-        self.feeds: dict[int, ClientFeed] = {}       # локальный порт → разбор
+        self.feeds: dict = {}        # ("w", pid) → разбор окна игры; порт → разбор (окно ещё неизвестно)
+        self._missing = 0            # сколько обновлений подряд окна бота нет в списке
         self.names: dict[int, str] = {}              # pid → последний известный персонаж
+        self.port_pid: dict[int, int] = {}           # локальный порт → окно игры
+        self._ports_at = -1e9
+        self.ports_listener: Callable[[set], None] | None = None   # порты игры → захват
         self.bot = Bot(self)
         self.recorder: Recorder | None = None
         self.message = ""
@@ -929,24 +936,52 @@ class BotManager:
         """Пакет игры, локальный порт — наша сторона соединения (вызывается захватом)."""
         if not self.config.get("enabled"):
             return
-        feed = self.feeds.get(local_port)
+        # Разбор — один на окно игры (не на порт): после смены зоны игра подключается к
+        # другому серверу с нового порта, а персонаж, экипировка и счётчики должны остаться.
+        pid = self.pid_of_port(local_port)
+        key = ("w", pid) if pid is not None else local_port
+        feed = self.feeds.get(key)
         if feed is None:
             with self.lock:
-                feed = self.feeds.get(local_port)
+                feed = self.feeds.get(key)
                 if feed is None:
-                    if len(self.feeds) > 64:      # старые порты закрытых окон
-                        oldest = min(self.feeds, key=lambda p: self.feeds[p].last_packet_at)
+                    ports = [k for k in self.feeds if isinstance(k, int)]
+                    if len(ports) > 64:      # старые порты закрытых окон
+                        oldest = min(ports, key=lambda p: self.feeds[p].last_packet_at)
                         del self.feeds[oldest]
-                    feed = self.feeds[local_port] = ClientFeed(self.make_radar, self.opcodes(), self.clock)
+                    feed = self.feeds[key] = ClientFeed(self.make_radar, self.opcodes(), self.clock)
         try:
             feed.feed(payload)
         except Exception:  # pragma: no cover - битый пакет не роняет захват
             log.debug("Ошибка разбора пакета бота", exc_info=True)
         session = self.session
-        if session is not None:
-            win = self.windows.get(self.bot.pid)
-            if win is not None and local_port in win.ports:
-                session.packet(local_port, payload)
+        if session is not None and pid is not None and pid == self.bot.pid:
+            session.packet(local_port, payload)
+
+    def pid_of_port(self, port: int) -> int | None:
+        """Окно игры, которому принадлежит локальный порт. Новый порт (смена зоны) —
+        уточнить по таблице UDP Windows (не чаще двух раз в секунду)."""
+        pid = self.port_pid.get(port)
+        if pid is not None or not self.windows:
+            return pid
+        now = self.clock()
+        if now - self._ports_at > 0.5 and self.desktop.available and hasattr(self.desktop, "udp_ports"):
+            self._ports_at = now
+            try:
+                table = self.desktop.udp_ports()
+            except Exception:  # pragma: no cover - ошибка Windows не роняет захват
+                table = {}
+            with self.lock:
+                for wpid, ports in table.items():
+                    win = self.windows.get(wpid)
+                    if win is not None:
+                        win.ports = sorted(ports)
+                        for p in ports:
+                            self.port_pid[p] = wpid
+            pid = self.port_pid.get(port)
+        if pid is None and len(self.windows) == 1:
+            pid = next(iter(self.windows))      # одно окно игры — пакет его
+        return pid
 
     # --- запись сессий --------------------------------------------------
     def open_session(self, task: str) -> None:
@@ -977,6 +1012,9 @@ class BotManager:
         win = self.windows.get(pid) if pid is not None else None
         if win is None:
             return None
+        feed = self.feeds.get(("w", pid))
+        if feed is not None:
+            return feed
         feeds = [self.feeds[p] for p in win.ports if p in self.feeds]
         if not feeds:
             return None
@@ -998,10 +1036,20 @@ class BotManager:
             self.message = f"не удалось получить список окон: {e}"
             return
         with self.lock:
+            gone = self.bot.pid is not None and self.bot.pid not in {w.pid for w in wins}
+            old = self.windows.get(self.bot.pid) if gone else None
+            # Во время загрузки зоны окно может пропасть из списка (заголовок, видимость) —
+            # пока само окно живо, бот не останавливается (до ~30 с).
+            self._missing = self._missing + 1 if gone else 0
+            if gone and old is not None and self._missing < 15 and self.desktop.window_alive(old.hwnd):
+                wins = [*wins, old]
             self.windows = {w.pid: w for w in wins}
+            self.port_pid = {p: w.pid for w in wins for p in w.ports}
             if self.bot.pid is not None and self.bot.pid not in self.windows:
                 self.bot.stop()
         self._refreshed = self.clock()
+        if self.ports_listener is not None:
+            self.ports_listener(set(self.port_pid))
 
     def target(self) -> int:
         """Окно игры для бота: активное сейчас, иначе то, с которым бот работал,
@@ -1116,7 +1164,7 @@ class BotManager:
     ACTIONS = {"settings", "configure", "start", "stop", "calibrate", "test_click", "save_place", "delete_place",
                "capture_point", "cancel_capture", "delete_point", "save_macro", "delete_macro",
                "record_start", "record_stop", "save_profile", "load_profile", "delete_profile", "clear_history",
-               "snapshot", "apply_points", "probe_point"}
+               "snapshot", "apply_points", "probe_point", "update_spells"}
 
     def command(self, body: dict) -> dict:
         action = body.get("action")
@@ -1183,6 +1231,12 @@ class BotManager:
                 self.config["points_size"] = size
             self.save()
         self.message = "применено: " + ", ".join(POINTS[n] for n in clean)
+
+    def _cmd_update_spells(self, _body: dict) -> dict:
+        if self.spells_status is None:
+            raise BotError("справочник умений скачивается только в программе")
+        self._spells_try_at = self.clock()
+        return self.spells_status(start=True)
 
     def _cmd_probe_point(self, body: dict) -> None:
         name = body.get("name")
@@ -1404,7 +1458,8 @@ class BotManager:
             if d.get("auto_build", True) and game:
                 info = self.build_info(feed, pid) if pid is not None else {"book": False, "keys": []}
                 add("Данж: билд из экипировки", info["book"] and info["keys"],
-                    "нет справочника умений — перезапустите программу (скачает сама)" if not info["book"] else
+                    (info.get("book_error") or "нет справочника умений — скачивается сам, или кнопка "
+                     "«Скачать справочник умений» ниже") if not info["book"] else
                     "экипировка не видна — снимите и наденьте предмет в игре; пока бот жмёт свои умения или Q/W/E",
                     required=False)
             if d.get("loot_bags") or d.get("open_chests"):
@@ -1535,7 +1590,16 @@ class BotManager:
                          "spells": list(b.spells), "kind": KIND_NAMES.get(b.kind, b.kind), "cd": b.cd,
                          "learned": round(learned, 1) if learned else None, "cast": b.cast, "aim": b.aim,
                          "used": b.kind != "move"})
-        return {"book": bool(book and book.get("items")), "equipment": [
+        have = bool(book and book.get("items"))
+        status: dict = {}
+        if not have and self.spells_status is not None:
+            # Нет справочника — скачать самим (не чаще раза в 10 минут), показать ход и ошибку.
+            auto = self.clock() - self._spells_try_at > 600
+            if auto:
+                self._spells_try_at = self.clock()
+            status = self.spells_status(start=auto)
+        return {"book": have, "book_loading": bool(status.get("loading")), "book_error": status.get("error", ""),
+                "equipment": [
                     {"slot": slot, "id": iid, "name": self.item_name(iid)} for slot, iid in eq.items()],
                 "keys": keys}
 

@@ -53,6 +53,7 @@ from . import dungeons as dungeons_mod
 from . import economy as economy_mod
 from .gamedata import GAMEDATA_VERSION, GameData
 from .gamedata import download as download_gamedata
+from .gamedata import download_spells
 from .items import download_catalog
 from .production import CraftParams, PriceBook, craft_table, enchant_table, farming_table, journal_table
 from .items import ItemCatalog, enchant_of, tier_of
@@ -160,7 +161,7 @@ class App:
                                price_of=self.bot_price, item_name=lambda i: self.catalog.name(i),
                                zonemaps=self.zonemaps, zone_name=self.zonemaps.zone_name,
                                notify=self._bot_alert, heat=self._bot_heat, my_orders=self._bot_my_orders,
-                               spellbook=lambda: self.gamedata.spells)
+                               spellbook=lambda: self.gamedata.spells, spells_status=self.spells_status)
         self.killboard = KillboardFetcher(self.conn, self.write_lock, self.settings)
         self.albion.on("zone", self._on_zone)
 
@@ -198,9 +199,24 @@ class App:
         self.sniffer = Sniffer(self.albion, ports=tuple(self.config.game_ports), record_path=self.config.record_path,
                                **kwargs)
         self.sniffer.taps.append(self.bots.on_packet)
+        self.bots.ports_listener = self.sniffer.set_local_ports
         if self.bots.config.get("enabled"):
             self.bots.start_loop()
-        return self.sniffer.start()
+        ok = self.sniffer.start()
+        if ok and self.bots.desktop.available:
+            threading.Thread(target=self._watch_game_ports, daemon=True, name="game-ports").start()
+        return ok
+
+    def _watch_game_ports(self, period: float = 3.0) -> None:  # pragma: no cover - нужен Windows
+        """Локальные UDP-порты окон игры → захват (смена зоны = новое подключение)."""
+        sniffer = self.sniffer
+        while sniffer is self.sniffer and not sniffer.stop_event.is_set():
+            try:
+                wins = self.bots.desktop.game_windows()
+                sniffer.set_local_ports({p for w in wins for p in w.ports})
+            except Exception:
+                log.debug("Не удалось получить порты игры", exc_info=True)
+            sniffer.stop_event.wait(period)
 
     def capture_status(self) -> dict:
         st = dict(self.albion.stats)
@@ -412,6 +428,29 @@ class App:
         return {"now": now, "rows": rows[:_limit(q2, 2000)],
                 "players": sorted(players.values(), key=lambda p: p["value"] + p["silver"], reverse=True),
                 "character": self.character()}
+
+    def spells_status(self, start: bool = False) -> dict:
+        """Справочник умений для билда бота: есть ли, качается ли, ошибка. ``start`` —
+        скачать сейчас (если его нет или по кнопке)."""
+        st = self.__dict__.setdefault("_spells", {"loading": False, "error": "", "at": 0.0})
+        have = bool(self.gamedata.spells.get("items"))
+        if start and not st["loading"]:
+            st.update(loading=True, error="", at=time.time())
+            path = Path(self.config.items_path).with_name("gamedata.json")
+
+            def work():
+                try:
+                    n = download_spells(path)
+                    self.gamedata = GameData.load(path)
+                    log.info("Справочник умений загружен: %d умений", n)
+                except (OSError, ValueError) as e:
+                    st["error"] = f"не удалось скачать справочник умений: {e}"
+                    log.warning("%s", st["error"])
+                finally:
+                    st["loading"] = False
+            threading.Thread(target=work, daemon=True, name="spells").start()
+        return {"have": have or bool(self.gamedata.spells.get("items")), "loading": st["loading"],
+                "error": st["error"]}
 
     def reload_reference(self) -> None:
         self.catalog = ItemCatalog.load(self.config.items_path)

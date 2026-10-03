@@ -342,6 +342,36 @@ class BotsApiTest(unittest.TestCase):
         self.assertIn(50007, self.app.bots.feeds)
         self.app.sniffer.stop()
 
+    def test_spells_status_downloads_in_background(self):
+        import time as _time
+        from albion_trader import server as server_mod
+        self.app.gamedata.spells = {"items": {}, "spells": {}}
+        done = []
+
+        def fake(path):
+            done.append(path)
+            import json as _json
+            Path(path).write_text(_json.dumps({"version": 3, "spells": {"items": {"T4_X": {"q": ["A"]}},
+                                                                      "spells": {"A": [3, 0, "enemy", "damage"]}}}))
+            return 1
+        with mock.patch.object(server_mod, "download_spells", fake):
+            self.assertFalse(self.app.spells_status()["have"])
+            st = self.app.spells_status(start=True)
+            for _ in range(100):
+                if not self.app.spells_status()["loading"]:
+                    break
+                _time.sleep(0.02)
+        self.assertTrue(self.app.spells_status()["have"])
+        self.assertEqual(len(done), 1)
+        self.assertIn("loading", st)
+        with mock.patch.object(server_mod, "download_spells", side_effect=OSError("нет сети")):
+            self.app.spells_status(start=True)
+            for _ in range(100):
+                if not self.app.spells_status()["loading"]:
+                    break
+                _time.sleep(0.02)
+        self.assertIn("нет сети", self.app.spells_status()["error"])
+
     def test_bot_heat_and_my_orders(self):
         now = int(time.time())
         loc = normalize_location("3005")

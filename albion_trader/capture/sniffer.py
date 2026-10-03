@@ -143,6 +143,10 @@ class Sniffer:
         # Дополнительные получатели пакетов игры: (локальный порт, полезная нагрузка UDP).
         # Локальный порт различает окна игры, запущенные на одном компьютере (боты).
         self.taps: list[Callable[[int, bytes], None]] = []
+        # Локальные UDP-порты процесса игры (по таблице Windows): пакеты на них берём,
+        # даже если порт сервера другой — частный сервер может держать зоны на разных
+        # портах, а после смены зоны игра подключается к другому серверу.
+        self.local_ports: frozenset = frozenset()
         # Движение (самое частое событие) не разбираем вовсе.
         self.parser = PhotonParser(state.on_request, state.on_response, state.on_event,
                                    state.on_encrypted, event_filter=state.accepts_event)
@@ -191,8 +195,21 @@ class Sniffer:
             self._record.close()
             self._record = None
 
+    def set_local_ports(self, ports) -> None:
+        self.local_ports = frozenset(int(p) for p in ports)
+
+    def _sides(self, src_port: int, dst_port: int) -> tuple[int, bool]:
+        """(локальный порт, пакет от сервера)."""
+        if dst_port in self.local_ports:
+            return dst_port, True
+        if src_port in self.local_ports:
+            return src_port, False
+        inbound = src_port in self.ports
+        return (dst_port if inbound else src_port), inbound
+
     def feed_ip_packet(self, packet: bytes) -> None:
-        payload = parse_ipv4_udp(packet, self.ports)
+        local = self.local_ports
+        payload = parse_ipv4_udp(packet, self.ports if not local else (*self.ports, *local))
         if not payload:
             return
         if self._is_duplicate(packet, payload):
@@ -209,8 +226,7 @@ class Sniffer:
                 log.debug("Ошибка разбора пакета", exc_info=True)
         if self.taps:
             ihl = (packet[0] & 0x0F) * 4
-            src_port, dst_port = struct.unpack_from(">HH", packet, ihl)
-            local = dst_port if src_port in self.ports else src_port
+            local, _inbound = self._sides(*struct.unpack_from(">HH", packet, ihl))
             for tap in self.taps:
                 try:
                     tap(local, payload)
@@ -219,11 +235,11 @@ class Sniffer:
 
     def _is_duplicate(self, packet: bytes, payload: bytes) -> bool:
         ihl = (packet[0] & 0x0F) * 4
-        src_port = struct.unpack_from(">H", packet, ihl)[0]
+        _local, inbound = self._sides(*struct.unpack_from(">HH", packet, ihl))
         # Сторона игрового сервера одинакова в обоих экземплярах, адрес нашей
         # стороны может отличаться (NAT виртуального адаптера).
-        server = packet[12:16] if src_port in self.ports else packet[16:20]
-        key = hash((server, src_port in self.ports, payload))
+        server = packet[12:16] if inbound else packet[16:20]
+        key = hash((server, inbound, payload))
         now = time.monotonic()
         seen = self._recent.get(key)
         if seen is not None and now - seen < DEDUP_WINDOW:
@@ -251,7 +267,7 @@ class Sniffer:
                 if isinstance(addr, tuple) and len(addr) >= 3 and addr[0] == "lo" and addr[2] == 4:
                     continue
                 # Быстрая отсечка чужого трафика прямо в потоке чтения.
-                if not _is_albion_udp(data, self.ports):
+                if not _is_albion_udp(data, self.ports, self.local_ports):
                     continue
                 try:
                     self.queue.put_nowait(data)
@@ -276,14 +292,14 @@ class Sniffer:
             self.feed_ip_packet(data)
 
 
-def _is_albion_udp(packet: bytes, ports) -> bool:
+def _is_albion_udp(packet: bytes, ports, local=()) -> bool:
     if len(packet) < 28 or packet[0] >> 4 != 4 or packet[9] != 17:
         return False
     ihl = (packet[0] & 0x0F) * 4
     if len(packet) < ihl + 4:
         return False
     src, dst = struct.unpack_from(">HH", packet, ihl)
-    return src in ports or dst in ports
+    return src in ports or dst in ports or src in local or dst in local
 
 
 class PcapWriter:
