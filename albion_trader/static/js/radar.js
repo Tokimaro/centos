@@ -95,7 +95,7 @@ const short = (t, n = SHORT_LEN) => (t && t.length > n ? t.slice(0, n - 1) + "�
 // Объекты по имени из события (RANDOMDUNGEON_SOLO_…, …MISTS…) и виду события: короткое
 // русское название, значок и цвет. Порядок важен — первое совпадение.
 const OBJECT_TYPES = [
-  [/MIST/, "Мгла", "🌫", "#9fc3d9"],
+  [/MIST|WISP/, "Мгла", "🌫", "#7fd3ff"],
   [/HELLGATE/, "Адские врата", "🔥", "#ff5a36"],
   [/CORRUPT/, "Проклятый", "☠", "#e5484d"],
   [/AVALON|ROADS/, "Авалон", "🌀", "#f5c542"],
@@ -636,6 +636,7 @@ class RadarView {
     // Сначала дальние; игроки поверх остального.
     ents.sort((a, b) => (a.kind === "player") - (b.kind === "player") || b.dist - a.dist);
     const offscreen = [];
+    const players = [];
     for (const e of ents) {
       const [sx, sy] = at(e.x, e.y);
       if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) {
@@ -645,7 +646,7 @@ class RadarView {
       const stale = o.stale && (e.kind === "player" || e.kind === "mob") && e.age > STALE_SECONDS;
       ctx.globalAlpha = stale ? 0.4 : 1;
       if (e.kind === "resource") this.drawResource(ctx, e, sx, sy);
-      else if (e.kind === "player") this.drawPlayer(ctx, e, sx, sy, me);
+      else if (e.kind === "player") { players.push([e, sx, sy, ctx.globalAlpha]); hits.push([sx, sy, e]); ctx.globalAlpha = 1; continue; }
       else if (e.kind === "mob") this.drawMob(ctx, e, sx, sy);
       else if (e.kind === "loot") this.drawLoot(ctx, e, sx, sy);
       else {
@@ -654,6 +655,16 @@ class RadarView {
       }
       ctx.globalAlpha = 1;
       hits.push([sx, sy, e]);
+    }
+    // Подписи остальных — в обход точек игроков; игроки — поверх всего.
+    ctx.font = "bold 11px system-ui, sans-serif";
+    const nameW = (e) => (o.labels && o.playerlabel !== "none" ? ctx.measureText(short(e.name)).width / 2 + 3 : 0);
+    this.flushLabels(ctx, players.flatMap(([e, x, y]) => [[x - 9, y - 9, x + 9, y + 9],
+      [x - nameW(e), y - 20, x + nameW(e), y - 5]]));
+    for (const [e, sx, sy, alpha] of players) {
+      ctx.globalAlpha = alpha;
+      this.drawPlayer(ctx, e, sx, sy, me);
+      ctx.globalAlpha = 1;
     }
     this.flushLabels(ctx);
     if (o.squads) this.drawSquads(ctx, at, ents, me);
@@ -871,8 +882,8 @@ class RadarView {
     if (text) (this.labels || (this.labels = [])).push({ text, x, y, color, prio, dist, font });
   }
 
-  flushLabels(ctx) {
-    const placed = [];
+  flushLabels(ctx, keepClear = []) {
+    const placed = [...keepClear];
     const items = (this.labels || []).sort((a, b) => a.prio - b.prio || a.dist - b.dist);
     for (const l of items) {
       ctx.font = l.font;
@@ -925,6 +936,12 @@ class RadarView {
 
   drawMob(ctx, e, sx, sy) {
     const o = this.opts, m = e.mob;
+    if (/MIST|WISP/.test(`${(m && m.id) || ""} ${e.name || ""}`.toUpperCase())) {
+      // Шар Мглы приходит как моб — значок и подпись Мглы.
+      const info = drawObjectIcon(ctx, { name: "MIST", event: "" }, sx, sy, this.dense);
+      if (o.labels && !this.dense) this.queueLabel("Мгла", sx, sy - 12, info.color, 1, e.dist);
+      return;
+    }
     if (m && m.res && o.livingasres) {   // живой ресурс (шкура с мобов и т. п.) — значком ресурса
       drawResourceIcon(ctx, { res: m.res, tier: m.tier, enchant: e.enchant || 0 }, sx, sy, this.dense ? 20 : 30);
       ctx.strokeStyle = RADAR_COLOR.mob; ctx.lineWidth = 1.5;
@@ -972,7 +989,9 @@ class RadarView {
       let text = short(e.name);
       if (!this.dense && o.playerlabel === "guild" && e.guild) text = `${e.name} [${e.guild}]`;
       if (!this.dense && o.playerlabel === "power") text = [e.name, e.ip ? `IP ${e.ip}` : "", e.role].filter(Boolean).join(" · ");
-      this.queueLabel(text, sx, sy - 9, hostile ? "#ff6b6b" : "#f1f1f1", 0, e.dist, "bold 11px system-ui, sans-serif");
+      // Имя враждебного — всегда; остальных — если не налезает на другие имена.
+      this.queueLabel(text, sx, sy - 9, hostile ? "#ff6b6b" : "#f1f1f1", hostile ? 0 : 0.5, e.dist,
+        "bold 11px system-ui, sans-serif");
     }
     ctx.font = "11px system-ui, sans-serif";
   }

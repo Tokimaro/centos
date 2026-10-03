@@ -45,7 +45,7 @@ def portal_kind(name: str) -> str:
     up = (name or "").upper()
     if not up or up in ("ВХОД В ДАНЖ",):
         return "unknown"
-    if "MIST" in up:
+    if "MIST" in up or "WISP" in up:
         return "mists"                 # портал в Мглу — не данж
     if "CORRUPT" in up:
         return "corrupted"

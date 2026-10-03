@@ -88,6 +88,7 @@ rtest("подписи: игрок, ресурс, моб (обрезка длин
   eq(radarLabel({ kind: "object", name: "RANDOMDUNGEON_GROUP_X", event: "new_random_dungeon_exit" }), "Данж");
   eq(radarLabel({ kind: "object", name: "PORTAL_MISTS_SOLO_ENTRANCE", event: "new_portal_entrance" }), "Мгла");
   eq(radarLabel({ kind: "object", name: "HELLGATE_2V2", event: "new_portal_entrance" }), "Адские врата");
+  eq(radarLabel({ kind: "object", name: "WISP_ENTRANCE", event: "new_portal_entrance" }), "Мгла");
   eq(radarLabel({ kind: "object", name: "CORRUPTED_SOLO", event: "new_random_dungeon_exit" }), "Проклятый");
   eq(radarLabel({ kind: "object", name: "WHATEVER_THING", event: "new_whatever" }), "Объект");
   eq(radarLabel({ kind: "object", name: "WHATEVER_THING", event: "new_whatever" }, true), "Объект — WHATEVER_THING");
