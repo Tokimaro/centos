@@ -1082,6 +1082,16 @@ class RadarView {
     return `<b>${info.icon} ${esc(radarLabel(e, true))}</b><div class="muted">${fmt(e.dist)} м${e.event ? ` · ${esc(e.event)}` : ""}</div>`;
   }
 
+  // Игроков 0 при живом трафике — подсказать, где искать причину.
+  playersHint(n) {
+    const codes = this.data.codes || [];
+    if (n.player || codes.length < 15) return "";
+    const nc = codes.find((c) => c.name === "new_character");
+    return nc && nc.count
+      ? `<br><span class="bad">событие игроков (код ${nc.code}) пришло ${nc.count} раз, но игроков нет — пришлите «Коды событий»</span>`
+      : `<br><span class="bad">событий об игроках нет — номер события на этом сервере другой? «Коды событий» внизу</span>`;
+  }
+
   drawHud(me) {
     const n = {};
     for (const e of this.data.entities) n[e.kind] = (n[e.kind] || 0) + 1;
@@ -1094,7 +1104,7 @@ class RadarView {
     this.hud.innerHTML = this.error ? `<span class="bad">Нет связи: ${esc(this.error)}</span>`
       : `<b>${esc(me.name || "персонаж")}</b> · ${esc(me.zone_name || "зона неизвестна")} · (${fmt1(me.x)}, ${fmt1(me.y)})${replay}<br>
         игроки ${n.player || 0}${hostile ? ` (<span style="color:#ff5a5a">враждебных ${hostile}</span>)` : ""} · мобы ${n.mob || 0}
-        · ресурсы ${n.resource || 0} · лут ${n.loot || 0} · объекты ${n.object || 0}`
+        · ресурсы ${n.resource || 0} · лут ${n.loot || 0} · объекты ${n.object || 0}${this.playersHint(n)}`
         + (this.opts.profile ? ` · профиль «${esc(this.opts.profile)}»` : "")
         + (bg ? `<br><span class="muted">${esc(bg)}</span>` : "");
   }

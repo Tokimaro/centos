@@ -319,6 +319,8 @@ class AlbionState:
         if name:
             with self.lock:
                 self._fire("request:" + name, params)
+        if name == "move" and self.stats.get("move_op_detected") == code:
+            return                          # опознанное движение — не рынок и не смена зоны
         with self.lock:
             if code == self.op["get_game_server_by_cluster"]:
                 self._set_location(params.get(0), "GetGameServerByCluster")
@@ -358,13 +360,13 @@ class AlbionState:
             return
         old = self._op_names.get(code)
         log.info("Запрос движения опознан по форме: код %s вместо %s%s", code, self.op["move"],
-                 f" (был «{old}»)" if old else "")
-        for name, v in list(self.op.items()):
-            if v == code and name != "move":
-                self.op[name] = -1           # этот код у сервера — движение, не «{name}»
+                 f" (совпадает с «{old}»)" if old else "")
+        # Другие операции не отключаем (их ответы по-прежнему узнаются), только запрос
+        # с этим кодом считаем движением.
         self.op["move"] = code
         self._interesting = set(self.op.values())
-        self._op_names = {v: k for k, v in self.op.items()}
+        self._op_names = {v: k for k, v in self.op.items() if k != "move"}
+        self._op_names[code] = "move"
         self.stats["move_op_detected"] = code
         self._move_seen = True
 
@@ -402,6 +404,8 @@ class AlbionState:
                 self._set_location(params.get(8), "Join?")
                 self._set_zone(params.get(8))
                 self._set_character(params.get(2))
+                self._fire("response:join", params)   # радар: свой id, имя и позиция
+                return
             name = self._op_names.get(code)
             if name:
                 self._fire("response:" + name, params)

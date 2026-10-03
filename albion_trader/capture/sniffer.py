@@ -26,6 +26,7 @@ from .photon import PhotonParser
 log = logging.getLogger("albion_trader.capture")
 
 ALBION_PORTS = (5056,)
+MAX_CONNECTIONS = 32      # разборов подключений одновременно (по зонам, окнам)
 ETH_P_IP = 0x0800
 # В людных зонах (Карлеон) игра шлёт очень много событий. Маленький буфер
 # сокета переполняется, теряются куски больших ответов рынка — просим у
@@ -148,8 +149,10 @@ class Sniffer:
         # портах, а после смены зоны игра подключается к другому серверу.
         self.local_ports: frozenset = frozenset()
         # Движение (самое частое событие) не разбираем вовсе.
-        self.parser = PhotonParser(state.on_request, state.on_response, state.on_event,
-                                   state.on_encrypted, event_filter=state.accepts_event)
+        self.parser = self._new_parser()          # разбор по умолчанию (пакеты без пары адресов)
+        # Свой разбор на каждое подключение (локальный порт + сервер): куски больших
+        # сообщений разных подключений нумеруются независимо и не должны смешиваться.
+        self.parsers: dict = {}
         self.parser_lock = threading.Lock()
         self.queue: queue.Queue = queue.Queue(maxsize=QUEUE_LIMIT)
         self.stop_event = threading.Event()
@@ -195,6 +198,28 @@ class Sniffer:
             self._record.close()
             self._record = None
 
+    def _new_parser(self) -> PhotonParser:
+        st = self.state
+        return PhotonParser(st.on_request, st.on_response, st.on_event, st.on_encrypted,
+                            event_filter=st.accepts_event)
+
+    def parser_for(self, packet: bytes, local: int, inbound: bool) -> PhotonParser:
+        ihl = (packet[0] & 0x0F) * 4
+        sport, dport = struct.unpack_from(">HH", packet, ihl)
+        server = (packet[12:16], sport) if inbound else (packet[16:20], dport)
+        key = (local, server)
+        p = self.parsers.get(key)
+        if p is None:
+            if len(self.parsers) >= MAX_CONNECTIONS:      # старые подключения (прошлые зоны)
+                old = next(iter(self.parsers))
+                self.parser.evicted_segments += self.parsers.pop(old).evicted_segments
+            p = self.parsers[key] = self._new_parser()
+        return p
+
+    @property
+    def evicted_segments(self) -> int:
+        return self.parser.evicted_segments + sum(p.evicted_segments for p in self.parsers.values())
+
     def set_local_ports(self, ports) -> None:
         self.local_ports = frozenset(int(p) for p in ports)
 
@@ -219,14 +244,15 @@ class Sniffer:
         self.status["last_packet_at"] = time.time()
         if self._record:
             self._record.write(packet)
+        ihl = (packet[0] & 0x0F) * 4
+        local_port, inbound = self._sides(*struct.unpack_from(">HH", packet, ihl))
         with self.parser_lock:
             try:
-                self.parser.receive_packet(payload)
+                self.parser_for(packet, local_port, inbound).receive_packet(payload)
             except Exception:  # pragma: no cover - битый пакет не должен ронять захват
                 log.debug("Ошибка разбора пакета", exc_info=True)
         if self.taps:
-            ihl = (packet[0] & 0x0F) * 4
-            local, _inbound = self._sides(*struct.unpack_from(">HH", packet, ihl))
+            local = local_port
             for tap in self.taps:
                 try:
                     tap(local, payload)

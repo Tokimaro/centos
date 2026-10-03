@@ -231,6 +231,29 @@ class SnifferTest(unittest.TestCase):
         self.assertEqual(got, [50007, 50007])              # исходящий и входящий — порт игры
         self.assertEqual(state.stats["requests"], 1)
 
+    def test_fragments_of_two_connections_do_not_mix(self):
+        # Два подключения игры (прошлая и новая зона) шлют большие события кусками
+        # с одинаковым номером начала — каждое должно собраться целым.
+        state = AlbionState(Collector())
+        names = []
+        state.on("event:new_character", lambda prm: names.append(prm[1]))
+        s = Sniffer(state)
+        s.set_local_ports({50007, 50008})
+
+        def frags(name):
+            data = pb.command(4, bytes([state.ev["new_character"]]) + pb.params({0: 1, 1: name * 200}))[12:]
+            half = len(data) // 2
+            out = []
+            for num, (off, chunk) in enumerate(((0, data[:half]), (half, data[half:]))):
+                frag = struct.pack(">IIIII", 7, 2, num, len(data), off) + chunk
+                out.append(pb.packet(bytes([8, 0, 0, 0]) + struct.pack(">II", 12 + len(frag), num) + frag))
+            return out
+        a, b = frags("A"), frags("B")
+        for payload, port in ((a[0], 50007), (b[0], 50008), (a[1], 50007), (b[1], 50008)):
+            s.feed_ip_packet(pb.ip_udp(payload, src_port=5056, dst_port=port))
+        self.assertEqual(names, ["A" * 200, "B" * 200])
+        self.assertEqual(s.evicted_segments, 0)
+
     def test_capture_error_reported(self):
         from albion_trader.capture.sniffer import CaptureError
 

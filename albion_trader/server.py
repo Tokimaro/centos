@@ -224,7 +224,7 @@ class App:
             st.update(enabled=False, running=False, error=None, packets=0, last_packet_at=None)
         else:
             st.update(enabled=True, **self.sniffer.status)
-            st["incomplete_messages"] = self.sniffer.parser.evicted_segments
+            st["incomplete_messages"] = self.sniffer.evicted_segments
         st["zone_name"] = self.zone_name(st.get("zone")) if st.get("zone") else None
         loc = st.get("location")
         if loc == "3003":

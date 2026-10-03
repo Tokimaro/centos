@@ -209,6 +209,9 @@ def check_live(r: Report, url: str) -> bool:
                     f"Фон зоны не готов: {m.get('error') or m.get('status')}", WARN)
         except OSError as e:
             r.add(WARN, f"/api/zonemap не ответил: {e}")
+    nc = next((c for c in codes if c.get("name") == "new_character"), None)
+    r.add(INFO, f"Событие игроков (new_character): код {nc['code']}, пришло {nc['count']} раз — {nc.get('shape')}"
+          if nc else "Событие игроков (new_character) не приходило")
     kinds = {}
     for e in d.get("entities") or []:
         kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1

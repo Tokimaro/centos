@@ -951,7 +951,7 @@ class BotManager:
                         del self.feeds[oldest]
                     feed = self.feeds[key] = ClientFeed(self.make_radar, self.opcodes(), self.clock)
         try:
-            feed.feed(payload)
+            feed.feed(payload, local_port)
         except Exception:  # pragma: no cover - битый пакет не роняет захват
             log.debug("Ошибка разбора пакета бота", exc_info=True)
         session = self.session

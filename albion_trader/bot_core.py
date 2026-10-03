@@ -44,8 +44,8 @@ class ClientFeed:
         self.state = AlbionState(lambda *_a: None, opcodes, clock=clock)
         self.radar = make_radar()
         self.radar.attach(self.state)
-        self.parser = PhotonParser(self._on_request, self.state.on_response, self.state.on_event,
-                                   event_filter=self.state.accepts_event)
+        self.parser = self._new_parser()
+        self.parsers: dict[int, PhotonParser] = {}   # по локальному порту: подключения не смешиваются
         self.requests = 0
         self.request_log: collections.deque = collections.deque(maxlen=30)
         self.request_counts: collections.Counter = collections.Counter()
@@ -123,9 +123,20 @@ class ClientFeed:
         self.request_counts[name] += 1
         self.state.on_request(code, params)
 
-    def feed(self, payload: bytes) -> None:
+    def _new_parser(self) -> PhotonParser:
+        return PhotonParser(self._on_request, self.state.on_response, self.state.on_event,
+                            event_filter=self.state.accepts_event)
+
+    def feed(self, payload: bytes, port: int | None = None) -> None:
         self.last_packet_at = self.clock()
-        self.parser.receive_packet(payload)
+        parser = self.parser
+        if port is not None:
+            parser = self.parsers.get(port)
+            if parser is None:
+                if len(self.parsers) >= 16:
+                    self.parsers.pop(next(iter(self.parsers)))
+                parser = self.parsers[port] = self._new_parser()
+        parser.receive_packet(payload)
         # Встречи и узлы для базы этим копиям радара не нужны — не копим.
         self.radar.pending_players.clear()
         self.radar.pending_nodes.clear()
