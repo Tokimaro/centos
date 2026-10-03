@@ -23,10 +23,13 @@ from __future__ import annotations
 
 import math
 
+from .bot_build import KeyLearner, auto_skills, detect_build
 from .bot_core import BotError, parse_skills, skill_ready
 from .bot_threat import DANGER, ThreatTracker, friends_of
 
 FIGHT_TIMEOUT = 45.0      # моб не умирает так долго — бросаем
+FALLBACK_SKILLS = "q:3 w:10 e:20"   # нет ни билда, ни своего списка
+CAST_CHECK = 0.35         # столько ждать запроса игры после нажатия умения, с
 EXPLORE_CELL = 10.0       # клетка «уже были здесь» при разведке, м
 EXIT_EVENTS = ("new_exit", "new_portal_exit", "new_portal_entrance", "new_random_dungeon_exit")
 ENTRY_RADIUS = 15.0       # выход ближе к точке появления на этаже — это выход назад
@@ -187,7 +190,8 @@ class DungeonMixin:
         hp = self.feed.hp_pct
         if hp is None:
             return
-        if d.get("potion_key") and hp < float(d.get("potion_hp") or 40) and self.clock() - self.potion_at > 30:
+        if (d.get("potion_key") and hp < float(d.get("potion_hp") or 40)
+                and self.clock() - self.potion_at > max(5.0, self.potion_cd)):
             self.press_key(d["potion_key"])
             self.potion_at = self.clock()
             self.note(f"здоровье {hp:.0f}% — зелье")
@@ -245,7 +249,100 @@ class DungeonMixin:
             return math.hypot(m.x - px, m.y - py) + 25 * over
         return min(pool, key=score)
 
+    # --- билд и умения ----------------------------------------------------
+    def my_build(self, d: dict) -> list:
+        """Умения надетой экипировки (пусто — экипировка ещё не видна или нет справочника)."""
+        book = self.manager.spellbook() if self.manager.spellbook else {}
+        try:
+            eq = self.feed.radar.my_equipment()
+        except BotError:
+            return []
+        return detect_build(eq, book, d.get("potion_key") or "", d.get("food_key") or "")
+
+    def learner(self, key: str, prior: float) -> KeyLearner:
+        item = self.key_items.get(key, "")
+        cur = self.learners.get(key)
+        if cur is None or cur[0] != item:
+            saved = ((self.manager.config.get("learned_cd") or {}).get(self.feed.character or "", {})
+                     .get(f"{key}:{item}") or {})
+            cur = self.learners[key] = (item, KeyLearner(prior, saved.get("cd"), saved.get("lo") or 0.0))
+        return cur[1]
+
+    def combat_skills(self, d: dict, manual: list) -> list:
+        """Умения для боя: из билда (если включено и экипировка видна) плюс свой список."""
+        build = self.my_build(d) if d.get("auto_build", True) else []
+        if not build:
+            return manual or parse_skills(FALLBACK_SKILLS)
+        self.key_items = {b.key: b.item for b in build}
+        for b in build:
+            if b.slot == "зелье" and b.cd:
+                self.potion_cd = b.cd
+        learned = {}
+        for b in build:
+            lr = self.learner(b.key, b.cd)
+            if lr.learned:
+                learned[b.key] = lr.learned
+        return auto_skills(build, manual, learned)
+
+    def cast_requests(self) -> int:
+        c = self.feed.request_counts
+        return sum(c.values()) - c.get("move", 0)
+
+    def use_skill(self, s, d: dict, target) -> bool:
+        """Нажать умение. С изучением перезарядки — успех, только если игра отправила запрос
+        (умение было готово); иначе клавиша ждёт и бот пробует следующее умение."""
+        at = None
+        if s.aim and target is not None and self.manager.config.get("input") != "background":
+            px, py = self.pos()
+            at = self.plan_click(target.x - px, target.y - py, 0.45)[:2]
+        if not d.get("learn_cd", True):
+            self.press_key(s.key, at=at)
+            self.cooldowns[s.key] = self.clock() + s.cd
+            if s.cast:
+                self.wait(s.cast)                  # каст: не двигаться
+            return True
+        lr = self.learner(s.key, s.cd)
+        before, t = self.cast_requests(), self.clock()
+        self.press_key(s.key, at=at)
+        self.wait(CAST_CHECK)
+        if self.cast_requests() > before:
+            known = lr.learned
+            lr.ok(t)
+            self.cooldowns[s.key] = lr.ready_at
+            if lr.learned and lr.learned != known:
+                self.learned_dirty = True
+                self.note(f"перезарядка {s.key.upper()}: {lr.learned:g} с")
+            if s.cast > CAST_CHECK:
+                self.wait(s.cast - CAST_CHECK)     # каст: не двигаться
+            return True
+        lr.fail(t)
+        self.cooldowns[s.key] = lr.ready_at
+        return False
+
+    def save_learned(self) -> None:
+        if not self.learned_dirty or not getattr(self, "pid", None):
+            return
+        try:
+            name = self.feed.character or ""
+        except BotError:
+            return
+        with self.manager.lock:
+            store = self.manager.config.setdefault("learned_cd", {}).setdefault(name, {})
+            for key, (item, lr) in self.learners.items():
+                if lr.hi is not None:
+                    store[f"{key}:{item}"] = lr.state()
+            self.manager.save()
+        self.learned_dirty = False
+
+    def eat(self, d: dict) -> None:
+        key = d.get("food_key")
+        if key and self.clock() - self.food_at > float(d.get("food_min") or 30) * 60:
+            self.press_key(key)
+            self.food_at = self.clock()
+            self.note("еда перед данжем")
+
     def fight(self, mob, d: dict, skills: list, done: set) -> None:
+        skills = self.combat_skills(d, skills)
         boss = self.is_boss(mob)
         name = mob.name or f"моб {mob.id}"
         self.status = f"бой: {'босс ' if boss else ''}{name}"
@@ -266,6 +363,7 @@ class DungeonMixin:
                     self.note(f"босс побеждён: {name}")
                 else:
                     self.note(f"побеждён {name} (всего {self.kills})")
+                self.save_learned()
                 self.wait(self.rng.uniform(0.8, 1.6))      # добыча появляется не сразу
                 return
             if self.clock() - start > FIGHT_TIMEOUT * (3 if boss else 1):
@@ -288,12 +386,9 @@ class DungeonMixin:
             hp = self.feed.hp_pct
             for s in skills:
                 if self.clock() >= self.cooldowns.get(s.key, 0) and skill_ready(s, hp, boss, first):
-                    self.press_key(s.key)
-                    self.cooldowns[s.key] = self.clock() + s.cd
-                    if s.cast:
-                        self.wait(s.cast)         # каст: не двигаться
-                    first = False
-                    break
+                    if self.use_skill(s, d, cur):
+                        first = False
+                        break
             self.heal(d)
             self.wait(0.6)
 
@@ -439,6 +534,7 @@ class DungeonMixin:
         """Пройти данж этаж за этажом. Возвращает «done», «players» или «time»."""
         self.start_dungeon_state()
         self.last_hits = self.feed.hits
+        self.eat(d)
         started = self.clock()
         used: set = set()
         while True:

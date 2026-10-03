@@ -298,6 +298,10 @@ class Radar:
             pos = find_position(p, keys.get("position"))
             if pos:
                 self.me["x"], self.me["y"] = pos
+            if keys.get("equipment") is not None:
+                eq = _equipment(p.get(keys["equipment"]))
+                if any(eq):
+                    self.me["equipment"] = eq
 
     def on_own_move(self, p: dict) -> None:
         pos = find_position(p, self.keys("op:move").get("position"))
@@ -350,6 +354,8 @@ class Radar:
         ent = self.entities.get(_int(p.get(keys["id"])))
         if ent and ent.kind == KIND_PLAYER:
             self._remember_player(ent)
+            if ent.id == self.me["id"] and any(ent.equipment):
+                self.me["equipment"] = list(ent.equipment)
 
     def _remember_player(self, ent: Entity) -> None:
         if not ent.name or ent.id == self.me["id"]:
@@ -368,9 +374,19 @@ class Radar:
         return ent if ent and ent.kind == KIND_PLAYER else None
 
     def _ev_character_equipment_changed(self, p, keys):
+        oid = _int(p.get(keys["id"]))
+        eq = _equipment(p.get(keys.get("equipment")))
+        if oid is not None and oid == self.me["id"] and any(eq):
+            self.me["equipment"] = eq            # своя экипировка — для билда бота
         ent = self._player(p, keys)
         if ent:
-            ent.equipment = _equipment(p.get(keys.get("equipment")))
+            ent.equipment = eq
+
+    def my_equipment(self) -> dict:
+        """Своя экипировка: {слот: id предмета} (слоты как в EQUIPMENT_SLOTS)."""
+        with self.lock:
+            eq = list(self.me.get("equipment") or [])
+        return {slot: iid for slot, iid in ((x["slot"], x["id"]) for x in self._items(eq))}
 
     def _ev_regeneration_health_changed(self, p, keys):
         ent = self.entities.get(_int(p.get(keys["id"])))

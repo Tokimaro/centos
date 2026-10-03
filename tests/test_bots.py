@@ -139,6 +139,9 @@ class FakeGame:
         self.players = {}         # id → (x, y, зона, имя, флаг)
         self.harvest_ok = True
         self.ignore_clicks = False
+        self.key_cd = {}          # клавиша → настоящая перезарядка умения, с
+        self.key_last = {}
+        self.casts = []
         self.move_op = DEFAULT_OPCODES["move"]   # частный сервер может слать движение под другим кодом
         self.center = (0.5, 0.5)  # где персонаж на экране на самом деле
         self.walls = []           # [(x0, y0, x1, y1)] — непроходимо
@@ -330,6 +333,12 @@ class FakeGame:
             self.join(pid, self.manager.feed_for(pid).character, target, pos)
 
     def key(self, pid, combo):
+        cd = self.key_cd.get(combo)
+        if cd is not None:
+            if self.clock() - self.key_last.get(combo, -1e9) < cd:
+                return                       # умение не готово — игра запрос не шлёт
+            self.key_last[combo] = self.clock()
+            self.casts.append((combo, self.clock()))
         self.request(pid, 99, {})
         if combo == "a" and self.zone[pid] in self.exit_map:
             self.exiting = (pid, self.clock() + 10)
@@ -1315,6 +1324,79 @@ class CombatTest(Base):
         visited = set()
         self.bot.explore(visited)
         self.assertEqual(len(self.bot.explore_failed), 1)
+
+
+class BuildFightTest(Base):
+    """Билд из экипировки: умения брони и шлема, наведение, изучение перезарядок."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_bot_build import BOOK
+        names = {1: "T4_2H_BOW", 2: "T4_HEAD_PLATE", 3: "T4_ARMOR_CLOTH", 4: "T4_SHOES_LEATHER",
+                 5: "T4_POTION_HEAL", 6: "T4_MEAL_SOUP"}
+        self.mgr.make_radar = lambda: Radar(clock=self.clock, item_of=names.get)
+        self.mgr.spellbook = lambda: BOOK
+        self.window("Hero", zone="DUNGEON1", pos=(0.0, 0.0))
+        self.mgr.config["points"] = dict(ALL_POINTS)
+        self.bot.calibrate()
+
+    def equip(self):
+        # оружие, вторая рука, голова, броня, обувь, сумка, плащ, маунт, зелье, еда
+        self.game.event(1, "character_equipment_changed", {0: 1, 2: [1, 0, 2, 3, 4, 0, 0, 0, 5, 6]})
+
+    def d(self, **kw):
+        return {**self.mgr.task_config("dungeon"), **kw}
+
+    def test_fight_uses_equipment_and_learns_cooldowns(self):
+        g = self.game
+        self.equip()
+        g.key_cd = {"q": 2.5, "w": 10.0, "e": 12.0, "r": 25.0, "d": 30.0}
+        g.add_mob(1, 300, 6, 0, hp=1_000_000, name="T5_MOB_BOSS")     # босс — бой до 135 с
+        g.event(1, "regeneration_health_changed", {0: 1, 2: 500.0, 3: 1000.0})    # 50 %: лечение и щит
+        self.clock.limit = self.clock.t + 120
+        with self.assertRaises(BotStopped):
+            self.bot.fight(self.bot.feed.entity(300), self.d(potion_key="1"), [], set())
+        used = {k for k, _t in g.casts}
+        self.assertTrue({"q", "e", "r", "d"} <= used, used)
+        self.assertNotIn("w", used)                              # рывок в бою не нажимается
+        self.assertNotIn("f", {k for _p, k in self.desk.keys})
+        e_times = [t for k, t in g.casts if k == "e"]
+        self.assertTrue(all(b - a >= 12.0 for a, b in zip(e_times, e_times[1:])))
+        self.assertGreaterEqual(len(e_times), 8)                 # не ждёт 30 с из справочника
+        q_lr = self.bot.learners["q"][1]
+        self.assertLessEqual(abs(q_lr.learned - 2.5), 1.0, q_lr.state())
+        self.assertLessEqual(abs(self.bot.learners["e"][1].learned - 12.0), 1.0)
+        self.assertTrue(self.desk.moved_cursor)                  # умения с целью — курсор на моба
+        self.assertEqual(self.bot.potion_cd, 105.0)
+        self.assertTrue(any("перезарядка Q" in t for t in self.texts()))
+        self.bot.save_learned()
+        saved = json.loads((Path(self.tmp.name) / "bots.json").read_text())["learned_cd"]["Hero"]
+        self.assertIn("e:T4_2H_BOW", saved)
+        info = self.mgr.snapshot()["game"]["build"]
+        self.assertTrue(info["book"])
+        self.assertEqual(len(info["equipment"]), 6)
+        keys = {k["key"]: k for k in info["keys"]}
+        self.assertEqual(keys["d"]["kind"], "усиление")
+        self.assertFalse(keys["f"]["used"])
+        self.assertIsNotNone(keys["e"]["learned"])
+
+    def test_no_equipment_falls_back_and_food(self):
+        g = self.game
+        g.add_mob(1, 300, 6, 0)
+        self.bot.fight(self.bot.feed.entity(300), self.d(), [], set())   # экипировки нет — q/w/e
+        self.assertIn((1, "q"), self.desk.keys)
+        self.equip()
+        self.mgr.command({"action": "configure", "dungeon": {"food_key": "2", "explore_min": 0.1}})
+        self.bot.run("dungeon")
+        self.assertIn((1, "2"), self.desk.keys)
+        self.assertTrue(any("еда перед данжем" in t for t in self.texts()))
+        before = len(self.desk.keys)
+        self.bot.eat(self.mgr.task_config("dungeon"))
+        self.assertEqual(len(self.desk.keys), before)            # не чаще раза в 30 минут
+        self.desk.keys.clear()
+        g.add_mob(1, 301, 6, 0)
+        self.bot.fight(self.bot.feed.entity(301), self.d(auto_build=False, learn_cd=False), [], set())
+        self.assertNotIn((1, "d"), self.desk.keys)
 
 
 class DungeonServicesTest(DungeonRunTest):

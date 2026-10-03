@@ -319,6 +319,9 @@ button.danger { border-color: var(--bad); color: var(--bad); }
 .bot-check li { break-inside: avoid; }
 .bot-group { margin: 6px 0; }
 .bot-group summary { cursor: pointer; color: var(--muted); }
+.bot-build { margin: 6px 0; }
+.bot-build table { font-size: 13px; }
+.bot-build tr.muted td { opacity: .6; }
 .bot-auto ol { margin: 6px 0; padding-left: 20px; font-size: 13px; }
 .bot-shot { position: relative; margin-top: 8px; max-width: 100%; }
 .bot-shot img { display: block; width: 100%; cursor: crosshair; border: 1px solid var(--border); border-radius: 4px; }

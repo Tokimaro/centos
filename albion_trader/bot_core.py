@@ -479,12 +479,16 @@ class Skill(NamedTuple):
     cast: float = 0.0                 # время каста: не двигаться, с
     self_cast: bool = False           # не нужна цель (лечение, щит)
     opener: bool = False              # в начале боя с целью
+    aim: bool = False                 # навести курсор на цель перед нажатием
+    kind: str = ""                    # вид из билда (heal, buff, cc, damage…)
 
 
 SKILLS_HELP = """Умение — «клавиша:перезарядка», через пробел, в порядке приоритета.
 Условия через @: hp<50 (своё здоровье ниже 50%), hp>80, boss (только по боссу),
 cast=1.5 (каст 1,5 с — не двигаться), self (без цели, например лечение),
-open (первым в бою с целью). Пример: q:3 w:10@open e:20@boss 2:30@hp<40@self"""
+open (первым в бою с целью), aim (навести курсор на цель).
+Пустое поле и «Билд из экипировки» — бот сам берёт умения надетых вещей; строки здесь
+заменяют автоматические для своих клавиш. Пример: q:3 w:10@open e:20@boss 2:30@hp<40@self"""
 
 
 def parse_skills(text: str) -> list[Skill]:
@@ -509,8 +513,8 @@ def parse_skills(text: str) -> list[Skill]:
                 opts["hp_below" if m.group(1) == "<" else "hp_above"] = float(m.group(2))
             elif mc:
                 opts["cast"] = min(10.0, float(mc.group(1)))
-            elif c in ("boss", "self", "open"):
-                opts[{"boss": "boss", "self": "self_cast", "open": "opener"}[c]] = True
+            elif c in ("boss", "self", "open", "aim"):
+                opts[{"boss": "boss", "self": "self_cast", "open": "opener", "aim": "aim"}[c]] = True
             else:
                 raise ValueError(f"непонятное условие «@{c}» у «{key}»")
         out.append(Skill(key.lower(), max(0.2, cool), **opts))

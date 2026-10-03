@@ -159,7 +159,8 @@ class App:
                                opcodes=lambda: {**self.albion.op, "events": dict(self.albion.ev)},
                                price_of=self.bot_price, item_name=lambda i: self.catalog.name(i),
                                zonemaps=self.zonemaps, zone_name=self.zonemaps.zone_name,
-                               notify=self._bot_alert, heat=self._bot_heat, my_orders=self._bot_my_orders)
+                               notify=self._bot_alert, heat=self._bot_heat, my_orders=self._bot_my_orders,
+                               spellbook=lambda: self.gamedata.spells)
         self.killboard = KillboardFetcher(self.conn, self.write_lock, self.settings)
         self.albion.on("zone", self._on_zone)
 

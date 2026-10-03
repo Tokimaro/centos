@@ -190,7 +190,8 @@ class DownloadTest(unittest.TestCase):
         import io
         import json as _json
         files = {"items.json": {"items": {}}, "loot.json": {}, "craftingmodifiers.json": {},
-                 "achievements.json": RAW_ACH, "cluster/world.json": RAW_WORLD}
+                 "achievements.json": RAW_ACH, "cluster/world.json": RAW_WORLD,
+                 "spells.json": {"spells": {"activespell": [{"@uniquename": "S", "@recastdelay": "5"}]}}}
 
         def urlopen(url, timeout=None):
             name = url.split("/master/", 1)[1]
@@ -210,10 +211,10 @@ class DownloadTest(unittest.TestCase):
             path = Path(d) / "gamedata.json"
             with mock.patch.object(gamedata.urllib.request, "urlopen", self.fake_urlopen()):
                 res = gamedata.download(path)
-            self.assertEqual((res["destiny_nodes"], res["clusters"]), (2, 2))
+            self.assertEqual((res["destiny_nodes"], res["clusters"], res["spells"]), (2, 2, 0))
             self.assertEqual(GameData.load(path).zones, {"4206": "Tharcal Fissure"})
             with mock.patch.object(gamedata.urllib.request, "urlopen",
-                                   self.fake_urlopen(("achievements.json", "cluster/world.json"))):
+                                   self.fake_urlopen(("achievements.json", "cluster/world.json", "spells.json"))):
                 res = gamedata.download(path)
             self.assertEqual((res["destiny_nodes"], res["clusters"]), (0, 0))
             with mock.patch.object(gamedata.urllib.request, "urlopen", self.fake_urlopen(("items.json",))):

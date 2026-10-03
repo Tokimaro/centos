@@ -275,6 +275,27 @@ App.tab({
     this.renderPlaces(d);
     this.renderMacros(d);
     this.renderExtras(d);
+    this.renderBuild(d);
+  },
+
+  // Билд персонажа: что надето, какие клавиши и с какой перезарядкой жмёт бот.
+  renderBuild(d) {
+    const box = $("#bot-build");
+    if (!box) return;
+    const b = d.game && d.game.build;
+    let html;
+    if (!b) html = '<span class="muted">Билд: окно игры не найдено.</span>';
+    else if (!b.book) html = '<span class="bad">Билд: нет справочника умений. Программа скачивает его сама при запуске (нужен интернет) — перезапустите start.bat или выполните <code>update-items</code>.</span>';
+    else if (!b.equipment.length) html = '<span class="muted">Билд: экипировка ещё не видна — снимите и наденьте любой предмет в игре (например, шлем), бот увидит весь комплект.</span>';
+    else {
+      html = `<div class="muted">Надето: ${b.equipment.map((e) => `${esc(e.slot)} — ${esc(e.name)}`).join(", ")}</div>`
+        + (b.keys.length ? `<div class="table-wrap"><table><thead><tr><th>Клавиша</th><th>Предмет</th><th>Вид</th><th>Перезарядка</th><th>Умения (варианты)</th></tr></thead><tbody>${
+          b.keys.map((k) => `<tr class="${k.used ? "" : "muted"}"><td><b>${esc(k.key.toUpperCase())}</b></td><td>${esc(k.item_name)}</td>
+            <td>${esc(k.kind)}${k.used ? "" : " (не жмёт)"}${k.aim ? " · по цели" : ""}</td>
+            <td>${k.learned ? `<b>${k.learned} с</b> (изучено)` : `${k.cd} с (справочник)`}</td>
+            <td><code>${esc(k.spells.join(", "))}</code></td></tr>`).join("")}</tbody></table></div>` : "");
+    }
+    if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
   },
 
   renderGame(d) {
@@ -399,7 +420,10 @@ App.tab({
         <div class="bots-row">${txt("exit_key", "клавиша быстрого выхода", "a")}
           ${num("exit_channel", "задержка выхода, с", 1, 60, 1, "урон сбивает выход: бот сначала добивает мобов рядом")}
           <span class="muted">быстрый выход переносит к входному порталу; не задана — выход пешком по этажам</span></div>
-        <div class="bots-row"><label class="col">Умения <input type="text" data-c="skills" value="${esc(c.skills || "")}" placeholder="q:3 w:10@open e:20@boss 2:30@hp<40@self"></label>
+        <div class="bots-row">${chk("auto_build", "билд из экипировки (умения и перезарядки сами)")}
+          ${chk("learn_cd", "уточнять перезарядки в бою")}${txt("food_key", "клавиша еды", "1")}${num("food_min", "есть раз в, мин", 1, 240)}</div>
+        <div id="bot-build" class="bot-build"></div>
+        <div class="bots-row"><label class="col">Свои умения (необязательно — заменяют автоматические для своих клавиш) <input type="text" data-c="skills" value="${esc(c.skills || "")}" placeholder="q:3 w:10@open e:20@boss 2:30@hp<40@self"></label>
           ${num("attack_range", "дальность атаки, м", 3, 40)}</div>
         <pre class="muted bots-help">${esc(d.skills_help)}</pre>
         <div class="bots-row">${txt("potion_key", "клавиша зелья", "2")}${num("potion_hp", "пить при HP ниже, %", 1, 99)}

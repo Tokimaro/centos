@@ -36,6 +36,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
+from .bot_build import KIND_NAMES, detect_build
 from .bot_core import (MACRO_HELP, POINTS, SKILLS_HELP, TEMPLATES, BotError, BotStopped, Calibration, ClientFeed,
                        fill, parse_macro, parse_skills, solve_calibration, split_items)
 from .bot_nav import Grid, Router
@@ -66,7 +67,7 @@ SAFETY_NAMES = {"safe": "только безопасные (синие)", "yello
 DEFAULT_CONFIG = {"enabled": False, "stop_key": "f12", "pause_when_active": True, "user_idle": 3.0,
                   "restore_focus": True, "input": "focus", "task": "gather", "work_min": 25, "rest_min": 5,
                   "watchdog_min": 10, "record": False, "schedule": "", "profiles": {}, "history": [],
-                  "calib": {}, "points": {}, "points_size": "", "places": {}, "macros": {},
+                  "calib": {}, "points": {}, "points_size": "", "places": {}, "macros": {}, "learned_cd": {},
                   **{k: dict(v) for k, v in DEFAULTS.items()}}
 SETTINGS = ("enabled", "stop_key", "pause_when_active", "user_idle", "restore_focus", "input", "task",
             "work_min", "rest_min", "watchdog_min", "record", "schedule")
@@ -104,6 +105,12 @@ class Bot(TasksMixin, DungeonMixin):
         self.fails_in_row = 0
         self.gathered = self.orders = self.trips = self.kills = self.loots = self.runs = 0
         self.bad_portals: set = set()
+        # Билд: изученные перезарядки клавиш (клавиша → (предмет, KeyLearner)), еда, зелье.
+        self.learners: dict = {}
+        self.key_items: dict[str, str] = {}
+        self.learned_dirty = False
+        self.food_at = -1e9
+        self.potion_cd = 30.0
         self.start_dungeon_state()
         self.rng = random.Random()
         self.heat_visited: dict = {}
@@ -276,6 +283,7 @@ class Bot(TasksMixin, DungeonMixin):
             self.note(f"сбой: {e}")
             log.exception("Сбой бота")
         finally:
+            self.save_learned()
             self.plan = {"zone": "", "target": None, "path": [], "explored": []}
             self.deadline = None
             self.manager.close_session()
@@ -330,9 +338,15 @@ class Bot(TasksMixin, DungeonMixin):
         self.manager.record({"a": "click", "x": round(fx + jx, 4), "y": round(fy + jy, 4), "b": button})
         self.act(lambda d, w, bg: d.click(w, fx + jx, fy + jy, button, background=bg))
 
-    def press_key(self, combo: str) -> None:
-        self.manager.record({"a": "key", "k": combo})
-        self.act(lambda d, w, bg: d.press(w, combo, background=bg))
+    def press_key(self, combo: str, at: tuple[float, float] | None = None) -> None:
+        """Нажать клавишу; ``at`` — сначала навести курсор на эту точку окна (умения с целью)."""
+        self.manager.record({"a": "key", "k": combo, **({"x": round(at[0], 4), "y": round(at[1], 4)} if at else {})})
+
+        def do(d, w, bg):
+            if at and not bg:
+                d.move_cursor(*w.point(*at))
+            d.press(w, combo, background=bg)
+        self.act(do)
 
     def plan_click(self, dx: float, dy: float, step: float) -> tuple[float, float, float, float]:
         """Куда кликнуть, чтобы пойти к смещению (dx, dy) от персонажа: доли окна и
@@ -753,6 +767,7 @@ class BotManager:
                  notify: Callable[[str, str, str], None] = lambda *_a: None,
                  heat: Callable[[str], list] = lambda _z: [],
                  my_orders: Callable[[str, str, str], list] = lambda *_a: [],
+                 spellbook: Callable[[], dict] | None = None,
                  clock: Callable[[], float] = time.time,
                  sleep: Callable[[float, threading.Event], bool] = _event_sleep):
         self.config_path = Path(config_path)
@@ -768,6 +783,7 @@ class BotManager:
         self.vision: dict | None = None
         self.heat = heat
         self.my_orders = my_orders
+        self.spellbook = spellbook        # умения предметов (справочник игры) — для билда
         self.session: Session | None = None
         self.clock = clock
         self.sleep = sleep
@@ -1291,6 +1307,12 @@ class BotManager:
             except ValueError:
                 ok_skills = False
             add("Данж: умения", ok_skills, "исправьте строку умений")
+            if d.get("auto_build", True) and game:
+                info = self.build_info(feed, pid) if pid is not None else {"book": False, "keys": []}
+                add("Данж: билд из экипировки", info["book"] and info["keys"],
+                    "нет справочника умений — перезапустите программу (скачает сама)" if not info["book"] else
+                    "экипировка не видна — снимите и наденьте предмет в игре; пока бот жмёт свои умения или Q/W/E",
+                    required=False)
             if d.get("loot_bags") or d.get("open_chests"):
                 need_points(("loot_all",), "Данж: кнопка «Взять всё»")
             add("Данж: клавиша быстрого выхода", d.get("exit_key"), "без неё — выход пешком по этажам",
@@ -1403,6 +1425,26 @@ class BotManager:
         return {"ok": True, "text": rec.text() if rec and not rec.point else ""}
 
     # --- состояние для интерфейса ---------------------------------------
+    def build_info(self, feed, pid: int) -> dict:
+        """Билд персонажа в окне: экипировка, умения по клавишам, изученные перезарядки."""
+        book = self.spellbook() if self.spellbook else {}
+        eq = feed.radar.my_equipment() if feed else {}
+        d = self.task_config("dungeon")
+        build = detect_build(eq, book, d.get("potion_key") or "", d.get("food_key") or "")
+        learners = self.bot.learners if self.bot.pid == pid else {}
+        saved = (self.config.get("learned_cd") or {}).get(self.character_of(pid) or "", {})
+        keys = []
+        for b in build:
+            item, lr = learners.get(b.key, ("", None))
+            learned = lr.learned if lr is not None and item == b.item else (saved.get(f"{b.key}:{b.item}") or {}).get("cd")
+            keys.append({"key": b.key, "slot": b.slot, "item": b.item, "item_name": self.item_name(b.item),
+                         "spells": list(b.spells), "kind": KIND_NAMES.get(b.kind, b.kind), "cd": b.cd,
+                         "learned": round(learned, 1) if learned else None, "cast": b.cast, "aim": b.aim,
+                         "used": b.kind != "move"})
+        return {"book": bool(book and book.get("items")), "equipment": [
+                    {"slot": slot, "id": iid, "name": self.item_name(iid)} for slot, iid in eq.items()],
+                "keys": keys}
+
     def snapshot(self) -> dict:
         if self.config.get("enabled") and self.clock() - self._refreshed > 2.0:
             self.refresh()
@@ -1421,7 +1463,8 @@ class BotManager:
                     "pos": [round(me.get("x", 0), 1), round(me.get("y", 0), 1)] if feed else None,
                     "hp": round(feed.hp_pct) if feed and feed.hp_pct is not None else None,
                     "counts": {k: sum(1 for e in ents if e.kind == k) for k in ("resource", "mob", "loot", "player")},
-                    "calibrated": bool(win and (self.config["calib"].get(size_key(win)) or {}).get("measured"))}
+                    "calibrated": bool(win and (self.config["calib"].get(size_key(win)) or {}).get("measured")),
+                    "build": self.build_info(feed, pid)}
         rec = self.recorder
         cfg = self.config
         return {"supported": self.desktop.available, "enabled": bool(cfg.get("enabled")),

@@ -32,7 +32,8 @@ DEFAULTS = {
                   # Игроки на пути — убежать и перестроить маршрут в обход этой зоны.
                   "avoid_players": True, "player_radius": 50, "friends": "", "danger_ip": 0,
                   "escape_key": "", "avoid_min": 15},
-    "dungeon": {"skills": "q:3 w:10 e:20", "attack_range": 15, "potion_key": "", "potion_hp": 40,
+    "dungeon": {"skills": "", "auto_build": True, "learn_cd": True, "food_key": "", "food_min": 30,
+                "attack_range": 15, "potion_key": "", "potion_hp": 40,
                 "retreat_hp": 20, "loot_bags": True, "open_chests": True, "chest_wait": 8,
                 "explore_min": 4, "max_min": 40, "max_floors": 8,
                 # Цикл из города: где сдавать добычу, где искать порталы, от кого уходить.

@@ -19,7 +19,7 @@ from pathlib import Path
 log = logging.getLogger("albion_trader.gamedata")
 
 DUMPS_URL = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/"
-GAMEDATA_VERSION = 2
+GAMEDATA_VERSION = 3   # 3: умения предметов и их перезарядки (spells.json)
 
 # Кластеры из craftingmodifiers.json -> ключи рынков.
 CLUSTER_TO_MARKET = {
@@ -149,9 +149,92 @@ def parse_clusters(raw: dict | None) -> dict:
     return out
 
 
+# Слот предмета → клавиши его активных умений (раскладка Albion по умолчанию).
+SPELL_SLOTS = ("mainhand", "head", "armor", "shoes", "potion", "food")
+SPELL_KEY_OF_SLOT = {"1": "q", "2": "w", "3": "e"}
+
+
+def spell_kind(spell: dict) -> str:
+    """heal / shield / buff / cc / move / damage — как бот будет применять умение."""
+    cat = (spell.get("@category") or "").lower()
+    ui = (spell.get("@uitype") or "").lower()
+    target = (spell.get("@target") or "").lower()
+    if ui == "heal" and target in ("self", "friendall", "friendother", "all", "allplayers", "friendallplayers"):
+        return "heal"
+    if cat == "crowdcontrol" or ui == "crowdcontrol":
+        return "cc"
+    if ui == "movement" or cat in ("movementbuff", "forcedmovement") and target == "self":
+        return "move"
+    if "shield" in cat or (ui == "buff" and target == "self" and cat in ("buff", "instant")):
+        return "shield" if "shield" in cat else "buff"
+    return "damage"
+
+
+def parse_spells(raw_items: dict, raw_spells: dict | None) -> dict:
+    """{"items": {предмет: {"slot", "q"/"w"/"e"/"a": [умения]}}, "spells": {умение: [перезарядка, каст, цель, вид]}}.
+
+    У оружия умения разложены по слотам Q/W/E (``@slots``), у брони, шлема и обуви —
+    одно активное из списка (``a``), у зелий и еды — ``@consumespell``."""
+    if not raw_spells:
+        return {"items": {}, "spells": {}}
+    root = raw_spells.get("spells", raw_spells)
+    active = {}
+    for kind in ("activespell", "togglespell"):
+        for sp in root.get(kind) or []:
+            if isinstance(sp, dict) and sp.get("@uniquename"):
+                active[sp["@uniquename"]] = sp
+    items_root = raw_items.get("items", raw_items)
+    by_name: dict[str, dict] = {}
+    for entries in items_root.values():
+        if isinstance(entries, list):
+            for it in entries:
+                if isinstance(it, dict) and it.get("@uniquename"):
+                    by_name[it["@uniquename"]] = it
+
+    def craft_spells(name: str, depth: int = 0) -> list:
+        it = by_name.get(name)
+        c = it.get("craftingspelllist") if it else None
+        if not isinstance(c, dict) or depth > 6:
+            return []
+        if c.get("@reference"):
+            return craft_spells(c["@reference"], depth + 1)
+        return [x for x in _as_list(c.get("craftspell")) if isinstance(x, dict)]
+
+    items: dict[str, dict] = {}
+    used: set = set()
+    for name, it in by_name.items():
+        slot = it.get("@slottype")
+        if slot not in SPELL_SLOTS:
+            continue
+        entry: dict = {"slot": slot}
+        if slot in ("potion", "food"):
+            sp = it.get("@consumespell")
+            if sp in active:
+                entry["a"] = [sp]
+        else:
+            for c in craft_spells(name):
+                sp = c.get("@uniquename")
+                if sp not in active:
+                    continue              # пассивные умения не нажимаются
+                key = SPELL_KEY_OF_SLOT.get(str(c.get("@slots") or "")) if slot == "mainhand" else "a"
+                if key:
+                    entry.setdefault(key, []).append(sp)
+        if len(entry) > 1:
+            items[name] = entry
+            for k, v in entry.items():
+                if k != "slot":
+                    used.update(v)
+    spells = {}
+    for name in used:
+        sp = active[name]
+        spells[name] = [round(_num(sp.get("@recastdelay")), 2), round(_num(sp.get("@castingtime")), 2),
+                        (sp.get("@target") or "").lower(), spell_kind(sp)]
+    return {"items": items, "spells": spells}
+
+
 def build(raw_items: dict, raw_loot: dict | None = None, raw_modifiers: dict | None = None,
           world_text: str | None = None, raw_achievements: dict | None = None,
-          raw_world: dict | None = None) -> dict:
+          raw_world: dict | None = None, raw_spells: dict | None = None) -> dict:
     items_root = raw_items.get("items", raw_items)
     meta: dict[str, dict] = {}
     recipes: dict[str, dict] = {}
@@ -300,7 +383,7 @@ def build(raw_items: dict, raw_loot: dict | None = None, raw_modifiers: dict | N
     return {"version": GAMEDATA_VERSION, "items": meta, "recipes": recipes, "upgrades": upgrades,
             "journals": journals, "plants": plants, "animals": animals, "cities": city,
             "zones": parse_world(world_text or ""), "destiny": parse_destiny(raw_achievements),
-            "clusters": parse_clusters(raw_world)}
+            "clusters": parse_clusters(raw_world), "spells": parse_spells(raw_items, raw_spells)}
 
 
 class GameData:
@@ -319,6 +402,7 @@ class GameData:
         self.zones: dict = data.get("zones", {})
         self.destiny: dict = data.get("destiny") or {"templates": {}, "nodes": {}}
         self.clusters: dict = data.get("clusters", {})
+        self.spells: dict = data.get("spells") or {"items": {}, "spells": {}}
 
     @classmethod
     def load(cls, path: str | Path) -> "GameData":
@@ -369,7 +453,7 @@ def download(path: str | Path, base_url: str = DUMPS_URL) -> dict:
         world = resp.read().decode("utf-8", errors="replace")
     raw_world = fetch("cluster/world.json", optional=True)
     data = build(fetch("items.json"), fetch("loot.json"), fetch("craftingmodifiers.json"), world,
-                 fetch("achievements.json", optional=True), raw_world)
+                 fetch("achievements.json", optional=True), raw_world, fetch("spells.json", optional=True))
     if raw_world:   # список зон и их файлов раскладки — для фонов радара
         from .zonemaps import ZoneMaps
         try:
@@ -381,4 +465,5 @@ def download(path: str | Path, base_url: str = DUMPS_URL) -> dict:
     p.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     return {"recipes": len(data["recipes"]), "journals": len(data["journals"]),
             "plants": len(data["plants"]), "animals": len(data["animals"]),
-            "destiny_nodes": len(data["destiny"]["nodes"]), "clusters": len(data["clusters"])}
+            "destiny_nodes": len(data["destiny"]["nodes"]), "clusters": len(data["clusters"]),
+            "spells": len(data["spells"]["spells"])}
