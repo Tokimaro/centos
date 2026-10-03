@@ -6,6 +6,13 @@ rem   2) функции Windows, права, окна игры и их порт�
 rem      персонажи, трафик, калибровка, макросы (отчёт data\bots_check.txt);
 rem   3) переключение на окно игры и обратно.
 rem Запускайте, когда Albion Trader работает, боты включены и окна игры открыты.
+rem Права администратора — как у start.bat, иначе проверка переключения окон неточна.
+net session >nul 2>&1
+if errorlevel 1 (
+  echo Запрашиваю права администратора...
+  powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+  exit /b
+)
 cd /d "%~dp0"
 set "PY="
 py -3 -c "import sys" >nul 2>&1 && set "PY=py -3"

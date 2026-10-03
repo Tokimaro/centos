@@ -1137,8 +1137,19 @@ class BotManager:
             raise BotError(f"неизвестная задача «{task}»")
         with self.lock:
             self.config["task"] = task
+            enabling = not self.config.get("enabled")
+            self.config["enabled"] = True        # «Запустить» сразу включает бота
             self.save()
-        pid = self._need_window()
+        if enabling:
+            self.start_loop()
+            self.refresh()
+        try:
+            pid = self._need_window()
+        except BotError as e:
+            if enabling and "ещё не известен" in str(e):
+                raise BotError("бот включён и слушает игру — смените зону в игре (выйдите из здания или "
+                               "пройдите в соседнюю зону), затем нажмите «Запустить» ещё раз") from None
+            raise
         missing = [c["item"] + (f" — {c['hint']}" if c.get("hint") else "")
                    for c in self.checklist(task) if c["required"] and not c["ok"]]
         if missing:
@@ -1227,7 +1238,9 @@ class BotManager:
                 pid = None
             feed = self.feed_for(pid)
             add("Персонаж известен", bool(self.character_of(pid)), "смените зону в игре")
-            add("Трафик игры идёт", bool(feed and self.clock() - feed.last_packet_at < 60),
+            # Работающий бот сам следит за трафиком (сторож), перезапуск задачи не блокируем.
+            fresh = bool(feed and self.clock() - feed.last_packet_at < 60)
+            add("Трафик игры идёт", fresh or (self.bot.running and self.bot.pid == pid),
                 "игра свёрнута или не тот порт сервера (--game-port)")
             win = self.windows.get(pid)
             calibrated = bool(win and (cfg["calib"].get(size_key(win)) or {}).get("measured"))

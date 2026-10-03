@@ -20,7 +20,18 @@ class FakeProc:
         return None if self.alive else 0
 
 
+def plain_user(test):
+    """Не от администратора, окно появляется сразу (как на обычном компьютере)."""
+    for name, value in (("_is_elevated", False), ("_wait_shown", True)):
+        p = mock.patch.object(window, name, return_value=value)
+        p.start()
+        test.addCleanup(p.stop)
+
+
 class WindowTest(unittest.TestCase):
+    def setUp(self):
+        plain_user(self)
+
     def test_find_browser_prefers_edge_then_path(self):
         env = {"ProgramFiles(x86)": r"C:\PF86", "ProgramFiles": r"C:\PF", "LOCALAPPDATA": r"C:\Users\u\AppData\Local"}
         edge = str(Path(r"C:\PF86") / "Microsoft" / "Edge" / "Application" / "msedge.exe")
@@ -71,6 +82,26 @@ class WindowTest(unittest.TestCase):
                                        opener=lambda url, new=0: opened.append(url))
             self.assertEqual(w.open()["mode"], "browser")
 
+    def test_elevated_or_missing_window_falls_back_to_popup(self):
+        launched = []
+        procs = []
+
+        def popen(cmd, **kw):
+            launched.append(cmd)
+            procs.append(mock.Mock(**{"poll.return_value": None}))
+            return procs[-1]
+        with tempfile.TemporaryDirectory() as d:
+            w = window.CompanionWindow("http://x", d, popen=popen, finder=lambda: "edge", elevated=lambda: True)
+            r = w.open()
+            self.assertEqual(r["mode"], "popup")
+            self.assertIn("администратора", r["reason"])
+            self.assertEqual(launched, [])                 # браузер от администратора не запускаем
+            w = window.CompanionWindow("http://x", d, popen=popen, finder=lambda: "edge",
+                                       elevated=lambda: False, shown=lambda title: False)
+            self.assertEqual(w.open()["mode"], "popup")
+            procs[0].terminate.assert_called_once()        # невидимый процесс закрыт
+            self.assertFalse(w.running())
+
     def test_topmost_state(self):
         with tempfile.TemporaryDirectory() as d:
             w = window.CompanionWindow("http://x", d)
@@ -82,6 +113,7 @@ class WindowTest(unittest.TestCase):
 
 class WindowApiTest(unittest.TestCase):
     def setUp(self):
+        plain_user(self)
         self.tmp = tempfile.TemporaryDirectory()
         d = Path(self.tmp.name)
         self.app = App(AppConfig(db_path=d / "m.db", items_path=d / "items.json", capture=False))

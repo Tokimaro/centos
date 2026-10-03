@@ -164,6 +164,7 @@ class LiveChecksTest(unittest.TestCase):
         rw = self.app.radar_window
         rw.finder = lambda: "msedge.exe"
         rw.popen = mock.Mock(return_value=mock.Mock(poll=lambda: None))
+        rw.elevated, rw.shown = (lambda: False), (lambda title: True)
         with mock.patch.object(window, "IS_WINDOWS", True), \
                 mock.patch.object(window, "_set_topmost", return_value=True), \
                 mock.patch.object(window, "_set_overlay", return_value=True) as ov:
@@ -192,6 +193,11 @@ class LiveChecksTest(unittest.TestCase):
             r = Report()
             radar_check.check_window_live(r, self.url, pause=0)
         self.assertEqual(r.counts["FAIL"], 3)
+        rw.elevated = lambda: True
+        with mock.patch.object(window, "IS_WINDOWS", False):
+            r = Report()
+            radar_check.check_window_live(r, self.url, pause=0)
+        self.assertIn("Окно-приложение не открылось (программа запущена от администратора)", text(r))
         r = Report()
         radar_check.check_window_live(r, "http://127.0.0.1:1", pause=0)
         self.assertIn("Программа не отвечает", text(r))

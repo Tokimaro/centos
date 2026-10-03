@@ -63,6 +63,27 @@ class RadarTest(unittest.TestCase):
         self.feed(event(self.ev["leave"], {0: 5}))
         self.assertEqual(self.radar()["entities"], [])
 
+    def test_own_move_op_detected_by_shape(self):
+        # Частный сервер: свой запрос движения идёт с другим кодом операции.
+        self.feed(pb.packet(pb.response(2, {0: 1, 2: "Me", 8: "3004", 9: [10.0, 10.0]})))
+        self.feed(pb.packet(pb.request(77, {1: [5.0, 5.0], 2: 3})))          # редкий запрос — не движение
+        for i in range(8):
+            self.feed(pb.packet(pb.request(40, {1: [20.0 + i, 30.0]})))
+        r = self.radar()
+        self.assertEqual((r["me"]["x"], r["me"]["y"]), (27.0, 30.0))
+        self.assertEqual(self.app.albion.stats["move_op_detected"], 40)
+        self.feed(pb.packet(pb.request(40, {1: [1.0, 2.0]})))
+        self.assertEqual(self.radar()["me"]["x"], 1.0)
+        self.feed(pb.packet(pb.request(77, {1: [5.0, 5.0]})))
+        self.assertEqual(self.radar()["me"]["x"], 1.0)
+
+    def test_known_move_op_disables_detection(self):
+        self.feed(pb.packet(pb.request(21, {1: [11.0, 12.0]})))
+        for i in range(10):
+            self.feed(pb.packet(pb.request(40, {1: [20.0 + i, 30.0]})))
+        self.assertNotIn("move_op_detected", self.app.albion.stats)
+        self.assertEqual(self.radar()["me"]["x"], 11.0)
+
     def test_moves_skipped_while_radar_closed(self):
         self.feed(event(self.ev["new_character"], {0: 5, 1: "Bob", 12: [1.0, 2.0]}), move(5, 9.0, 9.0))
         self.assertEqual(self.app.radar.entities[5].x, 1.0)

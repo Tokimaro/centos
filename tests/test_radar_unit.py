@@ -605,6 +605,7 @@ class ServerRadarApiTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_window_api_selects_radar(self):
+        self.app.radar_window.elevated = lambda: False
         self.app.radar_window.popen = mock.Mock()
         self.app.radar_window.finder = lambda: None
         self.app.radar_window.opener = mock.Mock()

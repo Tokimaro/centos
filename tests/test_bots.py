@@ -539,10 +539,19 @@ class ManagerTest(Base):
             self.mgr.on_packet(port, pb.packet(pb.request(21, {1: [1.0, 1.0]})))
         self.assertLessEqual(len(self.mgr.feeds), 65)
 
+    def test_start_enables_bot(self):
+        self.mgr.config["enabled"] = False
+        self.game.windows[3] = GameWindow(30, 3, "Albion Online", rect=(0, 0, 800, 600), ports=[50003])
+        with self.assertRaisesRegex(BotError, "бот включён и слушает игру — смените зону"):
+            self.mgr.command({"action": "start", "task": "wander"})
+        self.assertTrue(self.mgr.config["enabled"])
+        self.assertTrue(self.mgr.snapshot()["enabled"])
+
     def test_only_one_bot_runs(self):
         self.window()
         self.mgr.command({"action": "start", "task": "wander"})
         first = self.bot.thread
+        self.clock.t += 120          # трафик «устарел», пока бот работал (медленный компьютер)
         self.mgr.command({"action": "start", "task": "wander"})
         self.assertFalse(first.is_alive())          # прежняя задача остановлена
         self.assertTrue(self.bot.running)

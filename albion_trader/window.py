@@ -70,7 +70,9 @@ def app_command(browser: str, url: str, profile_dir: str | Path, size=DEFAULT_SI
 class CompanionWindow:
     def __init__(self, base_url: str, profile_dir: str | Path, popen=subprocess.Popen,
                  finder: Callable[[], str | None] = find_browser, opener=webbrowser.open,
-                 page: str = PAGE, title: str = TITLE, size=DEFAULT_SIZE):
+                 page: str = PAGE, title: str = TITLE, size=DEFAULT_SIZE,
+                 elevated: Callable[[], bool] | None = None,
+                 shown: Callable[[str], bool] | None = None):
         self.url = base_url.rstrip("/") + "/" + page
         self.title = title
         self.size = size
@@ -78,6 +80,8 @@ class CompanionWindow:
         self.popen = popen
         self.finder = finder
         self.opener = opener
+        self.elevated = elevated      # None — проверка Windows (_is_elevated)
+        self.shown = shown            # None — ожидание окна (_wait_shown)
         self.proc = None
         self.topmost = False
         self.overlay = False
@@ -93,12 +97,20 @@ class CompanionWindow:
             if self.running():
                 _activate(self.title)
                 return {"mode": "app", "already": True}
+            if (self.elevated or _is_elevated)():
+                # Edge/Chrome, запущенные от администратора, молча закрываются — окно
+                # откроет сам браузер с интерфейсом (всплывающее окно, заголовок тот же).
+                return {"mode": "popup", "reason": "программа запущена от администратора"}
             browser = self.finder()
             if browser:
                 self.profile_dir.mkdir(parents=True, exist_ok=True)
                 try:
                     self.proc = self.popen(app_command(browser, self.url, self.profile_dir, self.size),
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if not (self.shown or _wait_shown)(self.title):
+                        log.warning("Окно %s не появилось (%s) — откроет браузер", self.title, Path(browser).name)
+                        self._kill()
+                        return {"mode": "popup", "reason": "окно браузера не появилось"}
                     log.info("Окно %s открыто (%s)", self.title, Path(browser).name)
                     if self.topmost:
                         threading.Thread(target=self._apply_topmost_later, daemon=True).start()
@@ -107,6 +119,14 @@ class CompanionWindow:
                     log.warning("Не удалось запустить %s: %s", browser, e)
             self.opener(self.url, new=1)
             return {"mode": "browser"}
+
+    def _kill(self) -> None:
+        proc, self.proc = self.proc, None
+        try:
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+        except OSError:  # pragma: no cover
+            pass
 
     def set_topmost(self, on: bool) -> dict:
         self.topmost = bool(on)
@@ -134,6 +154,31 @@ class CompanionWindow:
 
 
 # --- Windows ------------------------------------------------------------------
+
+def _is_elevated() -> bool:
+    if not IS_WINDOWS:
+        return False
+    try:  # pragma: no cover - требует Windows
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (OSError, AttributeError):  # pragma: no cover
+        return False
+
+
+def _wait_shown(title_prefix: str, timeout: float = 6.0) -> bool:
+    """Появилось ли окно с таким заголовком (вне Windows проверить нельзя — считаем, что да)."""
+    if not IS_WINDOWS:
+        return True
+    end = time.monotonic() + timeout  # pragma: no cover - требует Windows
+    while time.monotonic() < end:  # pragma: no cover
+        try:
+            if _find_windows(title_prefix):
+                return True
+        except (OSError, AttributeError):
+            return True                  # проверить нельзя — считаем, что окно есть
+        time.sleep(0.25)
+    return False  # pragma: no cover
+
 
 def _find_windows(title_prefix: str) -> list:  # pragma: no cover - требует Windows
     import ctypes

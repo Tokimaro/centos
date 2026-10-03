@@ -94,6 +94,10 @@ DEFAULT_EVENTS = {
     "overload_mode_update": 333,
     "encumbered_restricted": 612,
 }
+# Сколько запросов неизвестной операции с позицией [x, y] в параметре 1 нужно, чтобы
+# признать её своим движением (на частных серверах номер операции может отличаться).
+MOVE_DETECT = 8
+
 EVENT_MOVE = 3  # самое частое событие (движение) — разбираем, только пока открыт радар
 
 HISTORY_CACHE_SIZE = 1024
@@ -203,6 +207,7 @@ class AlbionState:
                  clock: Callable[[], float] = time.time):
         self.sink = sink
         self._listeners: dict[str, list[Callable]] = {}
+        self._move_candidates: dict[int, int] = {}
         self.set_opcodes(opcodes)
         self.character_name = ""
         self.clock = clock
@@ -253,6 +258,7 @@ class AlbionState:
         self._interesting = set(self.op.values())
         self._event_names = {v: k for k, v in self.ev.items()}
         self._op_names = {v: k for k, v in self.op.items()}
+        self._move_seen = False      # запрос движения с известным кодом уже был (иначе узнаём по форме)
 
     # --- подписчики ---------------------------------------------------
     def on(self, name: str, fn: Callable) -> None:
@@ -279,6 +285,10 @@ class AlbionState:
     # --- колбэки парсера -----------------------------------------------
     def on_request(self, op_code: int, params: dict) -> None:
         code = self._code(params, op_code)
+        if code == self.op["move"]:
+            self._move_seen = True
+        elif not self._move_seen and code not in self._interesting:
+            self._detect_move(code, params)
         name = self._op_names.get(code)
         if name:
             with self.lock:
@@ -295,6 +305,21 @@ class AlbionState:
                 self.stats["market_requests"] += 1
             elif code == self.op["auction_get_item_average_stats"]:
                 self._remember_history_request(params)
+
+    def _detect_move(self, code: int, params: dict) -> None:
+        """Свой запрос движения узнаём по форме: частый запрос с [x, y] в параметре 1."""
+        v = params.get(1)
+        if not (isinstance(v, (list, tuple)) and len(v) >= 2 and all(isinstance(c, float) for c in v[:2])):
+            return
+        n = self._move_candidates[code] = self._move_candidates.get(code, 0) + 1
+        if n < MOVE_DETECT:
+            return
+        log.info("Запрос движения опознан по форме: код %s вместо %s", code, self.op["move"])
+        self.op["move"] = code
+        self._interesting = set(self.op.values())
+        self._op_names = {v: k for k, v in self.op.items()}
+        self.stats["move_op_detected"] = code
+        self._move_seen = True
 
     def on_response(self, op_code: int, return_code: int, _debug: str, params: dict) -> None:
         code = self._code(params, op_code)

@@ -141,7 +141,7 @@ App.tab({
     $("#radar-open", el).addEventListener("click", async () => {
       try {
         const r = await apiPost("/api/window", { which: "radar", action: "open" });
-        if (r.mode) return;
+        if (r.mode && r.mode !== "popup") return;   // popup: откроет этот браузер
       } catch { /* не этот компьютер — всплывающее окно браузера */ }
       window.open("radar.html", "albion-radar", "popup,width=520,height=520");
     });

@@ -7,7 +7,7 @@
 async function openCompanion() {
   try {
     const r = await apiPost("/api/window", { action: "open" });
-    if (r.mode) return;
+    if (r.mode && r.mode !== "popup") return;   // popup: откроет этот браузер
   } catch { /* не этот компьютер — обычное всплывающее окно */ }
   window.open("companion.html", "albion-companion", "popup,width=560,height=860");
 }

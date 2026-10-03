@@ -225,8 +225,11 @@ def check_window_live(r: Report, url: str, pause: float = 3.0) -> None:
     except urllib.error.HTTPError as e:
         r.add(SKIP, f"Окно открывается только с компьютера, где запущена программа (HTTP {e.code})")
         return
-    r.add(OK if res.get("mode") == "app" else WARN,
-          "Окно радара открыто отдельным окном" if res.get("mode") == "app"
+    mode = res.get("mode")
+    r.add(OK if mode == "app" else WARN,
+          "Окно радара открыто отдельным окном" if mode == "app"
+          else f"Окно-приложение не открылось ({res.get('reason')}) — кнопка «Окно радара» откроет "
+               "всплывающее окно браузера с интерфейсом" if mode == "popup"
           else "Окно радара открыто вкладкой браузера (браузер на Chromium не найден)")
     time.sleep(pause)                                  # окну нужно время появиться
     if not w.get("windows"):

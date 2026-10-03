@@ -280,7 +280,7 @@ App.tab({
   renderGame(d) {
     const box = $("#bot-game");
     if (!d.supported) { box.innerHTML = `<span class="muted">Бот работает только в Windows — там, где запущена игра.</span>`; return; }
-    if (!d.enabled) { box.innerHTML = `<span class="muted">Включите бота галочкой выше — программа начнёт следить за окном игры.</span>`; return; }
+    if (!d.enabled) { box.innerHTML = `<span class="muted">Бот выключен и не слушает игру. Поставьте галочку «включить бота» (или нажмите «Запустить»), затем смените зону в игре — так бот узнает персонажа.</span>`; return; }
     const g = d.game;
     if (!g) { box.innerHTML = `<span class="muted">Окно игры не найдено. Запустите Albion Online.</span>`; return; }
     const c = g.counts || {};
