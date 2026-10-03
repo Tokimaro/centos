@@ -114,19 +114,60 @@ const OBJECT_TYPES = [
 ];
 const CHEST_SHORT = { 0: "", 1: "зел.", 2: "син.", 3: "зол." };
 
+// Сундуки и добыча — по виду события (в имени сундука бывает MISTS, HELLGATE…).
+const LOOT_TYPES = [
+  [/TREASURE_CHEST/, "Клад", "💎", "#7fe3ff"],
+  [/CHEST/, "Сундук", "📦", "#c98a4b"],
+  [/LOOT/, "Добыча", "💰", "#4aa3ff"],
+];
+
 function objectInfo(e) {
-  const key = `${e.name || ""} ${e.event || ""}`.toUpperCase();
+  const ev = (e.event || "").toUpperCase();
+  for (const [re, name, icon, color] of LOOT_TYPES) {
+    if (re.test(ev)) return { name, icon, color };
+  }
+  const key = `${e.name || ""} ${ev}`.toUpperCase();
   for (const [re, name, icon, color] of OBJECT_TYPES) {
     if (re.test(key)) return { name, icon, color };
   }
   return { name: "Объект", icon: "❔", color: RADAR_COLOR.object };
 }
 
+// Вид моба для карты: значок, короткое слово, цвет. Мобы различаются видом и тиром,
+// длинное имя — только в подсказке.
+const MOB_KINDS = {
+  wisp: { word: "Мгла", icon: "🌫", color: "#7fd3ff" },
+  boss: { word: "Босс", icon: "👑", color: "#ff7a1a" },
+  champion: { word: "Чемп.", icon: "👑", color: "#ff9f43" },
+  miniboss: { word: "Мини-босс", icon: "👑", color: "#ffb86b" },
+  elite: { word: "Элита", icon: "⭐", color: "#ffd166" },
+  chest: { word: "Сундук", icon: "📦", color: "#c98a4b" },
+  crystal: { word: "Кристалл", icon: "💠", color: "#9b8cff" },
+  harmless: { word: "", icon: "", color: "#9be29b" },
+  mob: { word: "", icon: "", color: RADAR_COLOR.mob },
+};
+
+function mobKind(e) {
+  const m = e.mob;
+  const id = `${(m && m.id) || ""} ${e.name || ""}`.toUpperCase();
+  if (/WISP/.test(id)) return "wisp";                 // шар — вход в Мглу
+  if (/POWERCRYSTAL|CRYSTAL_/.test(id)) return "crystal";
+  const cat = m && m.category;
+  return MOB_KINDS[cat] && cat !== "mob" ? cat : "mob";
+}
+
 function mobTitle(e, full = false) {
   const m = e.mob;
-  const name = m ? (full ? m.name : short(m.name, 14)) : "";
-  const base = m ? `T${m.tier ?? "?"} ${name}` : (e.name ? short(e.name) : `моб #${e.type_id ?? "?"}`);
-  return base + (e.enchant ? ` .${e.enchant}` : "") + (full && m && m.category_ru ? ` (${m.category_ru})` : "");
+  const tier = m ? `T${m.tier ?? "?"}` : "";
+  const ench = e.enchant ? `.${e.enchant}` : "";
+  if (full) {
+    const base = m ? `${tier} ${m.name}` : (e.name || `моб #${e.type_id ?? "?"}`);
+    return base + (e.enchant ? ` .${e.enchant}` : "") + (m && m.category_ru ? ` (${m.category_ru})` : "");
+  }
+  const kind = mobKind(e), word = MOB_KINDS[kind].word;
+  if (kind === "wisp" || kind === "chest") return word;   // тир входа в Мглу и сундука не нужен
+  if (!m) return word || `моб${e.type_id != null ? " #" + e.type_id : ""}`;
+  return [word, tier + ench].filter(Boolean).join(" ");
 }
 
 // Короткая подпись (на карте и в списке); full — полная (подсказка).
@@ -148,8 +189,8 @@ function radarLabel(e, full = false) {
 }
 
 // Значок объекта: цветной кружок и символ внутри.
-function drawObjectIcon(ctx, e, sx, sy, dense, dim = false) {
-  const info = objectInfo(e);
+function drawObjectIcon(ctx, e, sx, sy, dense, dim = false, kind = null) {
+  const info = kind ? { name: kind.word, icon: kind.icon, color: kind.color } : objectInfo(e);
   const r = dense ? 6 : 8;
   ctx.globalAlpha *= dim ? 0.5 : 1;
   ctx.fillStyle = "rgba(10,12,16,0.75)"; ctx.strokeStyle = info.color; ctx.lineWidth = 2;
@@ -935,26 +976,29 @@ class RadarView {
   }
 
   drawMob(ctx, e, sx, sy) {
-    const o = this.opts, m = e.mob;
-    if (/MIST|WISP/.test(`${(m && m.id) || ""} ${e.name || ""}`.toUpperCase())) {
-      // Шар Мглы приходит как моб — значок и подпись Мглы.
-      const info = drawObjectIcon(ctx, { name: "MIST", event: "" }, sx, sy, this.dense);
-      if (o.labels && !this.dense) this.queueLabel("Мгла", sx, sy - 12, info.color, 1, e.dist);
-      return;
-    }
-    if (m && m.res && o.livingasres) {   // живой ресурс (шкура с мобов и т. п.) — значком ресурса
+    const o = this.opts, m = e.mob, kind = mobKind(e), k = MOB_KINDS[kind];
+    if (m && m.res && o.livingasres && (kind === "mob" || kind === "harmless")) {
+      // живой ресурс (шкура с мобов и т. п.) — значком ресурса
       drawResourceIcon(ctx, { res: m.res, tier: m.tier, enchant: e.enchant || 0 }, sx, sy, this.dense ? 20 : 30);
       ctx.strokeStyle = RADAR_COLOR.mob; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(sx, sy, this.dense ? 9 : 13, 0, 2 * Math.PI); ctx.stroke();
+    } else if (k.icon) {
+      // Особые (босс, элита, кристалл, сундук, вход в Мглу) — значком в кружке.
+      drawObjectIcon(ctx, { name: "", event: "" }, sx, sy, this.dense, false, k);
     } else {
-      const boss = m && m.boss;
-      ctx.fillStyle = boss ? "#ff7a1a" : RADAR_COLOR.mob; ctx.strokeStyle = "rgba(0,0,0,0.75)"; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(sx, sy, boss ? 6 : 4, 0, 2 * Math.PI); ctx.stroke(); ctx.fill();
-      if (boss) { ctx.strokeStyle = "#ffd27a"; ctx.beginPath(); ctx.arc(sx, sy, 9, 0, 2 * Math.PI); ctx.stroke(); }
+      // Обычный моб — точка цвета тира (видно, какой тир, без подписи).
+      ctx.fillStyle = (m && TIER_COLOR[m.tier]) || k.color; ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(sx, sy, 4, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+      if (e.enchant) {
+        ctx.strokeStyle = ENCHANT_COLOR[e.enchant] || "#fff"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(sx, sy, 6.5, 0, 2 * Math.PI); ctx.stroke();
+      }
     }
-    if (o.moblabels && !this.dense) {
-      if (e.max_health && e.health != null) this.drawHp(ctx, e, sx, sy + 8, 16);
-      if (o.labels) this.queueLabel(mobTitle(e), sx, sy - 9, undefined, 2, e.dist);
+    const show = kind === "wisp" || o.moblabels;     // вход в Мглу подписан всегда
+    if (show && !this.dense) {
+      if (kind !== "wisp" && e.max_health && e.health != null && e.health < e.max_health) this.drawHp(ctx, e, sx, sy + 9, 16);
+      if (o.labels) this.queueLabel(mobTitle(e), sx, sy - (k.icon ? 12 : 8), k.icon ? k.color : "#f1f1f1",
+        kind === "wisp" ? 1 : 2, e.dist);
     }
   }
 

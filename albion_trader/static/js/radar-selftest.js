@@ -76,7 +76,13 @@ rtest("подписи: игрок, ресурс, моб (обрезка длин
   eq(radarLabel({ kind: "resource", name: "руда", tier: 6, enchant: 2, size: 4 }), "руда T6.2 ×4");
   eq(radarLabel({ kind: "resource", name: "руда", tier: null, enchant: 0, size: null }), "руда T?");
   const long = { kind: "mob", enchant: 1, mob: { tier: 7, name: "a".repeat(40), category_ru: "босс" } };
-  eq(radarLabel(long), `T7 ${"a".repeat(13)}… .1`);
+  eq(radarLabel(long), "T7.1");
+  eq(radarLabel({ kind: "mob", enchant: 0, mob: { tier: 8, name: "x", category: "boss" } }), "Босс T8");
+  eq(radarLabel({ kind: "mob", enchant: 0, mob: { tier: 6, name: "x", category: "elite" } }), "Элита T6");
+  eq(radarLabel({ kind: "mob", enchant: 0, mob: { tier: 7, id: "T7_MOB_MISTS_SPIDER", name: "mists spider", category: "standard" } }), "T7");
+  eq(radarLabel({ kind: "mob", enchant: 0, mob: { tier: 4, id: "MOB_MISTS_WISP_ENTRANCE", name: "wisp", category: "standard" } }), "Мгла");
+  eq(radarLabel({ kind: "mob", enchant: 0, mob: { tier: 6, id: "MOB_UNIQUE_POWERCRYSTAL_TERRITORY", name: "c", category: "standard" } }), "Кристалл T6");
+  eq(radarLabel({ kind: "loot", name: "TREASURE_MISTS_SOLO", event: "new_loot_chest" }), "Сундук");
   eq(radarLabel(long, true), `T7 ${"a".repeat(40)} .1 (босс)`);
   eq(radarLabel({ kind: "mob", type_id: 9, name: "", enchant: 0 }), "моб #9");
   eq(radarLabel({ kind: "loot", name: "сундук", event: "new_loot_chest", rarity: 3, opened: true }), "Сундук зол. ✓");
