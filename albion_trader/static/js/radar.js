@@ -1087,6 +1087,11 @@ class RadarView {
     const codes = this.data.codes || [];
     if (n.player || codes.length < 15) return "";
     const nc = codes.find((c) => c.name === "new_character");
+    const changed = (this.data.codes_changed || {})["event:new_character"];
+    if (changed) {
+      return `<br><span class="bad">номер события игроков изменён: ${changed[0]} вместо ${changed[1]} — `
+        + "«Коды событий» → «Вернуть номера по умолчанию»</span>";
+    }
     return nc && nc.count
       ? `<br><span class="bad">событие игроков (код ${nc.code}) пришло ${nc.count} раз, но игроков нет — пришлите «Коды событий»</span>`
       : `<br><span class="bad">событий об игроках нет — номер события на этом сервере другой? «Коды событий» внизу</span>`;

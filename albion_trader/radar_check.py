@@ -209,6 +209,11 @@ def check_live(r: Report, url: str) -> bool:
                     f"Фон зоны не готов: {m.get('error') or m.get('status')}", WARN)
         except OSError as e:
             r.add(WARN, f"/api/zonemap не ответил: {e}")
+    changed = d.get("codes_changed") or {}
+    if changed:
+        r.add(WARN, "Номера изменены относительно встроенных (data/opcodes.json): "
+                    + ", ".join(f"{k} {v[0]} (было {v[1]})" for k, v in sorted(changed.items()))
+                    + " — если радар что-то перестал видеть, «Вернуть номера по умолчанию» на вкладке «Радар»")
     nc = next((c for c in codes if c.get("name") == "new_character"), None)
     r.add(INFO, f"Событие игроков (new_character): код {nc['code']}, пришло {nc['count']} раз — {nc.get('shape')}"
           if nc else "Событие игроков (new_character) не приходило")

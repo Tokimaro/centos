@@ -659,6 +659,7 @@ class App:
         if any(e["kind"] == "mob" for e in snap["entities"]) and self.config.capture:
             self.mobs.download_async()      # справочник мобов — при первой встрече с мобом
         snap["autocodes"] = bool(self.settings().get("radar_autocodes"))
+        snap["codes_changed"] = self.codes_changed()
         snap["bot"] = None if replay else self.bots.overlay()
         if snap["autocodes"] and snap["suggestions"]:
             self._apply_codes({s["name"]: s["code"] for s in snap["suggestions"]})
@@ -679,9 +680,39 @@ class App:
         log.info("Радар: номера событий %s записаны в %s", events, path)
         return data["events"]
 
+    def codes_changed(self) -> dict:
+        """Номера событий и операций, отличные от встроенных (из data/opcodes.json)."""
+        from .capture.albion import DEFAULT_EVENTS, DEFAULT_OPCODES
+        st = self.albion
+        out = {f"event:{k}": [v, DEFAULT_EVENTS[k]] for k, v in st.ev.items()
+               if k in DEFAULT_EVENTS and v != DEFAULT_EVENTS[k]}
+        detected = st.stats.get("move_op_detected")
+        out.update({f"op:{k}": [v, DEFAULT_OPCODES[k]] for k, v in st.op.items()
+                    if k in DEFAULT_OPCODES and v != DEFAULT_OPCODES[k] and not (k == "move" and v == detected)})
+        return out
+
+    def reset_codes(self) -> str:
+        """Вернуть встроенные номера: data/opcodes.json → opcodes.json.bak, автоисправление выкл."""
+        path = Path(self.config.opcodes_path or Path(self.config.db_path).with_name("opcodes.json"))
+        backup = ""
+        if path.exists():
+            bak = path.with_suffix(".json.bak")
+            path.replace(bak)
+            backup = str(bak)
+        with self.write_lock, self.conn() as conn:
+            db.set_settings(conn, {"radar_autocodes": False})
+        with self.albion.lock:
+            self.albion.set_opcodes(None)
+        log.info("Радар: номера событий и операций — встроенные (копия: %s)", backup or "файла не было")
+        return backup
+
     def api_radar_codes_post(self, _q, body) -> dict:
         body = body if isinstance(body, dict) else {}
         out = {}
+        if body.get("reset"):
+            out["backup"] = self.reset_codes()
+            out["reset"] = True
+            return out
         if isinstance(body.get("apply"), dict):
             known = set(self.albion.ev)
             events = {k: int(v) for k, v in body["apply"].items() if k in known and str(v).lstrip("-").isdigit()}

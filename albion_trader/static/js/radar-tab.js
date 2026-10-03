@@ -263,13 +263,25 @@ App.tab({
 
   renderCodes() {
     const d = this.view.data, codes = d.codes || [], sugg = d.suggestions || [];
-    $("#radar-suggest").innerHTML = `<label class="inline"><input type="checkbox" id="radar-auto"${d.autocodes ? " checked" : ""}>
+    const changed = Object.entries(d.codes_changed || {});
+    const reset = changed.length
+      ? `<div class="bad">Номера изменены относительно встроенных (data\\opcodes.json): ${changed.map(([k, [cur, def]]) =>
+          `${esc(k.replace(/^(event|op):/, ""))} ${cur} (было ${def})`).join(", ")}.
+          <button type="button" id="radar-reset-codes">Вернуть номера по умолчанию</button></div>`
+      : "";
+    $("#radar-suggest").innerHTML = reset + `<label class="inline"><input type="checkbox" id="radar-auto"${d.autocodes ? " checked" : ""}>
         Исправлять номера событий автоматически</label>`
       + (sugg.length ? `<p>Похоже, номера событий на этом сервере другие:</p><ul>${sugg.map((s) =>
         `<li><b>${esc(s.name)}</b>: приходит под кодом <b>${s.code}</b> (${s.samples} раз, ${Math.round(s.share * 100)}%),
           настроен ${s.current ?? "—"} <button type="button" data-apply="${esc(s.name)}" data-code="${s.code}">Применить</button></li>`).join("")}</ul>`
         : '<p class="muted">Расхождений в номерах событий не найдено.</p>');
     $("#radar-auto").addEventListener("change", (ev) => apiPost("/api/radar/codes", { auto: ev.target.checked }));
+    const resetBtn = $("#radar-reset-codes");
+    if (resetBtn) resetBtn.addEventListener("click", async () => {
+      if (!confirm("Вернуть встроенные номера событий и операций? Файл data\\opcodes.json сохранится как opcodes.json.bak.")) return;
+      await apiPost("/api/radar/codes", { reset: true });
+      this.poll();
+    });
     $$("[data-apply]", $("#radar-suggest")).forEach((b) => b.addEventListener("click", async () => {
       await apiPost("/api/radar/codes", { apply: { [b.dataset.apply]: Number(b.dataset.code) } });
       this.poll();

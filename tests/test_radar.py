@@ -94,6 +94,21 @@ class RadarTest(unittest.TestCase):
         self.assertEqual((row["name"], row["positions"]), ("move", 10))
         self.assertIn("1:xy", row["shape"])
 
+    def test_changed_codes_shown_and_reset(self):
+        nc = self.ev["new_character"]
+        self.app.api_radar_codes_post({}, {"apply": {"new_character": nc + 5}})   # неверный номер
+        self.feed(pb.packet(pb.response(2, {0: 1, 2: "Me", 8: "3004", 9: [10.0, 10.0]})),
+                  event(nc, {0: 5, 1: "Bob", 12: [13.0, 14.0]}))
+        r = self.radar()
+        self.assertEqual(r["codes_changed"], {"event:new_character": [nc + 5, nc]})
+        self.assertFalse([e for e in r["entities"] if e["kind"] == "player"])    # игроки пропали
+        out = self.app.api_radar_codes_post({}, {"reset": True})
+        self.assertTrue(out["reset"] and out["backup"].endswith(".bak"))
+        self.assertEqual(self.radar()["codes_changed"], {})
+        self.feed(event(nc, {0: 6, 1: "Ann", 12: [3.0, 4.0]}))
+        self.assertEqual([e["name"] for e in self.radar()["entities"] if e["kind"] == "player"], ["Ann"])
+        self.assertEqual(self.app.api_radar_codes_post({}, {"reset": True})["backup"], "")   # файла уже нет
+
     def test_known_move_op_disables_detection(self):
         self.feed(pb.packet(pb.request(21, {1: [11.0, 12.0]})))
         for i in range(10):
